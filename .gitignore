@@ -1,0 +1,23 @@
+# Secrets
+.streamlit/secrets.toml
+
+# Local data cache and large artifacts
+/tmp/
+/tmp/**
+/tmp/matrix_cache/**
+**/__pycache__/**
+
+# Project data directory (do not commit large files)
+data/*
+!data/.gitkeep
+
+# Common large file types
+*.bin
+*.pkl
+*.npy
+*.npz
+*.jsonl
+*.json
+.DS_Store
+secrets.toml
+.venv/

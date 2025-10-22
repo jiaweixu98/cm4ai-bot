@@ -1,0 +1,12 @@
+streamlit
+openai
+torch
+faiss-cpu
+adapters
+transformers
+streamlit_agraph
+boto3
+numpy
+networkx
+huggingface_hub
+
