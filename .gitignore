@@ -11,7 +11,7 @@ node_modules/
 .venv/
 
 # Local cache & model downloads (auto-generated at runtime)
-/tmp/
+**/tmp/
 **/__pycache__/
 
 # Project data directory (large files, not committed)
