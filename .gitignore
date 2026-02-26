@@ -1,23 +1,29 @@
-# Secrets
+# Secrets (never commit credentials)
 .streamlit/secrets.toml
+backend/.env
+frontend/.env.local
 
-# Local data cache and large artifacts
+# Node
+node_modules/
+.next/
+
+# Virtual environment
+.venv/
+
+# Local cache & model downloads (auto-generated at runtime)
 /tmp/
-/tmp/**
-/tmp/matrix_cache/**
-**/__pycache__/**
+**/__pycache__/
 
-# Project data directory (do not commit large files)
+# Project data directory (large files, not committed)
 data/*
 !data/.gitkeep
 
-# Common large file types
+# Large binary/model file types
 *.bin
 *.pkl
 *.npy
 *.npz
 *.jsonl
-*.json
+
+# macOS
 .DS_Store
-secrets.toml
-.venv/

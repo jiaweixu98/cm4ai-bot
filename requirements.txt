@@ -1,12 +1,13 @@
 streamlit
 openai
-torch
+# Pinned for Apple Silicon stability (torch 2.10 causes MPS segfault)
+torch==2.5.1
 faiss-cpu
-adapters
-transformers
+# Keep adapters + transformers in sync (adapters 1.1.1 requires transformers 4.48.x)
+adapters==1.1.1
+transformers==4.48.3
 streamlit_agraph
 boto3
 numpy
 networkx
 huggingface_hub
-

@@ -1,4 +1,5 @@
 import os, json, pickle
+import torch  # explicit import to force CPU below
 import streamlit as st
 import numpy as np
 import boto3
@@ -449,6 +450,13 @@ def download_directory_from_s3(bucket, s3_prefix, local_directory, s3_client):
     except Exception:
         return False
 
+def _model_to_cpu(tok, mdl):
+    """Force model onto CPU and switch to eval mode (avoids MPS segfault on Apple Silicon)."""
+    if mdl is not None:
+        mdl = mdl.to('cpu').eval()
+    return tok, mdl
+
+
 @st.cache_resource
 def load_specter_model():
     try:
@@ -465,7 +473,7 @@ def load_specter_model():
             mdl = AutoAdapterModel.from_pretrained(base_path, local_files_only=True)
             if os.path.exists(adapter_config):
                 mdl.load_adapter(adapter_path, load_as="adhoc_query", set_active=True)
-            return tok, mdl
+            return _model_to_cpu(tok, mdl)
 
         # 2) S3
         if s3_enabled():
@@ -478,7 +486,7 @@ def load_specter_model():
                 mdl = AutoAdapterModel.from_pretrained(base_path, local_files_only=True)
                 if os.path.exists(adapter_config):
                     mdl.load_adapter(adapter_path, load_as="adhoc_query", set_active=True)
-                return tok, mdl
+                return _model_to_cpu(tok, mdl)
 
         # 3) HuggingFace fallback
         os.makedirs(base_path, exist_ok=True)
@@ -516,7 +524,7 @@ def load_specter_model():
                     mdl.load_adapter(adapter_path, load_as="adhoc_query", set_active=True)
             except Exception:
                 pass
-        return tok, mdl
+        return _model_to_cpu(tok, mdl)
     except Exception:
         return None, None
 
