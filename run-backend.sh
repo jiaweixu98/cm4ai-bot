@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# Run the FastAPI backend locally using uv
+# Run FastAPI backend the same way as systemd.
 set -e
 cd "$(dirname "$0")/backend"
 
-# Create venv + install deps if needed
-if [ ! -d ".venv" ]; then
-  uv venv --python 3.10
-  uv pip install -r requirements.txt
+# Create venv + install deps if needed (first-time bootstrap)
+if [ ! -x ".venv/bin/python" ]; then
+  python3 -m venv .venv
+  .venv/bin/pip install --upgrade pip setuptools wheel
+  .venv/bin/pip install -r requirements.txt
 fi
 
-export PYTORCH_ENABLE_MPS_FALLBACK=1
+# Load environment variables if backend/.env exists
+if [ -f ".env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
+
 export TOKENIZERS_PARALLELISM=false
 
-echo "Starting backend (without auto-reload to prevent PyTorch MPS segfaults on macOS)..."
-uv run uvicorn main:app --host 0.0.0.0 --port 8000
+echo "Starting backend on 127.0.0.1:8000 ..."
+exec .venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000

@@ -2,13 +2,12 @@
 fastapi
 uvicorn[standard]
 openai
-torch==2.5.1+cpu
+torch==2.5.1
 faiss-cpu
 adapters==1.1.1
 transformers==4.48.3
 numpy
 networkx
-boto3
 huggingface_hub
 python-dotenv
 sse-starlette

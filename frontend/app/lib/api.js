@@ -1,6 +1,13 @@
-// In production, Vercel rewrites proxy /api/* to the backend, so we use "" (relative path).
-// In local dev, we call the backend directly at localhost:8000.
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Prefer explicit API URL when provided.
+// Otherwise: same-origin in production (for nginx /api reverse proxy),
+// and localhost backend in local development.
+const rawApiBase = process.env.NEXT_PUBLIC_API_URL;
+const API_BASE =
+  rawApiBase !== undefined
+    ? rawApiBase.replace(/\/$/, "")
+    : process.env.NODE_ENV === "production"
+      ? ""
+      : "http://localhost:8000";
 
 export async function fetchAuthor(aid) {
   const res = await fetch(`${API_BASE}/api/author/${aid}`);

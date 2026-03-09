@@ -1,13 +1,12 @@
-"""Data loading utilities — Streamlit-free port for FastAPI backend.
+"""Data loading utilities for FastAPI backend.
 
-All caching uses module-level singletons. Configuration via environment variables.
+Loads data from local paths and cache only (no S3).
 """
 
 import os
 import json
 import pickle
 import logging
-from functools import lru_cache
 
 import numpy as np
 import networkx as nx
@@ -24,98 +23,15 @@ LOCAL_DATA_DIR = os.environ.get(
     os.path.join(_PROJECT_ROOT, "data"),
 )
 
-S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "streamlit-teaming")
-S3_REGION = os.environ.get("S3_REGION", "us-east-2")
-S3_DATA_PREFIX = os.environ.get("S3_DATA_PREFIX", "")
-S3_BASE_MODEL_PREFIX = os.environ.get("S3_BASE_MODEL_PREFIX", "")
-S3_ADAPTER_PREFIX = os.environ.get("S3_ADAPTER_PREFIX", "")
 
-# ---------- S3 helpers ----------
-
-_s3_client = None
-
-
-def _get_s3_client():
-    global _s3_client
-    if _s3_client is not None:
-        return _s3_client
-    import boto3
-    from botocore import UNSIGNED
-    from botocore.client import Config
-
-    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
-    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-    if access_key and secret_key:
-        _s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=S3_REGION,
-        )
-    else:
-        _s3_client = boto3.client(
-            "s3", config=Config(signature_version=UNSIGNED), region_name=S3_REGION
-        )
-    return _s3_client
-
-
-def _s3_enabled() -> bool:
-    return bool(S3_BUCKET_NAME)
-
-
-def _generate_prefix_variants(prefix: str) -> list[str]:
-    try:
-        p = (prefix or "").strip()
-        variants = []
-        variants.append(p if p.endswith("/") else (p + "/" if p else ""))
-        if p:
-            variants.append(p.rstrip("/"))
-        if "/" in p.strip("/"):
-            parent = p.strip("/").split("/")[:-1]
-            variants.append(("/".join(parent) + "/") if parent else "")
-        variants.append("")
-        seen: set[str] = set()
-        return [v for v in variants if not (v in seen or seen.add(v))]  # type: ignore[func-returns-value]
-    except Exception:
-        return [prefix or "", ""]
-
-
-def _s3_try_download_first(s3_client, bucket: str, candidate_keys: list[str], dest_path: str):
-    for key in candidate_keys:
-        if not key:
-            continue
-        try:
-            s3_client.download_file(bucket, key, dest_path)
-            return key
-        except Exception:
-            continue
-    return None
-
-
-def _load_json_data(filename: str, s3_key: str) -> dict:
+def _load_json_data(filename: str, source_filename: str) -> dict:
     cache_path = f"{CACHE_DIR}/{filename}"
-    local_path = os.path.join(LOCAL_DATA_DIR, s3_key.split("/")[-1])
+    local_path = os.path.join(LOCAL_DATA_DIR, source_filename)
     for candidate in [local_path, cache_path]:
         if os.path.exists(candidate):
             with open(candidate, "r") as f:
                 return json.load(f)
-    if not _s3_enabled():
-        logger.warning("Missing local %s and S3 is not configured.", filename)
-        return {}
-    s3 = _get_s3_client()
-    base = os.path.basename(s3_key)
-    variants = _generate_prefix_variants(S3_DATA_PREFIX)
-    candidate_keys = [s3_key]
-    for pv in variants:
-        candidate_keys.append((pv if pv.endswith("/") else pv + "/") + base if pv else base)
-    seen: set[str] = set()
-    candidate_keys = [k for k in candidate_keys if not (k in seen or seen.add(k))]  # type: ignore[func-returns-value]
-    logger.info("Downloading %s from S3…", filename)
-    used_key = _s3_try_download_first(s3, S3_BUCKET_NAME, candidate_keys, cache_path)
-    if used_key:
-        with open(cache_path, "r") as f:
-            return json.load(f)
-    logger.error("Unable to fetch %s from S3 bucket '%s'", filename, S3_BUCKET_NAME)
+    logger.warning("Missing local %s and cache %s.", local_path, cache_path)
     return {}
 
 
@@ -143,13 +59,8 @@ def load_author_nodes() -> dict:
             with open(candidate, "r") as f:
                 _author_nodes = json.load(f)
                 return _author_nodes
-    if not _s3_enabled():
-        logger.warning("Missing local author metadata and S3 is not configured.")
-        _author_nodes = {}
-        return _author_nodes
-    _author_nodes = _load_json_data(
-        "author_nodes.json", f"{S3_DATA_PREFIX}updated_author_nodes_with_papers.json"
-    )
+    logger.warning("Missing local author metadata. Returning empty dict.")
+    _author_nodes = _load_json_data("author_nodes.json", "updated_author_nodes_with_papers.json")
     return _author_nodes
 
 
@@ -183,10 +94,8 @@ def _load_knowledge_graph_raw() -> dict:
     if os.path.exists(local_graph):
         with open(local_graph, "r") as f:
             return json.load(f)
-    if not _s3_enabled():
-        logger.warning("Missing local knowledge graph and S3 is not configured.")
-        return {}
-    return _load_json_data("knowledge_graph.json", f"{S3_DATA_PREFIX}author_knowledge_graph_2024.json")
+    logger.info("Local knowledge graph not found. Falling back to cache.")
+    return _load_json_data("knowledge_graph.json", "author_knowledge_graph_2024.json")
 
 
 def load_knowledge_graph_nx() -> nx.Graph:
@@ -306,69 +215,11 @@ def load_embeddings_and_index():
     except Exception as e:
         logger.warning("Local embeddings build failed: %s", e)
 
-    # 3) S3
-    if _s3_enabled():
-        s3 = _get_s3_client()
-        variants = _generate_prefix_variants(S3_DATA_PREFIX)
-
-        def _build_keys(basename):
-            keys = [f"{S3_DATA_PREFIX}{basename}"]
-            for pv in variants:
-                keys.append((pv if pv.endswith("/") else pv + "/") + basename if pv else basename)
-            seen: set[str] = set()
-            return [k for k in keys if k and not (k in seen or seen.add(k))]  # type: ignore[func-returns-value]
-
-        ids_keys = _build_keys("author_ids.pkl")
-        idx_keys = _build_keys("faiss_index.bin")
-        used_ids = _s3_try_download_first(s3, S3_BUCKET_NAME, ids_keys, ids_path)
-        used_idx = _s3_try_download_first(s3, S3_BUCKET_NAME, idx_keys, index_path)
-        if used_ids and used_idx:
-            _faiss_index = faiss.read_index(index_path)
-            with open(ids_path, "rb") as f:
-                _author_ids = pickle.load(f)
-            return _author_ids, _faiss_index
-
-        # Build from S3 embeddings
-        emb_keys = _build_keys("author_embeddings.pkl")
-        emb_cache = f"{CACHE_DIR}/author_embeddings.pkl"
-        used_emb = _s3_try_download_first(s3, S3_BUCKET_NAME, emb_keys, emb_cache)
-        if used_emb:
-            with open(emb_cache, "rb") as f:
-                loaded = pickle.load(f)
-            possible_ids_files = [f"{CACHE_DIR}/author_ids.pkl", f"{CACHE_DIR}/author_ids.npy"]
-            aids, embs = _extract_ids_and_embs(loaded, possible_ids_files)
-            dim = embs.shape[1]
-            index = faiss.IndexFlatL2(dim)
-            index.add(embs)
-            faiss.write_index(index, index_path)
-            with open(ids_path, "wb") as f:
-                pickle.dump(aids, f)
-            _author_ids, _faiss_index = aids, index
-            return _author_ids, _faiss_index
-
-    logger.error("No embeddings found locally or on S3.")
+    logger.error("No embeddings found locally.")
     return [], None
 
 
 # ---------- SPECTER model ----------
-
-def _download_directory_from_s3(bucket, s3_prefix, local_directory, s3_client):
-    try:
-        paginator = s3_client.get_paginator("list_objects_v2")
-        pages = paginator.paginate(Bucket=bucket, Prefix=s3_prefix)
-        for page in pages:
-            if "Contents" in page:
-                for obj in page["Contents"]:
-                    s3_key = obj["Key"]
-                    if s3_key.endswith("/"):
-                        continue
-                    relative_path = os.path.relpath(s3_key, s3_prefix)
-                    local_path = os.path.join(local_directory, relative_path)
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    s3_client.download_file(bucket, s3_key, local_path)
-        return True
-    except Exception:
-        return False
 
 
 def load_specter_model():
@@ -402,21 +253,7 @@ def load_specter_model():
             logger.info("  SPECTER2 loaded in %.1fs ✅", _time.time() - t0)
             return _tokenizer, _model
 
-        # 2) S3
-        if _s3_enabled():
-            s3 = _get_s3_client()
-            ok = _download_directory_from_s3(S3_BUCKET_NAME, S3_BASE_MODEL_PREFIX, base_path, s3)
-            if ok and os.path.exists(base_config):
-                if not os.path.exists(adapter_config):
-                    _download_directory_from_s3(S3_BUCKET_NAME, S3_ADAPTER_PREFIX, adapter_path, s3)
-                tok = AutoTokenizer.from_pretrained(base_path, local_files_only=True)
-                mdl = AutoAdapterModel.from_pretrained(base_path, local_files_only=True)
-                if os.path.exists(adapter_config):
-                    mdl.load_adapter(adapter_path, load_as="adhoc_query", set_active=True)
-                _tokenizer, _model = tok, mdl.to("cpu").eval()
-                return _tokenizer, _model
-
-        # 3) HuggingFace
+        # 2) HuggingFace
         os.makedirs(base_path, exist_ok=True)
         try:
             tok = AutoTokenizer.from_pretrained("allenai/specter2", cache_dir=base_path)

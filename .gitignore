@@ -1,22 +1,21 @@
 # Secrets (never commit credentials)
-.streamlit/secrets.toml
 backend/.env
 frontend/.env.local
+.env
 
 # Node
 node_modules/
 .next/
+npm-debug.log*
 
 # Virtual environment
 .venv/
+backend/.venv/
 
 # Local cache & model downloads (auto-generated at runtime)
 **/tmp/
 **/__pycache__/
-
-# Project data directory (large files, not committed)
-data/*
-!data/.gitkeep
+*.log
 
 # Large binary/model file types
 *.bin
