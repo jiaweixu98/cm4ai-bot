@@ -22,6 +22,7 @@ export default function Home() {
   // ─── URL params ───
   const [aid, setAid] = useState("6052561");
   const [authorInfo, setAuthorInfo] = useState(null);
+  const [returnTo, setReturnTo] = useState("/");
 
   // ─── Chat state ───
   const [messages, setMessages] = useState([]);
@@ -44,6 +45,17 @@ export default function Home() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const aidParam = params.get("aid") || "6052561";
+    const returnToParam = params.get("return_to");
+    if (returnToParam) {
+      try {
+        const parsed = new URL(returnToParam, window.location.origin);
+        if (parsed.origin === window.location.origin) {
+          setReturnTo(`${parsed.pathname}${parsed.search}${parsed.hash}`);
+        }
+      } catch {
+        // Keep default "/" when return_to is invalid.
+      }
+    }
     setAid(aidParam);
 
     fetchAuthor(aidParam)
@@ -300,6 +312,23 @@ export default function Home() {
           <div className="app-title">🔬 CM4AI Teaming Assistant</div>
           <div className="app-tagline">Tell me your research needs, I'll find the right collaborators for you.</div>
         </div>
+        <div style={{ margin: "10px 0 2px" }}>
+          <a
+            href={returnTo}
+            style={{
+              display: "inline-block",
+              background: "#1f2937",
+              color: "#fff",
+              textDecoration: "none",
+              padding: "8px 12px",
+              borderRadius: "8px",
+              fontWeight: 600,
+              fontSize: "14px",
+            }}
+          >
+            ← Back to Knowledge Graph
+          </a>
+        </div>
         <div className="panel-header">
           <h1>
             {authorInfo
@@ -307,8 +336,8 @@ export default function Home() {
               : "Welcome"}
           </h1>
           <div className="subtitle">
-            <a href="https://cm4aikg.vercel.app/" target="_blank" rel="noopener noreferrer">
-              🌎 Explore CM4AI Knowledge Graph
+            <a href={returnTo}>
+              🌎 Open Knowledge Graph
             </a>
           </div>
         </div>
