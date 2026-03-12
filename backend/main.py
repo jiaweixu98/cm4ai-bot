@@ -4,6 +4,7 @@ Replicates the full Streamlit chat flow as REST + SSE endpoints.
 """
 
 import os
+import asyncio
 import torch  # IMPORT FIRST to prevent macOS segfaults with faiss/asyncio
 import re
 import json
@@ -45,6 +46,25 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 REPORT_OUTPUT_DIR = Path(
     (os.environ.get("REPORT_OUTPUT_DIR", "").strip() or "/home/ubuntu/bridge2aikg/work/data")
 )
+MAX_ACTIVE_LLM_REQUESTS = max(1, int(os.environ.get("MAX_ACTIVE_LLM_REQUESTS", "3")))
+LLM_SLOT_WAIT_SECONDS = max(0.1, float(os.environ.get("LLM_SLOT_WAIT_SECONDS", "1.5")))
+_llm_request_slots = asyncio.Semaphore(MAX_ACTIVE_LLM_REQUESTS)
+
+
+@asynccontextmanager
+async def llm_request_slot(endpoint_name: str):
+    try:
+        await asyncio.wait_for(_llm_request_slots.acquire(), timeout=LLM_SLOT_WAIT_SECONDS)
+    except TimeoutError:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Server is busy handling other requests ({endpoint_name}); please retry shortly.",
+        )
+
+    try:
+        yield
+    finally:
+        _llm_request_slots.release()
 
 # ---------- models ----------
 MODEL_NAME_EXPERTISE = "gpt-4.1"
@@ -633,28 +653,29 @@ class GenerateQueryResponse(BaseModel):
 
 @app.post("/api/generate-query")
 async def generate_query(req: GenerateQueryRequest):
-    user_bg = _get_user_background(req.aid)
-    if req.current_query:
-        improved = (
-            f"Original query: {req.current_query}\n"
-            f"User feedback (Most important, follow it as much as possible): {req.user_input}"
-        )
-        query, justification = _generate_query(improved, user_bg, req.past_queries, req.prior_inputs)
-    else:
-        query, justification = _generate_query(req.user_input, user_bg, req.past_queries, req.prior_inputs)
+    async with llm_request_slot("generate-query"):
+        user_bg = _get_user_background(req.aid)
+        if req.current_query:
+            improved = (
+                f"Original query: {req.current_query}\n"
+                f"User feedback (Most important, follow it as much as possible): {req.user_input}"
+            )
+            query, justification = _generate_query(improved, user_bg, req.past_queries, req.prior_inputs)
+        else:
+            query, justification = _generate_query(req.user_input, user_bg, req.past_queries, req.prior_inputs)
 
-    # Deduplicate check
-    existing_norm = {normalize_query_text(q) for q in req.past_queries}
-    attempts = 0
-    while normalize_query_text(query) in existing_norm and attempts < 2:
-        reinforce = (
-            (f"Original query: {req.current_query}\n" if req.current_query else "")
-            + f"User feedback: {req.user_input}\nAvoid repeating any previous queries."
-        )
-        query, justification = _generate_query(reinforce, user_bg, req.past_queries, req.prior_inputs)
-        attempts += 1
+        # Deduplicate check
+        existing_norm = {normalize_query_text(q) for q in req.past_queries}
+        attempts = 0
+        while normalize_query_text(query) in existing_norm and attempts < 2:
+            reinforce = (
+                (f"Original query: {req.current_query}\n" if req.current_query else "")
+                + f"User feedback: {req.user_input}\nAvoid repeating any previous queries."
+            )
+            query, justification = _generate_query(reinforce, user_bg, req.past_queries, req.prior_inputs)
+            attempts += 1
 
-    return GenerateQueryResponse(query=query, justification=justification)
+        return GenerateQueryResponse(query=query, justification=justification)
 
 
 class ConfirmRequest(BaseModel):
@@ -689,40 +710,41 @@ class ChatRequest(BaseModel):
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     """Unified chat endpoint with 3-way intent classification."""
-    user_bg = _get_user_background(req.aid)
-    history_dicts = [{"role": m.role, "content": m.content} for m in req.conversation_history]
+    async with llm_request_slot("chat"):
+        user_bg = _get_user_background(req.aid)
+        history_dicts = [{"role": m.role, "content": m.content} for m in req.conversation_history]
 
-    result = _classify_and_respond(
-        user_input=req.user_input,
-        user_background=user_bg,
-        conversation_history=history_dicts,
-        current_query=req.current_query,
-        past_queries=req.past_queries,
-        prior_inputs=req.prior_inputs,
-        search_results=req.search_results or None,
-        search_phase=req.search_phase,
-    )
+        result = _classify_and_respond(
+            user_input=req.user_input,
+            user_background=user_bg,
+            conversation_history=history_dicts,
+            current_query=req.current_query,
+            past_queries=req.past_queries,
+            prior_inputs=req.prior_inputs,
+            search_results=req.search_results or None,
+            search_phase=req.search_phase,
+        )
 
-    # Dedup check for search queries
-    if result["action"] == "search":
-        existing_norm = {normalize_query_text(q) for q in req.past_queries}
-        attempts = 0
-        while normalize_query_text(result["query"]) in existing_norm and attempts < 2:
-            result = _classify_and_respond(
-                user_input=req.user_input + "\nAvoid repeating any previous queries.",
-                user_background=user_bg,
-                conversation_history=history_dicts,
-                current_query=req.current_query,
-                past_queries=req.past_queries,
-                prior_inputs=req.prior_inputs,
-                search_results=req.search_results or None,
-                search_phase=req.search_phase,
-            )
-            if result["action"] != "search":
-                break
-            attempts += 1
+        # Dedup check for search queries
+        if result["action"] == "search":
+            existing_norm = {normalize_query_text(q) for q in req.past_queries}
+            attempts = 0
+            while normalize_query_text(result["query"]) in existing_norm and attempts < 2:
+                result = _classify_and_respond(
+                    user_input=req.user_input + "\nAvoid repeating any previous queries.",
+                    user_background=user_bg,
+                    conversation_history=history_dicts,
+                    current_query=req.current_query,
+                    past_queries=req.past_queries,
+                    prior_inputs=req.prior_inputs,
+                    search_results=req.search_results or None,
+                    search_phase=req.search_phase,
+                )
+                if result["action"] != "search":
+                    break
+                attempts += 1
 
-    return result
+        return result
 
 
 class SearchRequest(BaseModel):
@@ -760,63 +782,70 @@ async def rerank(req: RerankRequest):
     user_bg = _get_user_background(req.aid)
     candidate_tuples = [(c["author_id"], c["retrieval_score"]) for c in req.candidates]
 
+    try:
+        await asyncio.wait_for(_llm_request_slots.acquire(), timeout=LLM_SLOT_WAIT_SECONDS)
+    except TimeoutError:
+        raise HTTPException(status_code=429, detail="Server is busy handling rerank requests; please retry shortly.")
+
     async def event_generator():
-        MAX_CONCURRENT = 5
-        BATCH_SIZE = 2
-        batches = [
-            candidate_tuples[i : i + BATCH_SIZE]
-            for i in range(0, len(candidate_tuples), BATCH_SIZE)
-        ]
-        total = len(batches)
-        done = 0
-        all_results: list[dict] = []
+        try:
+            MAX_CONCURRENT = 5
+            BATCH_SIZE = 2
+            batches = [
+                candidate_tuples[i : i + BATCH_SIZE]
+                for i in range(0, len(candidate_tuples), BATCH_SIZE)
+            ]
+            total = len(batches)
+            done = 0
+            all_results: list[dict] = []
 
-        # Process in waves of MAX_CONCURRENT
-        import asyncio
-        loop = asyncio.get_running_loop()
+            # Process in waves of MAX_CONCURRENT
+            loop = asyncio.get_running_loop()
 
-        for wave_start in range(0, total, MAX_CONCURRENT):
-            wave = batches[wave_start : wave_start + MAX_CONCURRENT]
-            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
-                tasks = [
-                    loop.run_in_executor(executor, _rerank_batch, batch, req.query, user_bg, len(batch))
-                    for batch in wave
-                ]
-                for coro in asyncio.as_completed(tasks):
-                    try:
-                        batch_results = await coro
-                        all_results.extend(batch_results)
-                        done += 1
-                        # Enrich each result with graph info
-                        for r in batch_results:
-                            aid = r["author_id"]
-                            details = _get_author_details(aid)
-                            r["name"] = details["name"]
-                            r["affiliation"] = details["affiliation"]
-                            r["papers"] = details["papers"]
-                            r["hops"] = _get_hops(req.aid, aid)
-                            r["mutual_coauthors"] = _get_mutual_coauthors(req.aid, aid)
-                        yield {
-                            "event": "batch",
-                            "data": json.dumps(
-                                {
-                                    "results": batch_results,
-                                    "progress": {"done": done, "total": total},
-                                }
-                            ),
-                        }
-                    except Exception as e:
-                        yield {
-                            "event": "error",
-                            "data": json.dumps({"error": str(e)}),
-                        }
+            for wave_start in range(0, total, MAX_CONCURRENT):
+                wave = batches[wave_start : wave_start + MAX_CONCURRENT]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
+                    tasks = [
+                        loop.run_in_executor(executor, _rerank_batch, batch, req.query, user_bg, len(batch))
+                        for batch in wave
+                    ]
+                    for coro in asyncio.as_completed(tasks):
+                        try:
+                            batch_results = await coro
+                            all_results.extend(batch_results)
+                            done += 1
+                            # Enrich each result with graph info
+                            for r in batch_results:
+                                aid = r["author_id"]
+                                details = _get_author_details(aid)
+                                r["name"] = details["name"]
+                                r["affiliation"] = details["affiliation"]
+                                r["papers"] = details["papers"]
+                                r["hops"] = _get_hops(req.aid, aid)
+                                r["mutual_coauthors"] = _get_mutual_coauthors(req.aid, aid)
+                            yield {
+                                "event": "batch",
+                                "data": json.dumps(
+                                    {
+                                        "results": batch_results,
+                                        "progress": {"done": done, "total": total},
+                                    }
+                                ),
+                            }
+                        except Exception as e:
+                            yield {
+                                "event": "error",
+                                "data": json.dumps({"error": str(e)}),
+                            }
 
-        # Final sorted results
-        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-        yield {
-            "event": "complete",
-            "data": json.dumps({"results": all_results}),
-        }
+            # Final sorted results
+            all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+            yield {
+                "event": "complete",
+                "data": json.dumps({"results": all_results}),
+            }
+        finally:
+            _llm_request_slots.release()
 
     return EventSourceResponse(event_generator())
 
