@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
 # Silence noisy httpx logs from openai client
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-REPORT_OUTPUT_DIR = Path("/data/jiawei_data/bridge2aikg/work/data")
+REPORT_OUTPUT_DIR = Path(
+    (os.environ.get("REPORT_OUTPUT_DIR", "").strip() or "/home/ubuntu/bridge2aikg/work/data")
+)
 
 # ---------- models ----------
 MODEL_NAME_EXPERTISE = "gpt-4.1"
