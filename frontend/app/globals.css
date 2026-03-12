@@ -122,6 +122,23 @@ h6 {
   line-height: 1.4;
 }
 
+.report-error-btn {
+  margin-top: 10px;
+  border: 1px solid #fecaca;
+  background: #fff1f2;
+  color: #b91c1c;
+  border-radius: 8px;
+  padding: 7px 11px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.report-error-btn:hover {
+  background: #ffe4e6;
+}
+
 .panel-header .subtitle {
   font-size: 0.85rem;
   color: var(--text-muted);
@@ -364,6 +381,83 @@ h6 {
   font-size: 0.9rem;
   max-width: 320px;
   line-height: 1.6;
+}
+
+.report-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(24, 24, 27, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 14px;
+}
+
+.report-modal-card {
+  width: min(520px, calc(100vw - 28px));
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 16px;
+}
+
+.report-modal-card h3 {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.report-modal-desc {
+  margin-top: 6px;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.report-textarea {
+  width: 100%;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-size: 0.92rem;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.report-status {
+  margin-top: 10px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.report-modal-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.report-modal-actions button {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.84rem;
+  font-weight: 700;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+
+.report-modal-actions button:last-child {
+  border-color: var(--text-primary);
+  background: var(--text-primary);
+  color: #ffffff;
+}
+
+.report-modal-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* ---------- Collaborator Card ---------- */

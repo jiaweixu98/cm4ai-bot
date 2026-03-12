@@ -1,36 +1,35 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CM4AI Frontend (Next.js)
 
-## Getting Started
+This is the frontend for `cm4ai-bot` and is deployed behind `/matrix` on the same host as `bridge2aikg`.
 
-First, run the development server:
+## Local Development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd /data/jiawei_data/cm4ai-bot/frontend
+npm ci
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8001 npm run dev -- -H 127.0.0.1 -p 3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open:
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+- `http://127.0.0.1:3000`
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Build
 
-## Learn More
+```bash
+cd /data/jiawei_data/cm4ai-bot/frontend
+npm ci
+npm run build
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Runtime Dependency
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Frontend API requests depend on backend data files synced from the canonical pipeline:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. `python /data/jiawei_data/correct_pipline_code/run_pipeline.py --embedding-model specter2 --layout-method umap`
+2. `python /data/jiawei_data/correct_pipline_code/08_sync_to_apps.py`
+3. `python /data/jiawei_data/correct_pipline_code/09_smoke_test_apps.py`
 
-## Deploy on Vercel
+Paper embedding cache reuse is handled by pipeline step 05 and does not require frontend changes.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`09_smoke_test_apps.py` may print warning-only lines (`dataset_count=0`, filtered invalid IDs) while still passing.

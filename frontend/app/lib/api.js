@@ -137,3 +137,43 @@ export async function fetchGraphPath(aid, collaboratorId) {
   if (!res.ok) throw new Error("Graph path fetch failed");
   return res.json();
 }
+
+export async function submitErrorReport({
+  project = "cm4ai-bot",
+  page,
+  reportFolder = "matrix_error",
+  feedback,
+  context = {},
+  currentUrl,
+  userAgent,
+}) {
+  const payload = {
+    project,
+    page,
+    report_folder: reportFolder,
+    feedback,
+    context,
+    current_url: currentUrl || null,
+    user_agent: userAgent || null,
+  };
+
+  // Primary: backend API (same base as chat/search/rerank)
+  const primaryRes = await fetch(`${API_BASE}/api/report-error`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (primaryRes.ok) return primaryRes.json();
+
+  // Fallback: Next.js local API route in the frontend app
+  const fallbackRes = await fetch(`/api/report-error`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (fallbackRes.ok) return fallbackRes.json();
+
+  throw new Error(
+    `Error report submission failed (backend ${primaryRes.status}, fallback ${fallbackRes.status})`
+  );
+}

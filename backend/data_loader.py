@@ -24,17 +24,6 @@ LOCAL_DATA_DIR = os.environ.get(
 )
 
 
-def _load_json_data(filename: str, source_filename: str) -> dict:
-    cache_path = f"{CACHE_DIR}/{filename}"
-    local_path = os.path.join(LOCAL_DATA_DIR, source_filename)
-    for candidate in [local_path, cache_path]:
-        if os.path.exists(candidate):
-            with open(candidate, "r") as f:
-                return json.load(f)
-    logger.warning("Missing local %s and cache %s.", local_path, cache_path)
-    return {}
-
-
 # ---------- singletons ----------
 
 _author_nodes: dict | None = None
@@ -47,20 +36,36 @@ _model = None
 _resources_loaded = False
 
 
+def _assert_author_nodes_schema(nodes: dict) -> None:
+    if not isinstance(nodes, dict) or not nodes:
+        raise RuntimeError("updated_author_nodes_with_papers.json is empty or invalid")
+    required = ["AID", "FullName", "Affiliation", "Top Cited or Most Recent Papers"]
+    for aid, node in nodes.items():
+        if not isinstance(node, dict):
+            raise RuntimeError(f"invalid node format for aid={aid}")
+        features = node.get("features", {})
+        if not isinstance(features, dict):
+            raise RuntimeError(f"missing features object for aid={aid}")
+        missing = [k for k in required if k not in features]
+        if missing:
+            raise RuntimeError(f"aid={aid} missing feature fields: {missing}")
+        if not isinstance(features.get("Affiliation", ""), str):
+            raise RuntimeError(f"aid={aid} Affiliation must be string")
+        papers = features.get("Top Cited or Most Recent Papers", [])
+        if not isinstance(papers, list):
+            raise RuntimeError(f"aid={aid} papers must be list")
+
+
 def load_author_nodes() -> dict:
     global _author_nodes
     if _author_nodes is not None:
         return _author_nodes
-    for candidate in [
-        os.path.join(LOCAL_DATA_DIR, "updated_author_nodes_with_papers.json"),
-        f"{CACHE_DIR}/author_nodes.json",
-    ]:
-        if os.path.exists(candidate):
-            with open(candidate, "r") as f:
-                _author_nodes = json.load(f)
-                return _author_nodes
-    logger.warning("Missing local author metadata. Returning empty dict.")
-    _author_nodes = _load_json_data("author_nodes.json", "updated_author_nodes_with_papers.json")
+    local_nodes = os.path.join(LOCAL_DATA_DIR, "updated_author_nodes_with_papers.json")
+    if not os.path.exists(local_nodes):
+        raise FileNotFoundError(f"missing required local author nodes: {local_nodes}")
+    with open(local_nodes, "r") as f:
+        _author_nodes = json.load(f)
+    _assert_author_nodes_schema(_author_nodes)
     return _author_nodes
 
 
@@ -91,11 +96,10 @@ def load_publication_counts() -> dict:
 
 def _load_knowledge_graph_raw() -> dict:
     local_graph = os.path.join(LOCAL_DATA_DIR, "author_knowledge_graph_2024.json")
-    if os.path.exists(local_graph):
-        with open(local_graph, "r") as f:
-            return json.load(f)
-    logger.info("Local knowledge graph not found. Falling back to cache.")
-    return _load_json_data("knowledge_graph.json", "author_knowledge_graph_2024.json")
+    if not os.path.exists(local_graph):
+        raise FileNotFoundError(f"missing required local knowledge graph: {local_graph}")
+    with open(local_graph, "r") as f:
+        return json.load(f)
 
 
 def load_knowledge_graph_nx() -> nx.Graph:
@@ -176,15 +180,7 @@ def load_embeddings_and_index():
             _author_ids = pickle.load(f)
         return _author_ids, _faiss_index
 
-    # 1) Cached
-    if os.path.exists(index_path) and os.path.exists(ids_path):
-        logger.info("Loading FAISS index from cache…")
-        _faiss_index = faiss.read_index(index_path)
-        with open(ids_path, "rb") as f:
-            _author_ids = pickle.load(f)
-        return _author_ids, _faiss_index
-
-    # 2) Build from local embeddings
+    # 1) Build from local embeddings
     try:
         cand_embs = [
             os.path.join(LOCAL_DATA_DIR, "author_embeddings.pkl"),
@@ -234,49 +230,19 @@ def load_specter_model():
         from transformers import AutoTokenizer
         from adapters import AutoAdapterModel
 
-        base_path = os.path.join(CACHE_DIR, "specter2_base")
-        adapter_path = os.path.join(CACHE_DIR, "specter2_adapter")
-        base_config = os.path.join(base_path, "config.json")
-        adapter_config = os.path.join(adapter_path, "adapter_config.json")
+        # Use a dedicated HuggingFace cache root. Important: cache_dir should be a cache root,
+        # not a model directory path. Passing a model directory as cache_dir can produce an
+        # unusable nested layout (models--repo-id/...) that later fails local loading.
+        hf_cache = os.path.join(CACHE_DIR, "hf")
+        os.makedirs(hf_cache, exist_ok=True)
 
-        # 1) Local cache
-        if os.path.exists(base_config):
-            logger.info("  Loading tokenizer…")
-            tok = AutoTokenizer.from_pretrained(base_path, local_files_only=True)
-            logger.info("  Loading base model…")
-            mdl = AutoAdapterModel.from_pretrained(base_path, local_files_only=True)
-            if os.path.exists(adapter_config):
-                logger.info("  Loading adapter (if this hangs, try restarting)…")
-                mdl.load_adapter(adapter_path, load_as="adhoc_query", set_active=True)
-            logger.info("  Moving to CPU + eval mode…")
-            _tokenizer, _model = tok, mdl.to("cpu").eval()
-            logger.info("  SPECTER2 loaded in %.1fs ✅", _time.time() - t0)
-            return _tokenizer, _model
-
-        # 2) HuggingFace
-        os.makedirs(base_path, exist_ok=True)
-        try:
-            tok = AutoTokenizer.from_pretrained("allenai/specter2", cache_dir=base_path)
-            mdl = AutoAdapterModel.from_pretrained("allenai/specter2", cache_dir=base_path)
-        except Exception:
-            from huggingface_hub import snapshot_download
-
-            snapshot_download(repo_id="allenai/specter2", local_dir=base_path, local_dir_use_symlinks=False)
-            tok = AutoTokenizer.from_pretrained(base_path, local_files_only=True)
-            mdl = AutoAdapterModel.from_pretrained(base_path, local_files_only=True)
-        try:
-            mdl.load_adapter("allenai/specter2_adhoc_query", load_as="adhoc_query", set_active=True)
-        except Exception:
-            try:
-                from huggingface_hub import snapshot_download
-
-                os.makedirs(adapter_path, exist_ok=True)
-                snapshot_download(repo_id="allenai/specter2_adhoc_query", local_dir=adapter_path, local_dir_use_symlinks=False)
-                if os.path.exists(adapter_config):
-                    mdl.load_adapter(adapter_path, load_as="adhoc_query", set_active=True)
-            except Exception:
-                pass
+        logger.info("  Loading tokenizer/base model from HuggingFace cache…")
+        tok = AutoTokenizer.from_pretrained("allenai/specter2_base", cache_dir=hf_cache)
+        mdl = AutoAdapterModel.from_pretrained("allenai/specter2_base", cache_dir=hf_cache)
+        logger.info("  Loading SPECTER2 adapter…")
+        mdl.load_adapter("allenai/specter2_adhoc_query", load_as="adhoc_query", set_active=True)
         _tokenizer, _model = tok, mdl.to("cpu").eval()
+        logger.info("  SPECTER2 loaded in %.1fs ✅", _time.time() - t0)
         return _tokenizer, _model
     except Exception as e:
         logger.error("Failed to load SPECTER model: %s", e)

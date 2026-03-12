@@ -6,6 +6,7 @@ import {
   chatMessage,
   searchCandidates,
   rerankCandidates,
+  submitErrorReport,
 } from "./lib/api";
 
 // ─── State machine phases ───
@@ -37,9 +38,36 @@ export default function Home() {
   const [rerankedMap, setRerankedMap] = useState({});
   const [rerankProgress, setRerankProgress] = useState({ done: 0, total: 0 });
   const [expandedCards, setExpandedCards] = useState({});
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [reportFeedback, setReportFeedback] = useState("");
+  const [reportPageContext, setReportPageContext] = useState("author-info");
+  const [reportSubmitting, setReportSubmitting] = useState(false);
+  const [reportStatus, setReportStatus] = useState("");
 
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
+
+  const isAllowedReturnTarget = (urlObj) => {
+    // Always allow same-origin return.
+    if (urlObj.origin === window.location.origin) return true;
+
+    // Local dev: allow cross-port jump between graph (5173) and matrix (3000).
+    const localHosts = new Set(["localhost", "127.0.0.1"]);
+    const current = new URL(window.location.href);
+    const isLocalPair =
+      localHosts.has(current.hostname) &&
+      localHosts.has(urlObj.hostname) &&
+      current.protocol === urlObj.protocol;
+
+    if (isLocalPair) return true;
+
+    // Optional explicit allow-list for other trusted origins.
+    const extraAllowed = (process.env.NEXT_PUBLIC_ALLOWED_RETURN_ORIGINS || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    return extraAllowed.includes(urlObj.origin);
+  };
 
   // ─── Init: parse URL and load author ───
   useEffect(() => {
@@ -49,8 +77,13 @@ export default function Home() {
     if (returnToParam) {
       try {
         const parsed = new URL(returnToParam, window.location.origin);
-        if (parsed.origin === window.location.origin) {
-          setReturnTo(`${parsed.pathname}${parsed.search}${parsed.hash}`);
+        if (isAllowedReturnTarget(parsed)) {
+          // Keep relative URL for same-origin; preserve absolute URL for cross-origin.
+          if (parsed.origin === window.location.origin) {
+            setReturnTo(`${parsed.pathname}${parsed.search}${parsed.hash}`);
+          } else {
+            setReturnTo(parsed.toString());
+          }
         }
       } catch {
         // Keep default "/" when return_to is invalid.
@@ -304,6 +337,53 @@ export default function Home() {
     return "score-low";
   };
 
+  const openReportModal = (page) => {
+    setReportPageContext(page);
+    setReportFeedback("");
+    setReportStatus("");
+    setReportModalOpen(true);
+  };
+
+  const closeReportModal = () => {
+    if (reportSubmitting) return;
+    setReportModalOpen(false);
+  };
+
+  const handleSubmitReport = async () => {
+    const feedbackText = reportFeedback.trim();
+    if (!feedbackText || reportSubmitting) return;
+
+    setReportSubmitting(true);
+    setReportStatus("");
+    try {
+      await submitErrorReport({
+        project: "cm4ai-bot",
+        page: reportPageContext,
+        reportFolder: "matrix_error",
+        feedback: feedbackText,
+        currentUrl: window.location.href,
+        userAgent: navigator.userAgent,
+        context: {
+          aid,
+          phase,
+          current_query: currentQuery || null,
+          candidate_count: candidates.length,
+          top_candidate_id: orderedCandidates[0]?.author_id || null,
+        },
+      });
+      setReportStatus("Thanks! Your feedback has been recorded.");
+      setReportFeedback("");
+      setTimeout(() => {
+        setReportModalOpen(false);
+        setReportStatus("");
+      }, 900);
+    } catch (e) {
+      setReportStatus(`Submission failed: ${e.message}`);
+    } finally {
+      setReportSubmitting(false);
+    }
+  };
+
   return (
     <div className="app-container">
       {/* ─── Left: Chat ─── */}
@@ -312,34 +392,19 @@ export default function Home() {
           <div className="app-title">🔬 CM4AI Teaming Assistant</div>
           <div className="app-tagline">Tell me your research needs, I'll find the right collaborators for you.</div>
         </div>
-        <div style={{ margin: "10px 0 2px" }}>
-          <a
-            href={returnTo}
-            style={{
-              display: "inline-block",
-              background: "#1f2937",
-              color: "#fff",
-              textDecoration: "none",
-              padding: "8px 12px",
-              borderRadius: "8px",
-              fontWeight: 600,
-              fontSize: "14px",
-            }}
-          >
-            ← Back to Knowledge Graph
-          </a>
-        </div>
         <div className="panel-header">
           <h1>
             {authorInfo
               ? `Hi ${authorInfo.name}!`
               : "Welcome"}
           </h1>
-          <div className="subtitle">
-            <a href={returnTo}>
-              🌎 Open Knowledge Graph
-            </a>
-          </div>
+          <button
+            className="report-error-btn"
+            onClick={() => openReportModal("author-info")}
+            type="button"
+          >
+            Report Error
+          </button>
         </div>
 
         <div className="chat-messages">
@@ -400,6 +465,13 @@ export default function Home() {
             <div className="results-header">
               <h2>Top Recommended Collaborators</h2>
               <div className="query-text">Based on: {currentQuery}</div>
+              <button
+                className="report-error-btn"
+                onClick={() => openReportModal("teaming-recommendation")}
+                type="button"
+              >
+                Report Error
+              </button>
               {phase === PHASE.RERANKING && rerankProgress.total > 0 && (
                 <>
                   <div className="progress-bar-container">
@@ -500,6 +572,13 @@ export default function Home() {
           <div className="results-empty">
             <div className="results-empty-icon">🔬</div>
             <h2>Results will appear here</h2>
+            <button
+              className="report-error-btn"
+              onClick={() => openReportModal("teaming-recommendation")}
+              type="button"
+            >
+              Report Error
+            </button>
             <p>
               Describe your needs on the left. I'll propose a query to confirm, then search and
               rank results.
@@ -507,6 +586,39 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {reportModalOpen && (
+        <div className="report-modal-backdrop" onClick={closeReportModal}>
+          <div className="report-modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>Report Error</h3>
+            <p className="report-modal-desc">
+              {reportPageContext === "author-info"
+                ? "Describe the issue you found in Author Info."
+                : "Describe the issue you found in Teaming Recommendation."}
+            </p>
+            <textarea
+              className="report-textarea"
+              rows={5}
+              placeholder="Please enter your feedback..."
+              value={reportFeedback}
+              onChange={(e) => setReportFeedback(e.target.value)}
+            />
+            {reportStatus && <div className="report-status">{reportStatus}</div>}
+            <div className="report-modal-actions">
+              <button type="button" onClick={closeReportModal} disabled={reportSubmitting}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmitReport}
+                disabled={reportSubmitting || !reportFeedback.trim()}
+              >
+                {reportSubmitting ? "Submitting..." : "Submit"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
