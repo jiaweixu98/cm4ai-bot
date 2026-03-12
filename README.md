@@ -218,6 +218,13 @@ LOCAL_DATA_DIR=/home/ubuntu/cm4ai-bot/data
 REPORT_OUTPUT_DIR=/home/ubuntu/bridge2aikg/work/data
 ```
 
+Feedback report storage is intentionally separated between apps:
+
+- CM4AI/Bridge2AI writes to `/home/ubuntu/bridge2aikg/work/data/<report_folder>`
+- CFDE Matrix writes to `/home/ubuntu/cfde_kg/work/data/<report_folder>`
+
+Keep this app's `REPORT_OUTPUT_DIR` on the Bridge2AI path so `matrix_error`, `kg_error`, and `general_feedback` are not mixed with CFDE logs.
+
 Local run on alternate port:
 
 ```bash
