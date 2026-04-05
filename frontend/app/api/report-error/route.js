@@ -1,30 +1,7 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
-
-const REPORT_OUTPUT_DIR =
-  (process.env.REPORT_OUTPUT_DIR || "").trim() || "/home/ubuntu/bridge2aikg/work/data";
-
-function sanitizeToken(value, fallback) {
-  const cleaned = String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-  return cleaned || fallback;
-}
-
-function createReportFilename(project, page) {
-  const iso = new Date().toISOString().replace(/[:.]/g, "-");
-  const random = Math.random().toString(36).slice(2, 8);
-  return `report_error_${project}_${page}_${iso}_${random}.json`;
-}
-
-function resolveReportFolder(folder) {
-  const normalized = sanitizeToken(folder, "matrix_error");
-  const allowed = new Set(["matrix_error", "kg_error", "general_feedback"]);
-  return allowed.has(normalized) ? normalized : "matrix_error";
-}
+const REPORT_API_URL =
+  (process.env.REPORT_API_URL || "").trim() ||
+  (process.env.BRIDGE_REPORT_API_URL || "").trim() ||
+  "http://127.0.0.1:5173/api/report-error";
 
 export async function POST(request) {
   try {
@@ -34,35 +11,16 @@ export async function POST(request) {
       return Response.json({ error: "feedback is required" }, { status: 400 });
     }
 
-    const project = sanitizeToken(body.project || "cm4ai-bot", "cm4ai-bot");
-    const page = sanitizeToken(body.page || "unknown-page", "unknown-page");
-    const reportFolder = resolveReportFolder(body.report_folder || "matrix_error");
-    const filename = createReportFilename(project, page);
-    const outputPath = join(REPORT_OUTPUT_DIR, reportFolder, basename(filename));
-
-    const payload = {
-      report_type: "error_feedback",
-      submitted_at: new Date().toISOString(),
-      project,
-      page,
-      report_folder: reportFolder,
-      feedback,
-      context: body.context || {},
-      current_url: body.current_url || null,
-      user_agent: body.user_agent || null,
-      source: "cm4ai-bot-frontend-route",
-    };
-
-    await mkdir(join(REPORT_OUTPUT_DIR, reportFolder), { recursive: true });
-    await writeFile(outputPath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
-
-    return Response.json({
-      ok: true,
-      filename,
-      path: outputPath,
+    const response = await fetch(REPORT_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
     });
+    const payload = await response.json().catch(() => ({ error: "Invalid response from report API" }));
+    return Response.json(payload, { status: response.status });
   } catch (error) {
-    console.error("Failed to save report error feedback (frontend route):", error);
-    return Response.json({ error: "Failed to save report error feedback" }, { status: 500 });
+    console.error("Failed to proxy report error feedback (frontend route):", error);
+    return Response.json({ error: "Failed to forward report error feedback" }, { status: 500 });
   }
 }

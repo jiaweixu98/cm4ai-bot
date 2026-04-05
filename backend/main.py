@@ -10,12 +10,12 @@ import re
 import json
 import logging
 import concurrent.futures
-from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import List, Tuple
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import numpy as np
 import networkx as nx
@@ -43,8 +43,10 @@ logger = logging.getLogger(__name__)
 # Silence noisy httpx logs from openai client
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-REPORT_OUTPUT_DIR = Path(
-    (os.environ.get("REPORT_OUTPUT_DIR", "").strip() or "/home/ubuntu/bridge2aikg/work/data")
+BRIDGE_REPORT_API_URL = (
+    os.environ.get("BRIDGE_REPORT_API_URL", "").strip()
+    or os.environ.get("REPORT_API_URL", "").strip()
+    or "http://127.0.0.1:5173/api/report-error"
 )
 MAX_ACTIVE_LLM_REQUESTS = max(1, int(os.environ.get("MAX_ACTIVE_LLM_REQUESTS", "3")))
 LLM_SLOT_WAIT_SECONDS = max(0.1, float(os.environ.get("LLM_SLOT_WAIT_SECONDS", "1.5")))
@@ -886,39 +888,45 @@ def _resolve_report_folder(folder: str) -> str:
     return normalized if normalized in allowed else "matrix_error"
 
 
+def _post_report_to_bridge(payload: dict) -> dict:
+    encoded = json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(
+        BRIDGE_REPORT_API_URL,
+        data=encoded,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib_request.urlopen(req, timeout=10) as resp:
+        raw_body = resp.read().decode("utf-8")
+        return json.loads(raw_body) if raw_body else {"ok": True}
+
+
 @app.post("/api/report-error")
 async def report_error(req: ErrorReportRequest):
     feedback = str(req.feedback or "").strip()
     if not feedback:
         raise HTTPException(status_code=400, detail="feedback is required")
 
-    project = _sanitize_token(req.project, "cm4ai-bot")
-    page = _sanitize_token(req.page, "unknown-page")
-    report_folder = _resolve_report_folder(req.report_folder)
-    ts = datetime.now(timezone.utc).isoformat().replace(":", "-").replace(".", "-")
-    filename = f"report_error_{project}_{page}_{ts}_{uuid4().hex[:8]}.json"
-    output_path = REPORT_OUTPUT_DIR / report_folder / filename
-
     payload = {
         "report_type": "error_feedback",
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-        "project": project,
-        "page": page,
-        "report_folder": report_folder,
+        "project": _sanitize_token(req.project, "cm4ai-bot"),
+        "page": _sanitize_token(req.page, "unknown-page"),
+        "report_folder": _resolve_report_folder(req.report_folder),
         "feedback": feedback,
         "context": req.context or {},
         "current_url": req.current_url,
         "user_agent": req.user_agent,
     }
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
-    return {
-        "ok": True,
-        "filename": filename,
-        "path": str(output_path),
-    }
+    try:
+        return await asyncio.to_thread(_post_report_to_bridge, payload)
+    except urllib_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        logger.error("Bridge report API rejected feedback: %s %s", exc.code, detail)
+        raise HTTPException(status_code=502, detail="Bridge report API rejected feedback")
+    except Exception as exc:
+        logger.error("Failed to forward feedback to bridge report API: %s", exc)
+        raise HTTPException(status_code=502, detail="Failed to forward feedback")
 
 
 # ---------- health ----------
