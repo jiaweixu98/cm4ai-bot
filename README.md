@@ -1,36 +1,37 @@
-# CM4AI Bot (OCI Deployment)
+# CM4AI Bot
 
-This project runs as:
+CM4AI Bot is the matrix recommender application for Bridge2AI.
 
-- Frontend: Next.js (`frontend/`) on port `3000`
-- Backend: FastAPI (`backend/`) on port `8000`
-- Reverse proxy: Nginx (`bridge2ai.labs-app.com`)
+This repo contains:
 
-The app is designed to be maintained directly on an OCI server, with GitHub used as source backup and change history.
+- `frontend/`: Next.js UI
+- `backend/`: FastAPI service
 
-## 1) Current Architecture
+The companion repo [`bridge2aikg`](https://github.com/jiaweixu98/bridge2aikg) owns the graph application. In the integrated deployment, `bridge2aikg` is mounted at `/` and `cm4ai-bot` is mounted under `/matrix`.
 
-- User visits `https://bridge2ai.labs-app.com`
-- Nginx routes:
-  - `/api/*` -> `127.0.0.1:8000` (FastAPI)
-  - `/*` -> `127.0.0.1:3000` (Next.js)
-- FastAPI loads local cache data from:
-  - `tmp/matrix_cache/`
+## How This Repo Fits With `bridge2aikg`
 
-## 2) Prerequisites on Server
+- `bridge2aikg` handles the graph UI and graph-side APIs.
+- `cm4ai-bot` handles the recommender UI and recommendation backend.
+- When developing locally, it is simplest to run the two repos as separate apps on separate ports.
 
-- Ubuntu/Linux
-- `python3`, `python3-venv`, `pip`
-- `node` + `npm` (Node 22 LTS recommended)
-- `nginx`
+## Local Setup
 
-## 3) Backend Setup
+Requirements:
+
+- Python 3
+- `python3-venv`
+- Node.js 20+
+- npm
+
+### Backend setup
 
 ```bash
-cd /home/ubuntu/cm4ai-bot/backend
+cd backend
 python3 -m venv .venv
-.venv/bin/pip install --upgrade pip setuptools wheel
-.venv/bin/pip install -r requirements.txt
+source .venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
 cp .env.example .env
 ```
 
@@ -40,113 +41,107 @@ Required in `backend/.env`:
 
 Optional:
 
-- `CACHE_DIR=...` (default: `/home/ubuntu/cm4ai-bot/tmp/matrix_cache`)
-- `LOCAL_DATA_DIR=...` (default: `/home/ubuntu/cm4ai-bot/data`)
+- `CACHE_DIR=...`
+- `LOCAL_DATA_DIR=...`
 
-## 4) Frontend Setup
-
-```bash
-cd /home/ubuntu/cm4ai-bot/frontend
-npm ci
-npm run build
-```
-
-## 5) Run (Manual)
-
-Manual scripts are aligned with production startup:
+### Frontend setup
 
 ```bash
-cd /home/ubuntu/cm4ai-bot
-./run-backend.sh
-./run-frontend.sh
+cd frontend
+npm install
+cp .env.local.example .env.local
 ```
 
-## 6) Run (Production, Recommended)
+## Local Development
 
-Use `systemd` services:
-
-- `cm4ai-backend.service`
-- `cm4ai-frontend.service`
-
-Useful commands:
+Run the backend:
 
 ```bash
-systemctl status cm4ai-backend cm4ai-frontend
-sudo systemctl restart cm4ai-backend cm4ai-frontend
-journalctl -u cm4ai-backend -f
-journalctl -u cm4ai-frontend -f
+cd backend
+source .venv/bin/activate
+uvicorn main:app --reload --port 8000
 ```
 
-## 7) Nginx
-
-Nginx config file:
-
-- `/etc/nginx/sites-available/default`
-
-Validate + reload after changes:
+Run the frontend in a second terminal:
 
 ```bash
-sudo nginx -t
-sudo systemctl reload nginx
+cd frontend
+npm install
+cp .env.local.example .env.local
+npm run dev -- --port 3000
 ```
 
-## 8) GitHub Backup Workflow
+Typical local URLs:
 
-Recommended daily workflow on OCI:
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:8000`
+
+The default `frontend/.env.local.example` points:
+
+- `NEXT_PUBLIC_API_URL` at `http://localhost:8000`
+- `BRIDGE_REPORT_API_URL` at `http://localhost:5173/api/report-error`
+
+If you are exercising report-feedback flows, run `bridge2aikg` locally too, or change `BRIDGE_REPORT_API_URL` to another reachable graph app instance.
+
+## Local Development With `bridge2aikg`
+
+If your change spans both repos, also run the graph app:
 
 ```bash
-cd /home/ubuntu/cm4ai-bot
-git status
-git add -A
-git commit -m "your message"
-git push origin main
+cd ../bridge2aikg
+npm install
+cp .env.example .env
+npm run dev
 ```
 
-To check if local changes are already pushed:
+Typical full local setup:
 
-```bash
-git status -sb
-git branch -vv
-```
+- `bridge2aikg` on `http://localhost:5173`
+- `cm4ai-bot` frontend on `http://localhost:3000`
+- `cm4ai-bot` backend on `http://localhost:8000`
 
-## 9) Upgrade / Deploy Checklist
+## Authentication Modes During Development
 
-1. Pull latest code:
-   - `git pull --rebase origin main`
-2. Backend deps:
-   - `backend/.venv/bin/pip install -r backend/requirements.txt`
-3. Frontend build:
-   - `cd frontend && npm ci && npm run build`
-4. Restart services:
-   - `sudo systemctl restart cm4ai-backend cm4ai-frontend`
-5. Verify:
-   - `curl http://127.0.0.1:8000/api/health`
-   - `curl -I http://127.0.0.1:3000`
-   - `curl -k https://bridge2ai.labs-app.com/api/health`
+When `bridge2aikg` runs in development mode:
 
-## 10) Data and Persistence Notes
+- sign-in uses a mock ORCID session
+- real ORCID OAuth is not exercised on localhost
+- this is expected, because the ORCID client cannot use localhost callback URLs
+
+In production or production-like environments:
+
+- `bridge2aikg` must use real ORCID OAuth
+- ORCID callback, token exchange, and identity-linked flows should be verified there
+
+## Collaboration Workflow
+
+Recommended team workflow:
+
+1. Develop and test locally.
+2. Push changes to GitHub.
+3. Let the OCI operator pull the new commit onto the deployment machine.
+4. Validate there before restarting production services.
+
+OCI-specific operations are intentionally documented outside this README so the main repo docs stay collaborator-focused.
+
+## Data and Persistence Notes
 
 - Runtime cache is under `tmp/matrix_cache/`
-- This folder is intentionally not tracked in git (large files)
-- For disaster recovery, back up:
-  - repo (`/home/ubuntu/cm4ai-bot`)
-  - cache (`/home/ubuntu/cm4ai-bot/tmp/matrix_cache`)
-  - nginx config (`/etc/nginx/sites-available/default`)
-  - systemd unit files (`/etc/systemd/system/cm4ai-*.service`)
+- This folder is intentionally not tracked in git because it can grow large
 
-## 11) Correct Pipeline Integration (local)
+## Correct Pipeline Integration
 
-Data is generated by (example):
+Data generation example:
 
-- `PIPELINE_ROOT=/home/ubuntu/correct_pipline_code`
-- `DATA_ROOT=/home/ubuntu`
+- `PIPELINE_ROOT=/path/to/correct_pipline_code`
+- `DATA_ROOT=/path/to/data-root`
 
 ```bash
-export PIPELINE_ROOT=/home/ubuntu/correct_pipline_code
-export DATA_ROOT=/home/ubuntu
+export PIPELINE_ROOT=/path/to/correct_pipline_code
+export DATA_ROOT=/path/to/data-root
 ```
 
-Runtime data path used by backend (example):
+Runtime data path used by backend:
 
 - `$DATA_ROOT/cm4ai-bot/data`
 
@@ -157,7 +152,7 @@ cd "$PIPELINE_ROOT"
 python run_pipeline.py --embedding-model specter2 --layout-method umap
 ```
 
-Sync command (fail-fast, with snapshot by default):
+Sync command:
 
 ```bash
 python "$PIPELINE_ROOT/08_sync_to_apps.py"
@@ -169,19 +164,11 @@ Contract gate command:
 python "$PIPELINE_ROOT/09_smoke_test_apps.py"
 ```
 
-Release path (single source of truth):
+Release path:
 
 1. `run_pipeline.py`
 2. `08_sync_to_apps.py`
 3. `09_smoke_test_apps.py`
-4. restart app services only after gate passes
-
-Paper embedding cache reuse:
-
-- Yes, you can directly reuse previously cached paper embeddings.
-- Cache location: `$DATA_ROOT/correct_bridge2aikg_full_web/intermediate/paper_embeddings_cache/`
-- Reuse is automatic in `specter2 + paper_weighted` mode when shard PMID lists match.
-- To maximize reuse, keep the same `--max-papers-per-author` and same `--devices` sharding pattern.
 
 Cache-first rebuild example:
 
@@ -194,41 +181,19 @@ python 08_sync_to_apps.py
 python 09_smoke_test_apps.py
 ```
 
-Smoke-test result interpretation:
-
-- `[DONE] file-only smoke test passed` is the release gate.
-- `[WARN] dataset_count is 0` is allowed when current snapshot has no dataset nodes.
-- `[WARN] dropped nonpositive/nonnumeric ids ...` indicates invalid IDs were filtered.
-
 Rollback:
-
-- list snapshots under `$DATA_ROOT/correct_bridge2aikg_full_web/snapshots`
-- sync a previous snapshot:
 
 ```bash
 python "$PIPELINE_ROOT/08_sync_to_apps.py" --snapshot-id <snapshot_id> --no-snapshot
 ```
 
-Recommended local backend env (`backend/.env`):
+Recommended backend env example:
 
 ```env
 OPENAI_API_KEY=your_real_key
-CACHE_DIR=/home/ubuntu/cm4ai-bot/tmp/matrix_cache
-LOCAL_DATA_DIR=/home/ubuntu/cm4ai-bot/data
-REPORT_OUTPUT_DIR=/home/ubuntu/bridge2aikg/work/data
+CACHE_DIR=/path/to/cm4ai-bot/tmp/matrix_cache
+LOCAL_DATA_DIR=/path/to/cm4ai-bot/data
 ```
 
-Feedback report storage is intentionally separated between apps:
-
-- CM4AI/Bridge2AI writes to `/home/ubuntu/bridge2aikg/work/data/<report_folder>`
-- CFDE Matrix writes to `/home/ubuntu/cfde_kg/work/data/<report_folder>`
-
-Keep this app's `REPORT_OUTPUT_DIR` on the Bridge2AI path so `matrix_error`, `kg_error`, and `general_feedback` are not mixed with CFDE logs.
-
-Local run on alternate port:
-
-```bash
-cd /home/ubuntu/cm4ai-bot/backend
-PORT=8001 python main.py
-```
+Feedback reports are forwarded to the graph app through `BRIDGE_REPORT_API_URL`, which defaults to the Bridge2AI graph service in local integrated development.
 

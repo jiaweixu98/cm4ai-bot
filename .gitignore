@@ -1,6 +1,10 @@
 # Secrets (never commit credentials)
 backend/.env
+backend/.env.*
+!backend/.env.example
 frontend/.env.local
+frontend/.env.local.*
+!frontend/.env.local.example
 .env
 
 # Node
@@ -14,6 +18,7 @@ backend/.venv/
 
 # Local cache & model downloads (auto-generated at runtime)
 **/tmp/
+data/
 **/__pycache__/
 *.log
 
