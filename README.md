@@ -9,6 +9,20 @@ This repo contains:
 
 The companion repo [`bridge2aikg`](https://github.com/jiaweixu98/bridge2aikg) owns the graph application. In the integrated deployment, `bridge2aikg` is mounted at `/` and `cm4ai-bot` is mounted under `/matrix`.
 
+## Before You Start
+
+- This repository does **not** include the large runtime data files required by the backend.
+- By default, the backend reads runtime data from `data/`.
+- If you do not set `LOCAL_DATA_DIR`, a normal local run expects these files under `data/`:
+  - `updated_author_nodes_with_papers.json`
+  - `author_n_publications.json`
+  - `author_knowledge_graph_2024.json`
+  - `author_ids.pkl`
+  - `faiss_index.bin`
+  - `author_embeddings.pkl` or `author_embeddings.npy`
+- If you develop locally with `bridge2aikg`, note that `bridge2aikg` uses a **mock ORCID session** during `npm run dev`.
+- Real ORCID sign-in, callback handling, token exchange, and identity-linked feedback or admin behavior should be tested only in a deployed production-like environment.
+
 ## How This Repo Fits With `bridge2aikg`
 
 - `bridge2aikg` handles the graph UI and graph-side APIs.
