@@ -12,7 +12,9 @@ The companion repo [`bridge2aikg`](https://github.com/jiaweixu98/bridge2aikg) ow
 ## Before You Start
 
 - This repository does **not** include the large runtime data files required by the backend.
+- Download the shared runtime data bundles from [Google Drive](https://drive.google.com/drive/folders/1Nw6ysd0YUuWfkJIpBBtgfCBFZPpaw1vx?usp=sharing).
 - By default, the backend reads runtime data from `data/`.
+- For this repo, extract `cm4ai-bot-data.tar.gz` into `data/`.
 - If you do not set `LOCAL_DATA_DIR`, a normal local run expects these files under `data/`:
   - `updated_author_nodes_with_papers.json`
   - `author_n_publications.json`
