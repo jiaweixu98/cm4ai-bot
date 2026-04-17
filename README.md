@@ -113,6 +113,20 @@ In production or production-like environments:
 - `bridge2aikg` must use real ORCID OAuth
 - ORCID callback, token exchange, and identity-linked flows should be verified there
 
+## What To Test Where
+
+Use this split consistently:
+
+- Test on localhost:
+  - matrix UI changes
+  - API integration with the local backend
+  - graph-to-matrix local integration
+  - feedback flows against the local graph app
+- Test in a deployed production-like environment:
+  - real ORCID sign-in
+  - callback and token exchange
+  - feedback or admin behavior tied to a real ORCID identity
+
 ## Collaboration Workflow
 
 Recommended team workflow:

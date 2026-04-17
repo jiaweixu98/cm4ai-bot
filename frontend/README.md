@@ -45,6 +45,17 @@ If you are testing the integrated Bridge2AI flow, also run `bridge2aikg` separat
 
 In local development, `bridge2aikg` uses a mock ORCID session instead of real ORCID OAuth. Real ORCID login must be verified in a deployed environment.
 
+## What To Test Where
+
+- Test on localhost:
+  - frontend UI work
+  - calls to the local CM4AI backend
+  - report-feedback flow against a local `bridge2aikg`
+- Test in a deployed production-like environment:
+  - real ORCID sign-in
+  - callback and token exchange
+  - any behavior that depends on a real ORCID identity
+
 ## Build
 
 ```bash
