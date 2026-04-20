@@ -116,6 +116,11 @@ Typical full local setup:
 - `cm4ai-bot` frontend on `http://localhost:3000`
 - `cm4ai-bot` backend on `http://localhost:8000`
 
+Local integration note:
+
+- The example env files assume `bridge2aikg` is running on `http://localhost:5173`.
+- If graph-to-matrix handoff fails locally, first confirm `bridge2aikg`, the CM4AI frontend, and the CM4AI backend are all running on `5173`, `3000`, and `8000`.
+
 ## Authentication Modes During Development
 
 When `bridge2aikg` runs in development mode:
