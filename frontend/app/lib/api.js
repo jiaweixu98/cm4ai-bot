@@ -50,21 +50,23 @@ export async function checkConfirmation({ userText, currentQuery, priorInputs })
   return res.json();
 }
 
-export async function searchCandidates({ aid, query, topK = 100 }) {
+export async function searchCandidates({ aid, query, topK = 100, signal }) {
   const res = await fetch(`${API_BASE}/api/search`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     body: JSON.stringify({ aid, query, top_k: topK }),
   });
   if (!res.ok) throw new Error("Search failed");
   return res.json();
 }
 
-export function rerankCandidates({ aid, query, candidates }, onBatch, onComplete, onError) {
+export function rerankCandidates({ aid, query, candidates }, onBatch, onComplete, onError, signal) {
   const url = `${API_BASE}/api/rerank`;
   fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     body: JSON.stringify({ aid, query, candidates }),
   }).then((res) => {
     const reader = res.body.getReader();
@@ -114,14 +116,16 @@ export function rerankCandidates({ aid, query, candidates }, onBatch, onComplete
     }
     read();
   }).catch((err) => {
+    if (err?.name === "AbortError") return;
     if (onError) onError({ error: err.message });
   });
 }
 
-export async function chatMessage({ aid, userInput, conversationHistory, currentQuery, pastQueries, priorInputs, searchResults, searchPhase }) {
+export async function chatMessage({ aid, userInput, conversationHistory, currentQuery, pastQueries, priorInputs, searchResults, searchPhase, signal }) {
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     body: JSON.stringify({
       aid,
       user_input: userInput,

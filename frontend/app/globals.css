@@ -63,6 +63,44 @@ h6 {
   background-color: var(--bg-primary);
 }
 
+.session-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: #fcfcfd;
+  display: flex;
+  flex-direction: column;
+}
+
+.session-sidebar-head {
+  padding: 14px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-sidebar-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.session-sidebar-subtitle {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.session-sidebar-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .panel {
   display: flex;
   flex-direction: column;
@@ -71,7 +109,8 @@ h6 {
 }
 
 .panel-left {
-  flex: 1;
+  flex: 0 0 42%;
+  min-width: 400px;
   border-right: 1px solid var(--border);
   background: var(--bg-secondary);
   box-shadow: 1px 0 15px rgba(0, 0, 0, 0.02);
@@ -79,7 +118,8 @@ h6 {
 }
 
 .panel-right {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   background: var(--bg-primary);
   overflow-y: auto;
 }
@@ -155,6 +195,71 @@ h6 {
 .panel-header .subtitle a:hover {
   color: var(--text-primary);
   text-decoration: underline;
+}
+
+.session-new-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.session-new-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-chip {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: 12px;
+  padding: 9px 10px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+
+.session-chip.active {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.session-chip-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-chip-meta {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.session-status,
+.session-empty {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.session-status-error {
+  color: var(--error);
 }
 
 /* ---------- Chat ---------- */
@@ -298,20 +403,30 @@ h6 {
   color: var(--text-muted);
 }
 
+.chat-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .chat-send-btn {
-  width: 34px;
-  height: 34px;
-  border-radius: var(--radius-sm);
+  min-width: 74px;
+  height: 38px;
+  border-radius: 12px;
   border: none;
   background: var(--text-primary);
   color: var(--bg-secondary);
-  font-size: 1.1rem;
+  font-size: 0.86rem;
+  font-weight: 700;
   cursor: pointer;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   transition: all 0.2s ease;
   flex-shrink: 0;
+  padding: 0 14px;
 }
 
 .chat-send-btn:hover:not(:disabled) {
@@ -323,6 +438,46 @@ h6 {
   opacity: 0.3;
   cursor: not-allowed;
   background: var(--text-muted);
+}
+
+.chat-stop-btn {
+  min-width: 78px;
+  height: 38px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  padding: 0 12px;
+}
+
+.chat-stop-btn:hover:not(:disabled) {
+  background: #fff1f2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+.chat-stop-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-send-icon,
+.chat-stop-icon {
+  line-height: 1;
+}
+
+.chat-send-label,
+.chat-stop-label {
+  line-height: 1;
 }
 
 /* ---------- Results Panel ---------- */
@@ -746,13 +901,40 @@ h6 {
     flex-direction: column;
   }
 
-  .panel-left {
+  .session-sidebar {
+    width: 100%;
+    max-height: 180px;
     border-right: none;
     border-bottom: 1px solid var(--border);
-    height: 55vh;
+  }
+
+  .session-sidebar-body {
+    overflow-y: auto;
+  }
+
+  .panel-left {
+    min-width: 0;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    height: 45vh;
   }
 
   .panel-right {
-    height: 45vh;
+    height: 35vh;
+  }
+
+  .chat-action-group {
+    gap: 6px;
+  }
+
+  .chat-send-btn,
+  .chat-stop-btn {
+    min-width: 0;
+    padding: 0 10px;
+  }
+
+  .chat-send-label,
+  .chat-stop-label {
+    display: none;
   }
 }

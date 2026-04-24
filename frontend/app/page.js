@@ -4,8 +4,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   fetchAuthor,
   chatMessage,
+  createChatSession,
+  getChatSession,
+  listChatSessions,
   searchCandidates,
   rerankCandidates,
+  saveChatSession,
   submitErrorReport,
 } from "./lib/api";
 
@@ -19,16 +23,21 @@ const PHASE = {
   DONE: "done",                 // results ready, can start new query
 };
 
+const SESSION_TOKEN_STORAGE_KEY = "matrix_user_token";
+
 export default function Home() {
   // ─── URL params ───
   const [aid, setAid] = useState("6052561");
   const [authorInfo, setAuthorInfo] = useState(null);
-  const [returnTo, setReturnTo] = useState("/");
+  const [matrixUserToken, setMatrixUserToken] = useState("");
 
   // ─── Chat state ───
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [phase, setPhase] = useState(PHASE.IDLE);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [sessions, setSessions] = useState([]);
+  const [sessionStatus, setSessionStatus] = useState({ loading: true, saving: false, error: "" });
 
   // ─── Search state ───
   const [currentQuery, setCurrentQuery] = useState("");
@@ -46,71 +55,166 @@ export default function Home() {
 
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
+  const sessionHydratingRef = useRef(false);
+  const sessionBootstrappedRef = useRef(false);
+  const sessionSaveTimerRef = useRef(null);
+  const currentSessionIdRef = useRef(null);
+  const chatAbortRef = useRef(null);
+  const searchAbortRef = useRef(null);
+  const rerankAbortRef = useRef(null);
 
-  const isAllowedReturnTarget = (urlObj) => {
-    // Always allow same-origin return.
-    if (urlObj.origin === window.location.origin) return true;
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
 
-    // Local dev: allow cross-port jump between graph (5173) and matrix (3000).
-    const localHosts = new Set(["localhost", "127.0.0.1"]);
-    const current = new URL(window.location.href);
-    const isLocalPair =
-      localHosts.has(current.hostname) &&
-      localHosts.has(urlObj.hostname) &&
-      current.protocol === urlObj.protocol;
+  const buildWelcomeMessage = useCallback((data) => {
+    const greeting = data?.greeting;
+    if (greeting) {
+      return greeting;
+    }
+    return "Welcome! I am a scientific teaming assistant. How can I help you find collaborators?";
+  }, []);
 
-    if (isLocalPair) return true;
+  const resetWorkflowState = useCallback((greeting) => {
+    setMessages([{ role: "assistant", content: greeting }]);
+    setPhase(PHASE.IDLE);
+    setCurrentQuery("");
+    setPastQueries([]);
+    setPriorInputs([]);
+    setCandidates([]);
+    setRerankedMap({});
+    setRerankProgress({ done: 0, total: 0 });
+    setExpandedCards({});
+  }, []);
 
-    // Optional explicit allow-list for other trusted origins.
-    const extraAllowed = (process.env.NEXT_PUBLIC_ALLOWED_RETURN_ORIGINS || "")
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-    return extraAllowed.includes(urlObj.origin);
-  };
+  const upsertSessionSummary = useCallback((session) => {
+    if (!session) return;
+    setSessions((prev) => {
+      const next = [session, ...prev.filter((item) => item.id !== session.id)];
+      next.sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
+      return next;
+    });
+  }, []);
+
+  const buildSessionStateSnapshot = useCallback(() => ({
+    phase,
+    currentQuery,
+    pastQueries,
+    priorInputs,
+    candidates,
+    rerankedMap,
+    rerankProgress,
+    expandedCards,
+  }), [phase, currentQuery, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards]);
+
+  const applySessionSnapshot = useCallback((session, fallbackGreeting) => {
+    const snapshot = session?.state || {};
+    const restoredMessages = Array.isArray(session?.messages) && session.messages.length
+      ? session.messages
+      : [{ role: "assistant", content: fallbackGreeting }];
+
+    sessionHydratingRef.current = true;
+    currentSessionIdRef.current = session?.id || null;
+    setCurrentSessionId(session?.id || null);
+    setMessages(restoredMessages);
+    setPhase(Object.values(PHASE).includes(snapshot.phase) ? snapshot.phase : PHASE.IDLE);
+    setCurrentQuery(typeof snapshot.currentQuery === "string" ? snapshot.currentQuery : "");
+    setPastQueries(Array.isArray(snapshot.pastQueries) ? snapshot.pastQueries : []);
+    setPriorInputs(Array.isArray(snapshot.priorInputs) ? snapshot.priorInputs : []);
+    setCandidates(Array.isArray(snapshot.candidates) ? snapshot.candidates : []);
+    setRerankedMap(snapshot.rerankedMap && typeof snapshot.rerankedMap === "object" ? snapshot.rerankedMap : {});
+    setRerankProgress(
+      snapshot.rerankProgress && typeof snapshot.rerankProgress === "object"
+        ? {
+            done: Number(snapshot.rerankProgress.done) || 0,
+            total: Number(snapshot.rerankProgress.total) || 0,
+          }
+        : { done: 0, total: 0 }
+    );
+    setExpandedCards(snapshot.expandedCards && typeof snapshot.expandedCards === "object" ? snapshot.expandedCards : {});
+    setTimeout(() => {
+      sessionHydratingRef.current = false;
+    }, 0);
+  }, []);
 
   // ─── Init: parse URL and load author ───
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const aidParam = params.get("aid") || "6052561";
-    const returnToParam = params.get("return_to");
-    if (returnToParam) {
-      try {
-        const parsed = new URL(returnToParam, window.location.origin);
-        if (isAllowedReturnTarget(parsed)) {
-          // Keep relative URL for same-origin; preserve absolute URL for cross-origin.
-          if (parsed.origin === window.location.origin) {
-            setReturnTo(`${parsed.pathname}${parsed.search}${parsed.hash}`);
-          } else {
-            setReturnTo(parsed.toString());
-          }
-        }
-      } catch {
-        // Keep default "/" when return_to is invalid.
-      }
-    }
-    setAid(aidParam);
+    let cancelled = false;
 
-    fetchAuthor(aidParam)
-      .then((data) => {
-        setAuthorInfo(data);
-        setMessages([
-          {
-            role: "assistant",
-            content: data.greeting,
-          },
-        ]);
-      })
-      .catch(() => {
-        setMessages([
-          {
-            role: "assistant",
-            content:
-              "Welcome! I am a scientific teaming assistant. How can I help you find collaborators?",
-          },
-        ]);
-      });
-  }, []);
+    const initialize = async () => {
+      const params = new URLSearchParams(window.location.search);
+      const aidParam = params.get("aid") || "6052561";
+      const tokenFromUrl = params.get("mx_user_token") || "";
+      const storedToken =
+        typeof window !== "undefined" ? window.sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || "" : "";
+      const resolvedToken = tokenFromUrl || storedToken;
+
+      if (tokenFromUrl && typeof window !== "undefined") {
+        window.sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, tokenFromUrl);
+        params.delete("mx_user_token");
+        const nextSearch = params.toString();
+        const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
+        window.history.replaceState({}, "", nextUrl);
+      }
+
+      setAid(aidParam);
+      setMatrixUserToken(resolvedToken);
+
+      let fetchedAuthor = null;
+      try {
+        fetchedAuthor = await fetchAuthor(aidParam);
+        if (cancelled) return;
+        setAuthorInfo(fetchedAuthor);
+      } catch {
+        if (cancelled) return;
+        setAuthorInfo(null);
+      }
+
+      const fallbackGreeting = buildWelcomeMessage(fetchedAuthor);
+
+      if (!resolvedToken) {
+        if (cancelled) return;
+        resetWorkflowState(fallbackGreeting);
+        setSessionStatus({ loading: false, saving: false, error: "" });
+        sessionBootstrappedRef.current = true;
+        return;
+      }
+
+      try {
+        const listPayload = await listChatSessions({ aid: aidParam, authToken: resolvedToken });
+        if (cancelled) return;
+        const sessionItems = Array.isArray(listPayload.sessions) ? listPayload.sessions : [];
+        setSessions(sessionItems);
+        if (sessionItems.length > 0) {
+          const latestPayload = await getChatSession({
+            sessionId: sessionItems[0].id,
+            authToken: resolvedToken,
+          });
+          if (cancelled) return;
+          applySessionSnapshot(latestPayload.session, fallbackGreeting);
+        } else {
+          resetWorkflowState(fallbackGreeting);
+        }
+        setSessionStatus({ loading: false, saving: false, error: "" });
+      } catch (error) {
+        if (cancelled) return;
+        console.error("Failed to restore chat sessions:", error);
+        resetWorkflowState(fallbackGreeting);
+        setSessionStatus({ loading: false, saving: false, error: "Session history is temporarily unavailable." });
+      } finally {
+        sessionBootstrappedRef.current = true;
+      }
+    };
+
+    initialize();
+
+    return () => {
+      cancelled = true;
+      if (sessionSaveTimerRef.current) {
+        window.clearTimeout(sessionSaveTimerRef.current);
+      }
+    };
+  }, [applySessionSnapshot, buildWelcomeMessage, resetWorkflowState]);
 
   // ─── Auto-scroll & auto-focus ───
   useEffect(() => {
@@ -128,10 +232,137 @@ export default function Home() {
     setMessages((prev) => [...prev, { role, content }]);
   }, []);
 
+  const ensureCurrentSession = useCallback(async () => {
+    if (!matrixUserToken) {
+      return null;
+    }
+    if (currentSessionIdRef.current) {
+      return currentSessionIdRef.current;
+    }
+
+    const sessionPayload = await createChatSession({
+      aid,
+      focalAuthorName: authorInfo?.name || "",
+      messages: Array.isArray(messages) ? messages : [],
+      state: buildSessionStateSnapshot(),
+      authToken: matrixUserToken,
+    });
+    const created = sessionPayload.session;
+    currentSessionIdRef.current = created.id;
+    setCurrentSessionId(created.id);
+    upsertSessionSummary(created);
+    return created.id;
+  }, [aid, authorInfo?.name, buildSessionStateSnapshot, matrixUserToken, messages, upsertSessionSummary]);
+
+  const handleStop = useCallback(() => {
+    chatAbortRef.current?.abort();
+    searchAbortRef.current?.abort();
+    rerankAbortRef.current?.abort();
+    chatAbortRef.current = null;
+    searchAbortRef.current = null;
+    rerankAbortRef.current = null;
+
+    setPhase(candidates.length > 0 ? PHASE.DONE : PHASE.IDLE);
+    addMessage("assistant", "Stopped the current run.");
+  }, [addMessage, candidates.length]);
+
+  const handleSelectSession = useCallback(async (sessionId) => {
+    if (!matrixUserToken || !sessionId) return;
+    if (sessionId === currentSessionIdRef.current) return;
+    if (phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
+      const confirmed = window.confirm("Stop the current run and switch sessions?");
+      if (!confirmed) return;
+      handleStop();
+    }
+    try {
+      setSessionStatus((prev) => ({ ...prev, loading: true, error: "" }));
+      const payload = await getChatSession({ sessionId, authToken: matrixUserToken });
+      applySessionSnapshot(payload.session, buildWelcomeMessage(authorInfo));
+      setSessionStatus((prev) => ({ ...prev, loading: false }));
+    } catch (error) {
+      console.error("Failed to load chat session:", error);
+      setSessionStatus((prev) => ({
+        ...prev,
+        loading: false,
+        error: "Failed to load that saved session.",
+      }));
+    }
+  }, [applySessionSnapshot, authorInfo, buildWelcomeMessage, handleStop, matrixUserToken, phase]);
+
+  const handleNewSession = useCallback(() => {
+    if (phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
+      const confirmed = window.confirm("Stop the current run and start a new session?");
+      if (!confirmed) return;
+      handleStop();
+    }
+    currentSessionIdRef.current = null;
+    setCurrentSessionId(null);
+    resetWorkflowState(buildWelcomeMessage(authorInfo));
+  }, [authorInfo, buildWelcomeMessage, handleStop, phase, resetWorkflowState]);
+
+  useEffect(() => {
+    if (!sessionBootstrappedRef.current || sessionHydratingRef.current) {
+      return;
+    }
+    if (!matrixUserToken || !currentSessionId) {
+      return;
+    }
+
+    if (sessionSaveTimerRef.current) {
+      window.clearTimeout(sessionSaveTimerRef.current);
+    }
+
+    sessionSaveTimerRef.current = window.setTimeout(async () => {
+      try {
+        setSessionStatus((prev) => ({ ...prev, saving: true, error: "" }));
+        const payload = await saveChatSession({
+          sessionId: currentSessionId,
+          aid,
+          focalAuthorName: authorInfo?.name || "",
+          messages,
+          state: buildSessionStateSnapshot(),
+          authToken: matrixUserToken,
+        });
+        upsertSessionSummary(payload.session);
+        setSessionStatus((prev) => ({ ...prev, saving: false, error: "" }));
+      } catch (error) {
+        console.error("Failed to save chat session:", error);
+        setSessionStatus((prev) => ({
+          ...prev,
+          saving: false,
+          error: "Failed to save the current session.",
+        }));
+      }
+    }, 800);
+
+    return () => {
+      if (sessionSaveTimerRef.current) {
+        window.clearTimeout(sessionSaveTimerRef.current);
+      }
+    };
+  }, [
+    aid,
+    authorInfo?.name,
+    buildSessionStateSnapshot,
+    currentSessionId,
+    matrixUserToken,
+    messages,
+    upsertSessionSummary,
+  ]);
+
   // ─── Send handler ───
   const handleSend = async () => {
     const text = inputValue.trim();
     if (!text) return;
+    try {
+      await ensureCurrentSession();
+    } catch (sessionError) {
+      console.error("Failed to create chat session:", sessionError);
+      setSessionStatus((prev) => ({
+        ...prev,
+        error: "Session persistence is unavailable right now. You can still keep chatting in this tab.",
+      }));
+    }
     setInputValue("");
     addMessage("user", text);
     setPriorInputs((prev) => [...prev.slice(-199), text]);
@@ -139,6 +370,8 @@ export default function Home() {
     // Route ALL user input through the unified /api/chat endpoint
     const previousPhase = phase;  // capture before we change it
     setPhase(PHASE.GENERATING);
+    const chatController = new AbortController();
+    chatAbortRef.current = chatController;
 
     // Build search results summary for LLM context
     const resultsForLLM = candidates
@@ -168,7 +401,9 @@ export default function Home() {
         priorInputs: [...priorInputs, text],
         searchResults: resultsForLLM,
         searchPhase: previousPhase,
+        signal: chatController.signal,
       });
+      chatAbortRef.current = null;
 
       if (result.action === "confirm" && currentQuery) {
         // User confirmed the pending query → run search
@@ -201,6 +436,11 @@ export default function Home() {
         setPhase(previousPhase === PHASE.GENERATING ? PHASE.IDLE : previousPhase);
       }
     } catch (e) {
+      chatAbortRef.current = null;
+      if (e?.name === "AbortError") {
+        setPhase(previousPhase === PHASE.GENERATING ? PHASE.IDLE : previousPhase);
+        return;
+      }
       addMessage("assistant", `⚠️ Error: ${e.message}`);
       setPhase(previousPhase === PHASE.GENERATING ? PHASE.IDLE : previousPhase);
     }
@@ -209,10 +449,14 @@ export default function Home() {
   // ─── Search ───
   const runSearch = async () => {
     try {
+      const searchController = new AbortController();
+      searchAbortRef.current = searchController;
       const { candidates: cands } = await searchCandidates({
         aid,
         query: currentQuery,
+        signal: searchController.signal,
       });
+      searchAbortRef.current = null;
       setCandidates(cands);
       addMessage("assistant", `✅ Found ${cands.length} potential collaborators. Now analyzing for best matches…`);
       // Auto-expand top 3
@@ -224,6 +468,11 @@ export default function Home() {
       setPhase(PHASE.RERANKING);
       runRerank(cands);
     } catch (e) {
+      searchAbortRef.current = null;
+      if (e?.name === "AbortError") {
+        setPhase(candidates.length > 0 ? PHASE.DONE : PHASE.IDLE);
+        return;
+      }
       addMessage("assistant", `⚠️ Search error: ${e.message}`);
       setPhase(PHASE.IDLE);
     }
@@ -231,6 +480,8 @@ export default function Home() {
 
   // ─── Rerank (SSE) ───
   const runRerank = (cands) => {
+    const rerankController = new AbortController();
+    rerankAbortRef.current = rerankController;
     const candidatePayload = cands.map((c) => ({
       author_id: c.author_id,
       retrieval_score: c.retrieval_score,
@@ -265,14 +516,17 @@ export default function Home() {
           "assistant",
           "🏁 Analysis complete! Review the ranked collaborators on the right. Would you like to run another query?"
         );
+        rerankAbortRef.current = null;
         // Add a slight delay to allow the React batch update to finish
         // before transitioning the phase which changes the UI layout.
         setTimeout(() => setPhase(PHASE.DONE), 100);
       },
       // onError
       (data) => {
+        rerankAbortRef.current = null;
         console.error("Rerank error:", data.error);
-      }
+      },
+      rerankController.signal
     );
   };
 
@@ -285,7 +539,8 @@ export default function Home() {
   };
 
   // ─── Render helpers ───
-  const isLoading = phase === PHASE.GENERATING || phase === PHASE.SEARCHING;
+  const isLoading = phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING;
+  const canStop = phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING;
 
   const formatMessage = (content) => {
     // Bold: **text**
@@ -386,6 +641,54 @@ export default function Home() {
 
   return (
     <div className="app-container">
+      <aside className="session-sidebar">
+        <div className="session-sidebar-head">
+          <div className="session-sidebar-title">Saved sessions</div>
+          <div className="session-sidebar-subtitle">
+            {matrixUserToken
+              ? "Stored per signed-in Bridge user for this author."
+              : "Open MATRIX from Bridge to enable saved sessions."}
+          </div>
+          <button
+            className="session-new-btn"
+            onClick={handleNewSession}
+            type="button"
+            disabled={sessionStatus.loading || isLoading}
+          >
+            New session
+          </button>
+        </div>
+        <div className="session-sidebar-body">
+          {sessionStatus.error && <div className="session-status session-status-error">{sessionStatus.error}</div>}
+          {sessionStatus.loading ? (
+            <div className="session-status">Loading saved sessions…</div>
+          ) : matrixUserToken ? (
+            sessions.length > 0 ? (
+              <div className="session-list">
+                {sessions.map((session) => (
+                  <button
+                    key={session.id}
+                    className={`session-chip ${session.id === currentSessionId ? "active" : ""}`}
+                    onClick={() => handleSelectSession(session.id)}
+                    type="button"
+                  >
+                    <span className="session-chip-title">{session.title || "Untitled session"}</span>
+                    <span className="session-chip-meta">
+                      {new Date(session.last_message_at).toLocaleDateString()}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="session-empty">No saved sessions for this author yet.</div>
+            )
+          ) : (
+            <div className="session-empty">Signed session history is available when MATRIX is opened from the Bridge app.</div>
+          )}
+          {sessionStatus.saving && currentSessionId && <div className="session-status">Saving session…</div>}
+        </div>
+      </aside>
+
       {/* ─── Left: Chat ─── */}
       <div className="panel panel-left">
         <div className="app-title-bar">
@@ -446,14 +749,28 @@ export default function Home() {
               rows={1}
               autoFocus
             />
-            <button
-              className="chat-send-btn"
-              onClick={handleSend}
-              disabled={isLoading || !inputValue.trim()}
-              aria-label="Send"
-            >
-              ↑
-            </button>
+            <div className="chat-action-group">
+              <button
+                className="chat-stop-btn"
+                onClick={handleStop}
+                disabled={!canStop}
+                type="button"
+                aria-label="Stop current run"
+              >
+                <span className="chat-stop-icon">■</span>
+                <span className="chat-stop-label">Stop</span>
+              </button>
+              <button
+                className="chat-send-btn"
+                onClick={handleSend}
+                disabled={isLoading || !inputValue.trim()}
+                aria-label="Send"
+                type="button"
+              >
+                <span className="chat-send-icon">↑</span>
+                <span className="chat-send-label">Send</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
