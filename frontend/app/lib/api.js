@@ -9,6 +9,11 @@ const API_BASE =
       ? ""
       : "http://localhost:8000";
 
+function withMatrixAuth(headers = {}, authToken) {
+  if (!authToken) return headers;
+  return { ...headers, "x-matrix-user-token": authToken };
+}
+
 export async function fetchAuthor(aid) {
   const res = await fetch(`${API_BASE}/api/author/${aid}`);
   if (!res.ok) throw new Error("Author not found");
@@ -129,6 +134,52 @@ export async function chatMessage({ aid, userInput, conversationHistory, current
     }),
   });
   if (!res.ok) throw new Error("Chat request failed");
+  return res.json();
+}
+
+export async function listChatSessions({ aid, authToken }) {
+  const res = await fetch(`${API_BASE}/api/chat-sessions?aid=${encodeURIComponent(aid)}`, {
+    headers: withMatrixAuth({}, authToken),
+  });
+  if (!res.ok) throw new Error("Session list request failed");
+  return res.json();
+}
+
+export async function getChatSession({ sessionId, authToken }) {
+  const res = await fetch(`${API_BASE}/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
+    headers: withMatrixAuth({}, authToken),
+  });
+  if (!res.ok) throw new Error("Session fetch failed");
+  return res.json();
+}
+
+export async function createChatSession({ aid, focalAuthorName, messages, state, authToken }) {
+  const res = await fetch(`${API_BASE}/api/chat-sessions`, {
+    method: "POST",
+    headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
+    body: JSON.stringify({
+      aid,
+      focal_author_name: focalAuthorName || "",
+      messages: messages || [],
+      state: state || {},
+    }),
+  });
+  if (!res.ok) throw new Error("Session creation failed");
+  return res.json();
+}
+
+export async function saveChatSession({ sessionId, aid, focalAuthorName, messages, state, authToken }) {
+  const res = await fetch(`${API_BASE}/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PUT",
+    headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
+    body: JSON.stringify({
+      aid,
+      focal_author_name: focalAuthorName || "",
+      messages: messages || [],
+      state: state || {},
+    }),
+  });
+  if (!res.ok) throw new Error("Session save failed");
   return res.json();
 }
 

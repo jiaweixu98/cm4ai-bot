@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import List, Tuple
+from typing import Any, List, Tuple
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -38,6 +38,13 @@ from data_loader import (
     load_publication_counts,
 )
 from retriever import Retriever
+from session_store import (
+    create_chat_session,
+    get_chat_session,
+    list_chat_sessions,
+    save_chat_session,
+    validate_matrix_user_token,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -207,6 +214,14 @@ def _bridge_collaborator_cache_get(author_id: str) -> list[str] | object:
 def _bridge_collaborator_cache_put(author_id: str, payload: list[str]) -> list[str]:
     _bridge_collaborator_cache[str(author_id)] = (time.time(), payload)
     return payload
+
+
+def _require_matrix_session_identity(request: Request) -> dict[str, str]:
+    token = request.headers.get("x-matrix-user-token", "").strip()
+    identity = validate_matrix_user_token(token)
+    if not identity:
+        raise HTTPException(status_code=401, detail="Matrix session auth is missing or invalid")
+    return identity
 
 
 def _get_bridge_direct_collaborators(author_id: str) -> list[str]:
@@ -953,6 +968,13 @@ class ChatRequest(BaseModel):
     search_phase: str | None = None
 
 
+class ChatSessionUpsertRequest(BaseModel):
+    aid: str
+    focal_author_name: str | None = None
+    messages: list[ChatMessageItem] = []
+    state: dict[str, Any] = {}
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     """Unified chat endpoint with 3-way intent classification."""
@@ -991,6 +1013,56 @@ async def chat(req: ChatRequest):
                 attempts += 1
 
         return result
+
+
+@app.get("/api/chat-sessions")
+async def list_sessions(aid: str, request: Request):
+    identity = _require_matrix_session_identity(request)
+    sessions = list_chat_sessions(identity["orcid"], aid)
+    return {"sessions": sessions}
+
+
+@app.get("/api/chat-sessions/{session_id}")
+async def get_session(session_id: str, request: Request):
+    identity = _require_matrix_session_identity(request)
+    session = get_chat_session(session_id, identity["orcid"])
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"session": session}
+
+
+@app.post("/api/chat-sessions")
+async def create_session(req: ChatSessionUpsertRequest, request: Request):
+    identity = _require_matrix_session_identity(request)
+    focal_author_name = (req.focal_author_name or "").strip() or _get_user_name(req.aid)
+    session = create_chat_session(
+        owner_orcid=identity["orcid"],
+        owner_name=identity["name"],
+        focal_author_id=req.aid,
+        focal_author_name=focal_author_name,
+        messages=[message.model_dump() for message in req.messages],
+        state=req.state or {},
+    )
+    return {"session": session}
+
+
+@app.put("/api/chat-sessions/{session_id}")
+async def save_session(session_id: str, req: ChatSessionUpsertRequest, request: Request):
+    identity = _require_matrix_session_identity(request)
+    focal_author_name = (req.focal_author_name or "").strip() or _get_user_name(req.aid)
+    try:
+        session = save_chat_session(
+            session_id=session_id,
+            owner_orcid=identity["orcid"],
+            owner_name=identity["name"],
+            focal_author_id=req.aid,
+            focal_author_name=focal_author_name,
+            messages=[message.model_dump() for message in req.messages],
+            state=req.state or {},
+        )
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return {"session": session}
 
 
 class SearchRequest(BaseModel):

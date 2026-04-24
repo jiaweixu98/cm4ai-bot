@@ -11,3 +11,4 @@ networkx
 huggingface_hub
 python-dotenv
 sse-starlette
+psycopg[binary]
