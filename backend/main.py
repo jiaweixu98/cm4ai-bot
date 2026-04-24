@@ -10,17 +10,19 @@ import re
 import json
 import logging
 import concurrent.futures
+import time
 from pathlib import Path
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import List, Tuple
 from urllib import error as urllib_error
+from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 import numpy as np
 import networkx as nx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -48,9 +50,25 @@ BRIDGE_REPORT_API_URL = (
     or os.environ.get("REPORT_API_URL", "").strip()
     or "http://127.0.0.1:5173/api/report-error"
 )
+BRIDGE_CATALOG_API_URL = (
+    os.environ.get("BRIDGE_CATALOG_API_URL", "").strip()
+    or "http://127.0.0.1:5173/api/catalog"
+)
+BRIDGE_COLLABORATORS_API_URL = (
+    os.environ.get("BRIDGE_COLLABORATORS_API_URL", "").strip()
+    or (
+        BRIDGE_CATALOG_API_URL[: -len("/api/catalog")] + "/api/collaborators"
+        if BRIDGE_CATALOG_API_URL.endswith("/api/catalog")
+        else "http://127.0.0.1:5173/api/collaborators"
+    )
+)
+BRIDGE_INTERNAL_API_TOKEN = os.environ.get("BRIDGE_INTERNAL_API_TOKEN", "").strip()
 MAX_ACTIVE_LLM_REQUESTS = max(1, int(os.environ.get("MAX_ACTIVE_LLM_REQUESTS", "3")))
 LLM_SLOT_WAIT_SECONDS = max(0.1, float(os.environ.get("LLM_SLOT_WAIT_SECONDS", "1.5")))
 _llm_request_slots = asyncio.Semaphore(MAX_ACTIVE_LLM_REQUESTS)
+_catalog_author_cache: dict[str, tuple[float, dict | None]] = {}
+_bridge_collaborator_cache: dict[str, tuple[float, list[str]]] = {}
+_CATALOG_CACHE_TTL_SECONDS = 60.0
 
 
 @asynccontextmanager
@@ -122,13 +140,20 @@ def _get_openai_client():
 
 
 def _model_encode(query_text: str) -> np.ndarray:
+    return _model_encode_many([query_text])
+
+
+def _model_encode_many(texts: list[str]) -> np.ndarray:
     import torch
 
     tokenizer, model = load_specter_model()
     if tokenizer is None or model is None:
         raise HTTPException(status_code=500, detail="SPECTER model not loaded")
+    normalized = [str(text or "").strip() for text in texts if str(text or "").strip()]
+    if not normalized:
+        raise HTTPException(status_code=400, detail="No usable text available for embedding")
     inputs = tokenizer(
-        [str(query_text)],
+        normalized,
         padding=True,
         truncation=True,
         return_tensors="pt",
@@ -152,10 +177,126 @@ def normalize_query_text(text: str) -> str:
         return (text or "").strip().lower()
 
 
+def _catalog_cache_get(author_id: str) -> dict | None | object:
+    cached = _catalog_author_cache.get(str(author_id))
+    if not cached:
+        return ...
+    ts, payload = cached
+    if (time.time() - ts) > _CATALOG_CACHE_TTL_SECONDS:
+        _catalog_author_cache.pop(str(author_id), None)
+        return ...
+    return payload
+
+
+def _catalog_cache_put(author_id: str, payload: dict | None) -> dict | None:
+    _catalog_author_cache[str(author_id)] = (time.time(), payload)
+    return payload
+
+
+def _bridge_collaborator_cache_get(author_id: str) -> list[str] | object:
+    cached = _bridge_collaborator_cache.get(str(author_id))
+    if not cached:
+        return ...
+    ts, payload = cached
+    if (time.time() - ts) > _CATALOG_CACHE_TTL_SECONDS:
+        _bridge_collaborator_cache.pop(str(author_id), None)
+        return ...
+    return payload
+
+
+def _bridge_collaborator_cache_put(author_id: str, payload: list[str]) -> list[str]:
+    _bridge_collaborator_cache[str(author_id)] = (time.time(), payload)
+    return payload
+
+
+def _get_bridge_direct_collaborators(author_id: str) -> list[str]:
+    cached = _bridge_collaborator_cache_get(author_id)
+    if cached is not ...:
+        return cached
+    base = BRIDGE_COLLABORATORS_API_URL.rstrip("/")
+    url = f"{base}/{urllib_parse.quote(str(author_id), safe='')}"
+    headers = {"Accept": "application/json"}
+    req = urllib_request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib_request.urlopen(req, timeout=6) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            collaborator_ids = [
+                str(collaborator_id)
+                for collaborator_id in (payload.get("collaborators") or [])
+                if str(collaborator_id).strip()
+            ]
+            return _bridge_collaborator_cache_put(author_id, collaborator_ids)
+    except urllib_error.HTTPError as exc:
+        if exc.code == 404:
+            return _bridge_collaborator_cache_put(author_id, [])
+        logger.warning("Bridge collaborator lookup failed for %s: %s", author_id, exc)
+        return _bridge_collaborator_cache_put(author_id, [])
+    except Exception as exc:
+        logger.warning("Bridge collaborator lookup error for %s: %s", author_id, exc)
+        return _bridge_collaborator_cache_put(author_id, [])
+
+
+def _get_catalog_author(author_id: str) -> dict | None:
+    cached = _catalog_cache_get(author_id)
+    if cached is not ...:
+        return cached
+    base = BRIDGE_CATALOG_API_URL.rstrip("/")
+    url = f"{base}/authors/{urllib_parse.quote(str(author_id), safe='')}"
+    headers = {"Accept": "application/json"}
+    req = urllib_request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib_request.urlopen(req, timeout=6) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            return _catalog_cache_put(author_id, payload)
+    except urllib_error.HTTPError as exc:
+        if exc.code == 404:
+            return _catalog_cache_put(author_id, None)
+        logger.warning("Catalog lookup failed for %s: %s", author_id, exc)
+        return _catalog_cache_put(author_id, None)
+    except Exception as exc:
+        logger.warning("Catalog lookup error for %s: %s", author_id, exc)
+        return _catalog_cache_put(author_id, None)
+
+
+def _build_catalog_user_background(author: dict) -> str:
+    name = str(author.get("fullName") or "Unknown")
+    affiliation = str(author.get("primaryAffiliation") or "Unknown")
+    papers = author.get("papers") or []
+    bg = f"Name: {name}\nAffiliation: {affiliation}\nTop Cited or Most Recent Papers:\n"
+    for paper in papers[:10]:
+        title = paper.get("title") or "Untitled"
+        journal = paper.get("journal") or ""
+        year = paper.get("year") or ""
+        bg += f"- {title} ({journal}, {year}) - Cited 0 times\n"
+    return bg
+
+
+def _build_catalog_author_details(author: dict) -> dict:
+    papers = author.get("papers") or []
+    normalized_papers = [
+        {
+            "Title": p.get("title") or "Untitled",
+            "Venue": p.get("journal") or "",
+            "PubYear": p.get("year") or "",
+            "CitedCount": 0,
+        }
+        for p in papers
+    ]
+    return {
+        "name": str(author.get("fullName") or "Unknown"),
+        "affiliation": str(author.get("primaryAffiliation") or "Unknown"),
+        "papers": normalized_papers,
+    }
+
+
 def _get_user_background(user_id: str) -> str:
     nodes = load_author_nodes()
     user = nodes.get(user_id, {})
     features = user.get("features", {})
+    if not features:
+        catalog_author = _get_catalog_author(user_id)
+        if catalog_author:
+            return _build_catalog_user_background(catalog_author)
     name = features.get("FullName", user.get("title", "Unknown"))
     affiliation = features.get("Affiliation", "Unknown")
     papers = features.get("Top Cited or Most Recent Papers", [])
@@ -168,18 +309,83 @@ def _get_user_background(user_id: str) -> str:
 def _get_user_name(user_id: str) -> str:
     nodes = load_author_nodes()
     user = nodes.get(user_id, {})
-    return user.get("features", {}).get("FullName", user.get("title", "Researcher"))
+    features = user.get("features", {})
+    if features:
+        return features.get("FullName", user.get("title", "Researcher"))
+    catalog_author = _get_catalog_author(user_id)
+    if catalog_author:
+        return str(catalog_author.get("fullName") or "Researcher")
+    return user.get("title", "Researcher")
 
 
 def _get_author_details(author_id: str) -> dict:
     nodes = load_author_nodes()
     info = nodes.get(author_id, {})
     features = info.get("features", {})
+    if not features:
+        catalog_author = _get_catalog_author(author_id)
+        if catalog_author:
+            return _build_catalog_author_details(catalog_author)
     return {
         "name": features.get("FullName", info.get("title", "Unknown")),
         "affiliation": features.get("Affiliation", "Unknown"),
         "papers": features.get("Top Cited or Most Recent Papers", []),
     }
+
+
+def _build_author_preview_text(full_name: str, affiliation: str, papers: list[dict]) -> str:
+    lines = [f"Name: {full_name}", f"Affiliation: {affiliation}", "Papers:"]
+    for paper in papers[:10]:
+        title = str(paper.get("title") or "").strip()
+        if not title:
+            continue
+        year = str(paper.get("year") or "").strip()
+        journal = str(paper.get("journal") or "").strip()
+        extras = " ".join(part for part in [year, journal] if part)
+        lines.append(f"- {title} {extras}".strip())
+    return "\n".join(lines)
+
+
+def _build_author_preview_embedding(
+    full_name: str,
+    affiliation: str,
+    papers: list[dict],
+) -> tuple[np.ndarray, str]:
+    paper_titles = [str(paper.get("title") or "").strip() for paper in papers if str(paper.get("title") or "").strip()]
+    if paper_titles:
+        paper_embs = _model_encode_many(paper_titles)
+        author_emb = np.mean(paper_embs, axis=0, keepdims=True).astype(np.float32)
+        preview_text = " | ".join(paper_titles[:10])
+        return author_emb, preview_text
+    fallback_text = _build_author_preview_text(full_name, affiliation, papers)
+    return _model_encode(fallback_text), fallback_text
+
+
+def _preview_similar_authors(author_embedding: np.ndarray, top_k: int = 8) -> tuple[np.ndarray, list[dict]]:
+    author_ids, faiss_index = load_embeddings_and_index()
+    if faiss_index is None or not author_ids:
+        raise HTTPException(status_code=500, detail="Search index not available")
+    retriever = Retriever(author_ids, faiss_index)
+    results = retriever.search(author_embedding, max(top_k * 4, 24))
+    best_by_id: dict[str, float] = {}
+    for key, distance in results:
+        base_id = str(key).split("_")[0]
+        numeric_distance = float(distance)
+        if base_id not in best_by_id or numeric_distance < best_by_id[base_id]:
+            best_by_id[base_id] = numeric_distance
+    ranked = sorted(best_by_id.items(), key=lambda item: item[1])[:top_k]
+    details = []
+    for author_id, distance in ranked:
+        author_details = _get_author_details(author_id)
+        details.append(
+            {
+                "author_id": author_id,
+                "score": float(1.0 / (1.0 + max(distance, 0.0))),
+                "name": author_details["name"],
+                "affiliation": author_details["affiliation"],
+            }
+        )
+    return author_embedding, details
 
 
 # ---------- graph helpers ----------
@@ -264,7 +470,9 @@ def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50) -> list
     # Network-aware weighting
     pub_counts = load_publication_counts()
     hop_info = _get_authors_within_n_hops(user_id, max_distance=7)
+    bridge_direct_collaborators = set(_get_bridge_direct_collaborators(user_id))
     exclude = {aid for aid, dist in hop_info.items() if dist < 2}
+    exclude.update(bridge_direct_collaborators)
     exclude.add(user_id)
 
     weighted = []
@@ -625,17 +833,53 @@ class AuthorResponse(BaseModel):
     greeting: str
 
 
+class AuthorPreviewPaper(BaseModel):
+    title: str
+    journal: str | None = None
+    year: str | int | None = None
+    doi: str | None = None
+    url: str | None = None
+
+
+class AuthorPreviewRequest(BaseModel):
+    full_name: str
+    affiliation: str | None = None
+    papers: list[AuthorPreviewPaper] = []
+    top_k: int = 8
+
+
+@app.post("/api/author-preview")
+async def author_preview(req: AuthorPreviewRequest, request: Request):
+    if BRIDGE_INTERNAL_API_TOKEN:
+        provided = request.headers.get("x-bridge-api-token", "").strip()
+        if provided != BRIDGE_INTERNAL_API_TOKEN:
+            raise HTTPException(status_code=403, detail="Forbidden")
+    papers = [paper.model_dump() for paper in req.papers]
+    author_embedding, preview_text = _build_author_preview_embedding(
+        req.full_name,
+        req.affiliation or "",
+        papers,
+    )
+    embedding, nearest = _preview_similar_authors(author_embedding, req.top_k)
+    return {
+        "model_name": "specter2_title_mean_preview",
+        "preview_text": preview_text,
+        "embedding": embedding[0].tolist(),
+        "nearest_authors": nearest,
+    }
+
+
 @app.get("/api/author/{aid}")
 async def get_author(aid: str):
     nodes = load_author_nodes()
-    if aid not in nodes:
+    if aid not in nodes and not _get_catalog_author(aid):
         raise HTTPException(status_code=404, detail="Author not found")
     name = _get_user_name(aid)
-    feats = nodes[aid].get("features", {})
+    details = _get_author_details(aid)
     return AuthorResponse(
         id=aid,
         name=name,
-        affiliation=feats.get("Affiliation", "Unknown"),
+        affiliation=details.get("affiliation", "Unknown"),
         greeting=f"Hi {name}! What kind of collaborators are you looking for?",
     )
 
