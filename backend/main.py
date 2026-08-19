@@ -376,19 +376,35 @@ def _build_author_preview_embedding(
     return _model_encode(fallback_text), fallback_text
 
 
-def _preview_similar_authors(author_embedding: np.ndarray, top_k: int = 8) -> tuple[np.ndarray, list[dict]]:
+# Consortium members are 341 of the 77,534 indexed authors (0.44%), so an
+# unrestricted nearest-neighbour search returns one or two of them in a top 10.
+# Restricting to members therefore has to search much deeper before truncating.
+BRIDGE2AI_ONLY_SEARCH_DEPTH = 4000
+
+
+def _is_bridge2ai_member(author_id: str, nodes: dict) -> bool:
+    return bool(((nodes.get(author_id) or {}).get("features") or {}).get("Bridge2AISeedAuthor"))
+
+
+def _preview_similar_authors(author_embedding: np.ndarray, top_k: int = 8,
+                             bridge2ai_only: bool = False) -> tuple[np.ndarray, list[dict]]:
     author_ids, faiss_index = load_embeddings_and_index()
     if faiss_index is None or not author_ids:
         raise HTTPException(status_code=500, detail="Search index not available")
     retriever = Retriever(author_ids, faiss_index)
-    results = retriever.search(author_embedding, max(top_k * 4, 24))
+    depth = BRIDGE2AI_ONLY_SEARCH_DEPTH if bridge2ai_only else max(top_k * 4, 24)
+    results = retriever.search(author_embedding, depth)
     best_by_id: dict[str, float] = {}
     for key, distance in results:
         base_id = str(key).split("_")[0]
         numeric_distance = float(distance)
         if base_id not in best_by_id or numeric_distance < best_by_id[base_id]:
             best_by_id[base_id] = numeric_distance
-    ranked = sorted(best_by_id.items(), key=lambda item: item[1])[:top_k]
+    ranked = sorted(best_by_id.items(), key=lambda item: item[1])
+    nodes = load_author_nodes()
+    if bridge2ai_only:
+        ranked = [item for item in ranked if _is_bridge2ai_member(item[0], nodes)]
+    ranked = ranked[:top_k]
     details = []
     for author_id, distance in ranked:
         author_details = _get_author_details(author_id)
@@ -398,6 +414,7 @@ def _preview_similar_authors(author_embedding: np.ndarray, top_k: int = 8) -> tu
                 "score": float(1.0 / (1.0 + max(distance, 0.0))),
                 "name": author_details["name"],
                 "affiliation": author_details["affiliation"],
+                "is_bridge2ai_member": _is_bridge2ai_member(author_id, nodes),
             }
         )
     return author_embedding, details
@@ -467,7 +484,17 @@ def _get_shortest_path(a: str, b: str) -> list[dict]:
 
 
 # ---------- retrieval ----------
-def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50) -> list[tuple]:
+def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50,
+                         network_weighting: bool = True) -> list[tuple]:
+    """Candidates for a query, excluding the user's existing collaborators.
+
+    network_weighting multiplies each score by 1/hops^2, which favours people
+    close to the user in the co-authorship graph. That is what the default
+    collaborator search wants. Teaming use cases that are specifically looking
+    for people *outside* the user's current network pass False: the exclusion of
+    existing collaborators still applies, but graph proximity stops driving the
+    ranking.
+    """
     author_ids, faiss_index = load_embeddings_and_index()
     if faiss_index is None or not author_ids:
         raise HTTPException(status_code=500, detail="Search index not available")
@@ -504,7 +531,10 @@ def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50) -> list
         hops = hop_info.get(aid, 7)
         hop_weight = 1.0 / float(hops ** 2) if hops > 0 else 0.0
         pub_weight = 0.05 if int(pub_counts.get(aid, 0)) == 1 else 1.0
-        weighted_score = similarity * hop_weight * pub_weight if hop_weight > 0 else 0.0
+        if network_weighting:
+            weighted_score = similarity * hop_weight * pub_weight if hop_weight > 0 else 0.0
+        else:
+            weighted_score = similarity * pub_weight
         weighted.append((aid, weighted_score))
 
     return sorted(weighted, key=lambda x: x[1], reverse=True)[:top_k]
@@ -868,6 +898,10 @@ class AuthorPreviewRequest(BaseModel):
     affiliation: str | None = None
     papers: list[AuthorPreviewPaper] = []
     top_k: int = 8
+    # Restrict results to Bridge2AI consortium members. Off by default so the
+    # atlas placement flow is unchanged; on for mentorship-style lookups, where a
+    # shortlist of non-members is not actionable.
+    bridge2ai_only: bool = False
 
 
 @app.post("/api/author-preview")
@@ -882,7 +916,7 @@ async def author_preview(req: AuthorPreviewRequest, request: Request):
         req.affiliation or "",
         papers,
     )
-    embedding, nearest = _preview_similar_authors(author_embedding, req.top_k)
+    embedding, nearest = _preview_similar_authors(author_embedding, req.top_k, req.bridge2ai_only)
     return {
         "model_name": "specter2_title_mean_preview",
         "preview_text": preview_text,
@@ -1092,6 +1126,31 @@ async def search(req: SearchRequest):
                 "affiliation": details["affiliation"],
             }
         )
+    return {"candidates": results, "total": len(results)}
+
+
+@app.post("/api/search-outside-network")
+async def search_outside_network(req: SearchRequest):
+    """Collaborator search for team-building rather than for the atlas.
+
+    Same retrieval and the same exclusion of existing collaborators as
+    /api/search, but graph proximity does not weight the ranking, so results are
+    not pulled back toward the co-authors the caller already has. This is the
+    entry point for precision-teaming use cases -- finding a co-investigator who
+    covers a gap, where the whole point is reaching outside the current network.
+    """
+    candidates = _retrieve_candidates(req.query, req.aid, req.top_k, network_weighting=False)
+    nodes = load_author_nodes()
+    results = []
+    for author_id, score in candidates:
+        details = _get_author_details(author_id)
+        results.append({
+            "author_id": author_id,
+            "retrieval_score": float(score),
+            "name": details["name"],
+            "affiliation": details["affiliation"],
+            "is_bridge2ai_member": _is_bridge2ai_member(author_id, nodes),
+        })
     return {"candidates": results, "total": len(results)}
 
 
