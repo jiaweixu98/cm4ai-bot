@@ -475,12 +475,18 @@ def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50) -> list
     q_emb = _model_encode(query_text)
     results = retriever.search(q_emb, 5000)
 
-    # Deduplicate by base id
-    best_by_id: dict[str, float] = {}
-    for key, score in results:
+    # Deduplicate by base id, keeping each author's NEAREST chunk. The index is
+    # IndexFlatL2, so what comes back is squared distance -- smaller is closer --
+    # not a similarity. Keeping the maximum here (as this did until 2026-08-19)
+    # selected each author's least relevant chunk, and since the retained values
+    # then cluster at the topk truncation boundary, ranking collapsed onto the
+    # hop weight below with topical similarity inverted rather than applied.
+    nearest_by_id: dict[str, float] = {}
+    for key, distance in results:
         base_id = str(key).split("_")[0]
-        if base_id not in best_by_id or score > best_by_id[base_id]:
-            best_by_id[base_id] = float(score)
+        distance = float(distance)
+        if base_id not in nearest_by_id or distance < nearest_by_id[base_id]:
+            nearest_by_id[base_id] = distance
 
     # Network-aware weighting
     pub_counts = load_publication_counts()
@@ -491,13 +497,14 @@ def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50) -> list
     exclude.add(user_id)
 
     weighted = []
-    for aid, sim in best_by_id.items():
+    for aid, distance in nearest_by_id.items():
         if aid in exclude:
             continue
-        dist = hop_info.get(aid, 7)
-        dist_weight = 1.0 / float(dist ** 2) if dist > 0 else 0.0
+        similarity = 1.0 / (1.0 + max(distance, 0.0))  # same transform as _preview_similar_authors
+        hops = hop_info.get(aid, 7)
+        hop_weight = 1.0 / float(hops ** 2) if hops > 0 else 0.0
         pub_weight = 0.05 if int(pub_counts.get(aid, 0)) == 1 else 1.0
-        weighted_score = sim * dist_weight * pub_weight if dist_weight > 0 else 0.0
+        weighted_score = similarity * hop_weight * pub_weight if hop_weight > 0 else 0.0
         weighted.append((aid, weighted_score))
 
     return sorted(weighted, key=lambda x: x[1], reverse=True)[:top_k]
