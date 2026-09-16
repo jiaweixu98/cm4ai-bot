@@ -162,6 +162,8 @@ def _last_message_preview(messages: list[dict[str, Any]]) -> str:
 
 
 def _serialize_session_row(row: dict[str, Any], include_full: bool = False) -> dict[str, Any]:
+    state_value = row.get("state")
+    state_intent = str(state_value.get("intent") or "") if isinstance(state_value, dict) else ""
     session = {
         "id": str(row["id"]),
         "owner_orcid": row["owner_orcid"],
@@ -169,6 +171,7 @@ def _serialize_session_row(row: dict[str, Any], include_full: bool = False) -> d
         "focal_author_id": row["focal_author_id"],
         "focal_author_name": row["focal_author_name"],
         "title": row["title"],
+        "intent": str(row.get("intent") or state_intent or ""),
         "last_message_preview": row["last_message_preview"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -180,30 +183,62 @@ def _serialize_session_row(row: dict[str, Any], include_full: bool = False) -> d
     return session
 
 
-def list_chat_sessions(owner_orcid: str, focal_author_id: str, limit: int = 20) -> list[dict[str, Any]]:
+def list_chat_sessions(
+    owner_orcid: str,
+    focal_author_id: str,
+    intent: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
     ensure_session_store()
+    intent_key = str(intent or "").strip().lower()
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    id,
-                    owner_orcid,
-                    owner_name,
-                    focal_author_id,
-                    focal_author_name,
-                    title,
-                    last_message_preview,
-                    created_at,
-                    updated_at,
-                    last_message_at
-                FROM matrix_chat_sessions
-                WHERE owner_orcid = %s AND focal_author_id = %s
-                ORDER BY last_message_at DESC, created_at DESC
-                LIMIT %s
-                """,
-                (owner_orcid, str(focal_author_id), max(1, min(limit, 100))),
-            )
+            if intent_key:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        owner_orcid,
+                        owner_name,
+                        focal_author_id,
+                        focal_author_name,
+                        title,
+                        COALESCE(state->>'intent', '') AS intent,
+                        last_message_preview,
+                        created_at,
+                        updated_at,
+                        last_message_at
+                    FROM matrix_chat_sessions
+                    WHERE owner_orcid = %s
+                      AND focal_author_id = %s
+                      AND COALESCE(state->>'intent', '') = %s
+                    ORDER BY last_message_at DESC, created_at DESC
+                    LIMIT %s
+                    """,
+                    (owner_orcid, str(focal_author_id), intent_key, max(1, min(limit, 100))),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        owner_orcid,
+                        owner_name,
+                        focal_author_id,
+                        focal_author_name,
+                        title,
+                        COALESCE(state->>'intent', '') AS intent,
+                        last_message_preview,
+                        created_at,
+                        updated_at,
+                        last_message_at
+                    FROM matrix_chat_sessions
+                    WHERE owner_orcid = %s AND focal_author_id = %s
+                    ORDER BY last_message_at DESC, created_at DESC
+                    LIMIT %s
+                    """,
+                    (owner_orcid, str(focal_author_id), max(1, min(limit, 100))),
+                )
             rows = cur.fetchall()
     return [_serialize_session_row(row) for row in rows]
 
