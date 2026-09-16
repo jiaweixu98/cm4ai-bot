@@ -1,25 +1,39 @@
 import Script from "next/script";
+import { Instrument_Sans, Inter } from "next/font/google";
 import "./globals.css";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+});
+
+const instrumentSans = Instrument_Sans({
+  subsets: ["latin"],
+  variable: "--font-instrument",
+  display: "swap",
+});
 
 const GA_ID = process.env.NEXT_PUBLIC_GA_ID;
 
 export const metadata = {
-  title: "CM4AI — Scientific Teaming Assistant",
-  description: "Find research collaborators powered by AI",
+  title: "MATRIX · Bridge2AI research assistant",
+  description: "Find professors and collaborators through publication evidence in the Bridge2AI knowledge graph.",
+};
+
+export const viewport = {
+  themeColor: "#f8fafc",
+  colorScheme: "light",
 };
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en">
-      <body>
+    <html lang="en" className={`${inter.variable} ${instrumentSans.variable}`}>
+      <body className={inter.className}>
         {children}
-        {/* Google Analytics — only loads when NEXT_PUBLIC_GA_ID is set */}
         {GA_ID && (
           <>
-            <Script
-              src={`https://www.googletagmanager.com/gtag/js?id=${GA_ID}`}
-              strategy="afterInteractive"
-            />
+            <Script src={`https://www.googletagmanager.com/gtag/js?id=${GA_ID}`} strategy="afterInteractive" />
             <Script id="ga-init" strategy="afterInteractive">
               {`
                 window.dataLayer = window.dataLayer || [];
@@ -34,4 +48,3 @@ export default function RootLayout({ children }) {
     </html>
   );
 }
-
