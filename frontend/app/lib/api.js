@@ -1,13 +1,8 @@
-// Prefer explicit API URL when provided.
-// Otherwise: same-origin in production (for nginx /api reverse proxy),
-// and localhost backend in local development.
+// Same-origin by default so the browser talks to Next on :3100, which proxies
+// chat/rerank to the already-loaded SPECTER. Set NEXT_PUBLIC_API_URL only when
+// you really want a cross-origin backend.
 const rawApiBase = process.env.NEXT_PUBLIC_API_URL;
-const API_BASE =
-  rawApiBase !== undefined
-    ? rawApiBase.replace(/\/$/, "")
-    : process.env.NODE_ENV === "production"
-      ? ""
-      : "http://localhost:8000";
+const API_BASE = (rawApiBase !== undefined ? rawApiBase : "").replace(/\/$/, "");
 
 function withMatrixAuth(headers = {}, authToken) {
   if (!authToken) return headers;
@@ -50,14 +45,60 @@ export async function checkConfirmation({ userText, currentQuery, priorInputs })
   return res.json();
 }
 
-export async function searchCandidates({ aid, query, topK = 100, signal }) {
-  const res = await fetch(`${API_BASE}/api/search`, {
+export async function searchCandidates({
+  representativeTitles = '',
+  aid,
+  query,
+  topK = 8,
+  bridge2aiOnly = false,
+  outsideNetwork = false,
+  teamMemberIds = [],
+  signal,
+}) {
+  // Same-origin Next route talks to the already-loaded MATRIX backend.
+  const res = await fetch("/api/search-people", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
-    body: JSON.stringify({ aid, query, top_k: topK }),
+    body: JSON.stringify({
+      aid: aid || "unlinked",
+      query,
+      top_k: topK,
+      representative_titles: representativeTitles.split('\n').map((title) => title.trim()).filter(Boolean).slice(0, 10),
+      bridge2ai_only: Boolean(bridge2aiOnly),
+      outside_network: Boolean(outsideNetwork),
+      team_member_ids: Array.isArray(teamMemberIds) ? teamMemberIds.map(String) : [],
+    }),
   });
   if (!res.ok) throw new Error("Search failed");
+  return res.json();
+}
+
+export async function explainCandidates({
+  aid,
+  teamMemberIds,
+  teamPeople,
+  seekerPapers,
+  query,
+  intent,
+  candidates,
+  signal,
+}) {
+  const res = await fetch("/api/why-lines", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(22000)]),
+    body: JSON.stringify({
+      aid,
+      team_member_ids: teamMemberIds,
+      team_people: teamPeople || [],
+      seeker_papers: seekerPapers || [],
+      query,
+      intent,
+      candidates,
+    }),
+  });
+  if (!res.ok) throw new Error("Match notes failed");
   return res.json();
 }
 
@@ -69,6 +110,10 @@ export function rerankCandidates({ aid, query, candidates }, onBatch, onComplete
     signal,
     body: JSON.stringify({ aid, query, candidates }),
   }).then((res) => {
+    if (!res.ok || !res.body) {
+      if (onError) onError({ error: `Rerank failed (${res.status})` });
+      return;
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -121,28 +166,49 @@ export function rerankCandidates({ aid, query, candidates }, onBatch, onComplete
   });
 }
 
-export async function chatMessage({ aid, userInput, conversationHistory, currentQuery, pastQueries, priorInputs, searchResults, searchPhase, signal }) {
-  const res = await fetch(`${API_BASE}/api/chat`, {
+export async function chatMessage({
+  representativeTitles = '',
+  contextPersonIds = [],
+  aid,
+  userInput,
+  conversationHistory,
+  currentQuery,
+  pastQueries,
+  priorInputs,
+  searchResults,
+  searchPhase,
+  intent,
+  signal,
+}) {
+  const res = await fetch("/api/chat-lite", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({
-      aid,
+      aid: aid || "unlinked",
       user_input: userInput,
+      context_person_ids: contextPersonIds.map(String),
+      representative_titles: representativeTitles.split('\n').map((title) => title.trim()).filter(Boolean).slice(0, 10),
       conversation_history: conversationHistory || [],
       current_query: currentQuery || null,
       past_queries: pastQueries || [],
       prior_inputs: priorInputs || [],
       search_results: searchResults || [],
       search_phase: searchPhase || null,
+      intent: intent || null,
     }),
   });
-  if (!res.ok) throw new Error("Chat request failed");
-  return res.json();
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload.error || "Chat is unavailable. Try again.");
+  }
+  return payload;
 }
 
-export async function listChatSessions({ aid, authToken }) {
-  const res = await fetch(`${API_BASE}/api/chat-sessions?aid=${encodeURIComponent(aid)}`, {
+export async function listChatSessions({ aid, intent, authToken }) {
+  const params = new URLSearchParams({ aid: String(aid || "unlinked") });
+  if (intent) params.set("intent", String(intent));
+  const res = await fetch(`${API_BASE}/api/chat-sessions?${params.toString()}`, {
     headers: withMatrixAuth({}, authToken),
   });
   if (!res.ok) throw new Error("Session list request failed");
@@ -175,6 +241,7 @@ export async function createChatSession({ aid, focalAuthorName, messages, state,
 export async function saveChatSession({ sessionId, aid, focalAuthorName, messages, state, authToken }) {
   const res = await fetch(`${API_BASE}/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
     method: "PUT",
+    signal: AbortSignal.timeout(8000),
     headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
     body: JSON.stringify({
       aid,
