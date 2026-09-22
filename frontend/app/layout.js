@@ -1,12 +1,6 @@
 import Script from "next/script";
-import { Instrument_Sans, Inter } from "next/font/google";
+import { Instrument_Sans } from "next/font/google";
 import "./globals.css";
-
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-inter",
-  display: "swap",
-});
 
 const instrumentSans = Instrument_Sans({
   subsets: ["latin"],
@@ -17,19 +11,19 @@ const instrumentSans = Instrument_Sans({
 const GA_ID = process.env.NEXT_PUBLIC_GA_ID;
 
 export const metadata = {
-  title: "MATRIX · Bridge2AI research assistant",
-  description: "Find professors and collaborators through publication evidence in the Bridge2AI knowledge graph.",
+  title: "MATRIX | Bridge2AI research guide",
+  description: "Find mentors and collaborators using indexed publication evidence.",
 };
 
 export const viewport = {
-  themeColor: "#f8fafc",
+  themeColor: "#ffffff",
   colorScheme: "light",
 };
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${inter.variable} ${instrumentSans.variable}`}>
-      <body className={inter.className}>
+    <html lang="en" className={instrumentSans.variable}>
+      <body className={instrumentSans.className}>
         {children}
         {GA_ID && (
           <>

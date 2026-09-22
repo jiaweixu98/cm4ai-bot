@@ -1,39 +1,30 @@
 import { useEffect, useRef } from "react";
-import { initials } from "../lib/matrixUi";
-import { IconClose, IconHistory, IconPlus } from "./icons";
+import { IconBack, IconHistory, IconPlus } from "./icons";
 
 export default function FocalAuthorBar({
-  copy,
   intent,
   authorInfo,
   seekerName,
   profileContextEnabled,
-  inIframe,
   sessionStatus,
   matrixUserToken,
   historyOpen,
   historyMenu,
   isLoading,
-  onIntentChange,
   onOpenFocal,
   onNewSession,
   onToggleHistory,
+  onReturnToGraph,
 }) {
-  const name =
-    (intent === "mentor" ? seekerName : "") ||
-    authorInfo?.name ||
-    seekerName ||
-    "";
-  const affiliation = intent === "mentor" ? "" : authorInfo?.affiliation || "";
+  const name = authorInfo?.name || seekerName || "";
   const saving = sessionStatus.saving;
   const statusLabel = sessionStatus.error
-    ? "Save error"
+    ? "Chat not saved"
     : !matrixUserToken
-      ? "Not signed in"
+      ? "Sign in on the graph to save chats"
       : saving
-        ? "Saving…"
-        : "Saved";
-  const statusTone = sessionStatus.error ? "error" : !matrixUserToken ? "muted" : saving ? "busy" : "ok";
+        ? "Saving"
+        : "";
   const historyRef = useRef(null);
 
   useEffect(() => {
@@ -47,55 +38,43 @@ export default function FocalAuthorBar({
 
   return (
     <header className="focal-bar">
-      <div className="focal-identity">
-        <div className="focal-avatar" aria-hidden="true">
-          {initials(name || "MATRIX")}
-        </div>
+      <div className="product-identity">
+        <div className="product-mark" aria-hidden="true">M</div>
         <div className="focal-copy">
-          <div className="focal-kicker">{copy.title}</div>
-          {name && <div className="focal-name">{name}</div>}
-          {affiliation && <div className="focal-affiliation">{affiliation}</div>}
+          <div className="product-name">MATRIX</div>
+          <div className="product-description">Research guide from publication evidence</div>
         </div>
-        {profileContextEnabled && (
-          <button type="button" className="ghost-btn" onClick={onOpenFocal}>
-            Open in graph
-          </button>
-        )}
       </div>
 
-      <div className="intent-switch" role="group" aria-label="Start a new conversation in another mode">
-        <button
-          type="button"
-          aria-pressed={intent === "collaborator"}
-          disabled={isLoading || sessionStatus.loading}
-          title="Start a new collaborator conversation"
-          className={intent === "collaborator" ? "active" : ""}
-          onClick={() => onIntentChange("collaborator")}
-        >
-          Collaborator
-        </button>
-        <button
-          type="button"
-          aria-pressed={intent === "mentor"}
-          disabled={isLoading || sessionStatus.loading}
-          title="Start a new mentor conversation"
-          className={intent === "mentor" ? "active" : ""}
-          onClick={() => onIntentChange("mentor")}
-        >
-          Mentor
-        </button>
-      </div>
+      {name && (
+        profileContextEnabled ? (
+          <button type="button" className="context-button" onClick={onOpenFocal}>
+            <span>Research context</span>
+            <strong>{name}</strong>
+          </button>
+        ) : (
+          <div className="context-label">
+            <span>Working with</span>
+            <strong>{name}</strong>
+          </div>
+        )
+      )}
 
       <div className="focal-actions">
-        {statusTone !== "ok" && (
-          <span className={`status-pill status-${statusTone}`} title={sessionStatus.error || undefined}>
-            <span className="status-dot" />
+        {statusLabel && (
+          <span className={`save-status ${sessionStatus.error ? "is-error" : ""}`} title={sessionStatus.error || undefined}>
             {statusLabel}
           </span>
         )}
+        {onReturnToGraph && (
+          <button className="ghost-btn focal-return" type="button" onClick={onReturnToGraph}>
+            <IconBack />
+            Back to graph
+          </button>
+        )}
         <button className="ghost-btn focal-new" type="button" onClick={onNewSession} disabled={sessionStatus.loading || isLoading}>
           <IconPlus />
-          New
+          New chat
         </button>
         <div className="history-wrap" ref={historyRef}>
           <button
@@ -106,15 +85,10 @@ export default function FocalAuthorBar({
             aria-haspopup="menu"
           >
             <IconHistory />
-            Previous
+            History
           </button>
           {historyOpen && historyMenu}
         </div>
-        {inIframe && historyOpen && (
-          <button type="button" className="icon-btn history-dismiss" onClick={onToggleHistory} aria-label="Close history">
-            <IconClose />
-          </button>
-        )}
       </div>
     </header>
   );

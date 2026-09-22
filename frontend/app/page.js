@@ -14,8 +14,10 @@ import {
 } from "./lib/api";
 import { BRIDGE_MSG, inBridgeIframe, isBridgeOrigin, postToBridge } from "./lib/bridgeHost";
 import {
+  GENERAL_STARTERS,
   PERSONA_COPY,
   UNLINKED_AID,
+  inferPersonaIntent,
   parseAidParam,
   parsePersonaIntent,
 } from "./lib/personaConfig";
@@ -29,7 +31,6 @@ import { MAX_ATTACHED_FILES, readAttachedFiles } from "./lib/attachedPapers";
 import FocalAuthorBar from "./components/FocalAuthorBar";
 import ChatPane from "./components/ChatPane";
 import ResultsWorkspace from "./components/ResultsWorkspace";
-import SessionSidebar from "./components/SessionSidebar";
 import ConfirmPopover from "./components/ConfirmPopover";
 import ReportModal from "./components/ReportModal";
 
@@ -47,8 +48,6 @@ const SESSION_TOKEN_STORAGE_KEY = "matrix_user_token";
 export default function Home() {
   const [aid, setAid] = useState(UNLINKED_AID);
   const [intent, setIntent] = useState("collaborator");
-  const [switchingPersona, setSwitchingPersona] = useState(false);
-  const switchingPersonaRef = useRef(false);
   const [searchIntent, setSearchIntent] = useState("collaborator");
   const [embedded, setEmbedded] = useState(false);
   const [uiReady, setUiReady] = useState(false);
@@ -57,8 +56,9 @@ export default function Home() {
   const [matrixUserToken, setMatrixUserToken] = useState("");
   const [savedPeople, setSavedPeople] = useState([]);
   const [savedPeopleReady, setSavedPeopleReady] = useState(false);
-  const [teamMemberIds, setTeamMemberIds] = useState([]);
-  const [mentorContextIds, setMentorContextIds] = useState([]);
+  const [contextPersonIds, setContextPersonIds] = useState([]);
+  const [graphContextPeople, setGraphContextPeople] = useState([]);
+  const [graphHandoffPersonId, setGraphHandoffPersonId] = useState(null);
   const [attachedPapers, setAttachedPapers] = useState([]);
   const [profileNotice, setProfileNotice] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -106,9 +106,9 @@ export default function Home() {
   }, [currentSessionId]);
 
   const resetWorkflowState = useCallback(() => {
-    setMentorContextIds([]);
-    setTeamMemberIds([]);
+    setContextPersonIds([]);
     setAttachedPapers([]);
+    setGraphHandoffPersonId(null);
     setMessages([]);
     setPhase(PHASE.IDLE);
     setCurrentQuery("");
@@ -146,10 +146,10 @@ export default function Home() {
       expandedCards,
       intent,
       searchIntent,
-      teamMemberIds,
-      mentorContextIds,
+      contextPersonIds,
+      graphContextPeople,
     }),
-    [phase, currentQuery, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, teamMemberIds, mentorContextIds]
+    [phase, currentQuery, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople]
   );
 
   const applySessionSnapshot = useCallback((session) => {
@@ -159,7 +159,22 @@ export default function Home() {
     sessionHydratingRef.current = true;
     currentSessionIdRef.current = session?.id || null;
     setCurrentSessionId(session?.id || null);
-    setMentorContextIds(Array.isArray(snapshot.mentorContextIds) ? snapshot.mentorContextIds.map(Number).filter(Number.isInteger).slice(0, 8) : []);
+    const restoredContextIds = Array.isArray(snapshot.contextPersonIds)
+      ? snapshot.contextPersonIds
+      : [...(Array.isArray(snapshot.mentorContextIds) ? snapshot.mentorContextIds : []), ...(Array.isArray(snapshot.teamMemberIds) ? snapshot.teamMemberIds : [])];
+    setContextPersonIds([...new Set(restoredContextIds.map(Number).filter(Number.isInteger))].slice(0, 8));
+    setGraphHandoffPersonId(null);
+    setGraphContextPeople(
+      (Array.isArray(snapshot.graphContextPeople) ? snapshot.graphContextPeople : [])
+        .map((person) => ({
+          authorId: Number(person?.authorId),
+          name: String(person?.name || "").trim(),
+          affiliation: String(person?.affiliation || "").trim(),
+          source: "graph",
+        }))
+        .filter((person) => Number.isInteger(person.authorId) && person.name)
+        .slice(0, 8)
+    );
     setMessages(restoredMessages);
     setPhase(Array.isArray(snapshot.candidates) && snapshot.candidates.length ? PHASE.DONE : PHASE.IDLE);
     setCurrentQuery(typeof snapshot.currentQuery === "string" ? snapshot.currentQuery : "");
@@ -181,11 +196,6 @@ export default function Home() {
     if (snapshot.searchIntent === "mentor" || snapshot.searchIntent === "collaborator") {
       setSearchIntent(snapshot.searchIntent);
     }
-    setTeamMemberIds(
-      Array.isArray(snapshot.teamMemberIds)
-        ? snapshot.teamMemberIds.map(Number).filter(Number.isInteger).slice(0, 25)
-        : []
-    );
     setTimeout(() => {
       sessionHydratingRef.current = false;
     }, 0);
@@ -198,9 +208,15 @@ export default function Home() {
       const params = new URLSearchParams(window.location.search);
       const nextIntent = parsePersonaIntent(params.get("intent"));
       const freshConversation = params.get('fresh') === '1';
+      const graphContextId = parseAidParam(params.get("context_person_id"));
+      const graphHandoff = params.get("handoff") === "person" && graphContextId !== UNLINKED_AID;
+      const graphContextNumber = Number(graphContextId);
       if (freshConversation) {
         params.delete('fresh');
-        window.history.replaceState({}, '', `${window.location.pathname}?${params.toString()}`);
+      }
+      if (graphHandoff) {
+        params.delete("handoff");
+        params.delete("context_person_id");
       }
       const aidParam = parseAidParam(params.get("aid"));
       const tokenFromUrl = params.get("mx_user_token") || "";
@@ -213,6 +229,10 @@ export default function Home() {
       if (tokenFromUrl && typeof window !== "undefined") {
         window.sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, tokenFromUrl);
         params.delete("mx_user_token");
+        const nextSearch = params.toString();
+        const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
+        window.history.replaceState({}, "", nextUrl);
+      } else if (freshConversation || graphHandoff) {
         const nextSearch = params.toString();
         const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
         window.history.replaceState({}, "", nextUrl);
@@ -238,12 +258,42 @@ export default function Home() {
       } else {
         setAuthorInfo(null);
       }
+      let fetchedGraphPerson = null;
+      if (graphHandoff && Number.isInteger(graphContextNumber)) {
+        try {
+          fetchedGraphPerson = await fetchAuthor(graphContextId);
+          if (cancelled) return;
+          setGraphContextPeople([{
+            authorId: graphContextNumber,
+            name: String(fetchedGraphPerson?.name || "Selected researcher").trim(),
+            affiliation: String(fetchedGraphPerson?.affiliation || "").trim(),
+            papers: Array.isArray(fetchedGraphPerson?.papers) ? fetchedGraphPerson.papers : [],
+            source: "graph",
+          }]);
+          setGraphHandoffPersonId(graphContextNumber);
+        } catch {
+          if (cancelled) return;
+          setGraphContextPeople([]);
+          setGraphHandoffPersonId(null);
+        }
+      } else if (!graphHandoff) {
+        setGraphContextPeople([]);
+        setGraphHandoffPersonId(null);
+      }
       if (cancelled) return;
       setUiReady(true);
+
+      const applyGraphHandoff = () => {
+        if (!graphHandoff || !Number.isInteger(graphContextNumber)) return;
+        const name = String(fetchedGraphPerson?.name || "this researcher").trim();
+        setContextPersonIds([graphContextNumber]);
+        setInputValue(`How does ${name}'s published work fit my research topic or idea?`);
+      };
 
       if (!resolvedToken) {
         if (cancelled) return;
         resetWorkflowState();
+        applyGraphHandoff();
         setSessionStatus({ loading: false, saving: false, error: "" });
         sessionBootstrappedRef.current = true;
         return;
@@ -290,6 +340,7 @@ export default function Home() {
         } else {
           resetWorkflowState();
         }
+        applyGraphHandoff();
         setSessionStatus({ loading: false, saving: false, error: "" });
       } catch (error) {
         if (cancelled) return;
@@ -317,7 +368,6 @@ export default function Home() {
 
   useEffect(() => {
     if (!inIframe) return undefined;
-    postToBridge({ type: BRIDGE_MSG.REQUEST_SAVED });
     const onMessage = (event) => {
       if (!isBridgeOrigin(event.origin)) return;
       const data = event.data;
@@ -333,6 +383,7 @@ export default function Home() {
       }
     };
     window.addEventListener("message", onMessage);
+    postToBridge({ type: BRIDGE_MSG.REQUEST_SAVED });
     return () => window.removeEventListener("message", onMessage);
   }, [inIframe]);
 
@@ -345,15 +396,22 @@ export default function Home() {
   useEffect(() => {
     if (!savedPeopleReady) return;
     const availableIds = new Set(savedPeople.map((person) => Number(person.authorId)));
-    setTeamMemberIds((current) => current.filter((authorId) => availableIds.has(Number(authorId))));
-    setMentorContextIds((current) => current.filter((authorId) => availableIds.has(Number(authorId))));
-  }, [savedPeople, savedPeopleReady]);
+    graphContextPeople.forEach((person) => availableIds.add(Number(person.authorId)));
+    setContextPersonIds((current) => current.filter((authorId) => availableIds.has(Number(authorId))));
+  }, [graphContextPeople, savedPeople, savedPeopleReady]);
 
   useEffect(() => {
-    const role = intent === "mentor" ? "mentor" : "collaborator";
-    const name = focalName;
-    document.title = name ? `MATRIX · ${role} for ${name}` : `MATRIX · Find a ${role}`;
-  }, [intent, focalName]);
+    document.title = focalName ? `MATRIX | Research guide for ${focalName}` : "MATRIX | Research guide";
+  }, [focalName]);
+
+  const contextPeople = useMemo(() => {
+    const byId = new Map();
+    savedPeople.forEach((person) => byId.set(Number(person.authorId), person));
+    graphContextPeople.forEach((person) => byId.set(Number(person.authorId), person));
+    return contextPersonIds
+      .map((authorId) => byId.get(Number(authorId)))
+      .filter(Boolean);
+  }, [contextPersonIds, graphContextPeople, savedPeople]);
 
   const addMessage = useCallback((role, content, extra = {}) => {
     setMessages((prev) => [
@@ -562,7 +620,7 @@ export default function Home() {
     return () => window.removeEventListener("pagehide", flush);
   }, [matrixUserToken, persistSessionNow]);
 
-  const shortlistForChat = useCallback(() => {
+  const shortlistForChat = useCallback((activeIntent = intent) => {
     return candidates.slice(0, RESULT_LIMIT).map((candidate) => {
       const ranked = rerankedMap[candidate.author_id] || {};
       return {
@@ -573,23 +631,23 @@ export default function Home() {
         hops: ranked.hops,
         mutual_coauthors: ranked.mutual_coauthors || [],
         papers: ranked.papers || candidate.papers || [],
-        intent,
+        intent: activeIntent,
       };
     });
   }, [candidates, intent, rerankedMap]);
 
   const runRerank = useCallback(
-    async (cands) => {
+    async (cands, activeIntent = intent) => {
       const rerankController = new AbortController();
       rerankAbortRef.current = rerankController;
       setRerankProgress({ done: 0, total: 1 });
       setRerankError(false);
       try {
         const payload = await explainCandidates({
-          aid: intent === 'collaborator' && linked ? aid : UNLINKED_AID,
-          teamMemberIds: intent === 'collaborator' ? teamMemberIds.map(String) : [],
-          teamPeople: intent === 'collaborator'
-            ? savedPeople.filter((person) => teamMemberIds.includes(Number(person.authorId))).map((person) => {
+          aid: activeIntent === 'collaborator' && linked ? aid : UNLINKED_AID,
+          teamMemberIds: activeIntent === 'collaborator' ? contextPersonIds.map(String) : [],
+          teamPeople: activeIntent === 'collaborator'
+            ? contextPeople.map((person) => {
                 const fromResults = cands.find((candidate) => Number(candidate.author_id) === Number(person.authorId));
                 return {
                   author_id: String(person.authorId),
@@ -598,9 +656,9 @@ export default function Home() {
                 };
               })
             : [],
-          seekerPapers: attachedPapers.map((paper) => paper.title),
+          seekerPapers: [],
           query: currentQuery,
-          intent,
+          intent: activeIntent,
           candidates: cands,
           signal: rerankController.signal,
         });
@@ -632,30 +690,35 @@ export default function Home() {
         if (rerankAbortRef.current === rerankController) rerankAbortRef.current = null;
       }
     },
-    [attachedPapers, currentQuery, intent, aid, linked, teamMemberIds, savedPeople]
+    [currentQuery, intent, aid, linked, contextPeople, contextPersonIds]
   );
 
   const handleRetryNotes = useCallback(() => {
     if (!candidates.length || phase === PHASE.RERANKING || phase === PHASE.SEARCHING) return;
     setPhase(PHASE.RERANKING);
-    runRerank(candidates);
-  }, [candidates, phase, runRerank]);
+    runRerank(candidates, searchIntent);
+  }, [candidates, phase, runRerank, searchIntent]);
 
-  const runSearch = useCallback(async () => {
+  const clearSearchContext = useCallback(() => {
+    if (!contextPersonIds.length) return;
+    setContextPersonIds([]);
+    setProfileNotice("People removed from this search plan.");
+  }, [contextPersonIds.length]);
+
+  const runSearch = useCallback(async (activeIntent = intent) => {
     const searchController = new AbortController();
     try {
       searchAbortRef.current = searchController;
-      setSearchIntent(intent);
+      setSearchIntent(activeIntent);
       setRerankError(false);
-      const attachedTitles = attachedPapers.map((paper) => paper.title);
+      const attachedCount = attachedPapers.length;
       const { candidates: cands } = await searchCandidates({
-        representativeTitles: attachedTitles.join("\n"),
         aid: linked ? aid : UNLINKED_AID,
         query: currentQuery,
         topK: RESULT_LIMIT,
-        bridge2aiOnly: intent === "mentor",
-        outsideNetwork: intent === "collaborator",
-        teamMemberIds: intent === "collaborator" ? teamMemberIds : [],
+        bridge2aiOnly: activeIntent === "mentor",
+        outsideNetwork: activeIntent === "collaborator",
+        teamMemberIds: activeIntent === "collaborator" ? contextPersonIds : [],
         signal: searchController.signal,
       });
       if (searchController.signal.aborted) return;
@@ -673,18 +736,18 @@ export default function Home() {
         return;
       }
       const teamContext =
-        intent === "collaborator" && teamMemberIds.length > 0
-          ? ` Using ${teamMemberIds.length} team ${teamMemberIds.length === 1 ? "member" : "members"}.`
+        activeIntent === "collaborator" && contextPersonIds.length > 0
+          ? ` Using ${contextPersonIds.length} selected ${contextPersonIds.length === 1 ? "person" : "people"} as team context.`
           : "";
       addMessage(
         "assistant",
-        attachedTitles.length > 0
-          ? `Researchers for **${currentQuery}**, using your attached ${attachedTitles.length === 1 ? "draft" : "drafts"}.${teamContext}`
+        attachedCount > 0
+          ? `Researchers for **${currentQuery}**. Your one-time attachment${attachedCount === 1 ? "" : "s"} helped frame this request.${teamContext}`
           : `Researchers for **${currentQuery}**.${teamContext}`
       );
       setAttachedPapers([]);
       setPhase(PHASE.RERANKING);
-      runRerank(nextCandidates);
+      runRerank(nextCandidates, activeIntent);
     } catch (error) {
       if (searchController.signal.aborted) return;
       searchAbortRef.current = null;
@@ -704,13 +767,22 @@ export default function Home() {
     intent,
     linked,
     runRerank,
-    teamMemberIds,
+    contextPersonIds,
   ]);
 
-  const handleSend = async (presetText) => {
-    if (switchingPersonaRef.current) return;
+  const handleConfirmSearchPlan = useCallback(() => {
+    if (!currentQuery || phase !== PHASE.AWAITING_CONFIRM) return;
+    addMessage("user", "Search this plan.");
+    addMessage("assistant", "Searching now.");
+    setPhase(PHASE.SEARCHING);
+    void runSearch(intent);
+  }, [addMessage, currentQuery, intent, phase, runSearch]);
+
+  const handleSend = async (presetText, requestedIntent) => {
     const text = String(presetText ?? inputValue).trim();
     if (!text) return;
+    let activeIntent = requestedIntent || inferPersonaIntent(text, intent);
+    if (activeIntent !== intent) setIntent(activeIntent);
     if (phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
       setQueuedFollowUp(text);
       setInputValue("");
@@ -736,29 +808,34 @@ export default function Home() {
 
     try {
       const result = await chatMessage({
-        representativeTitles: attachedPapers.map((paper) => paper.title).join('\n'),
-        contextPersonIds: intent === 'mentor' ? mentorContextIds : teamMemberIds,
+        attachedContext: attachedPapers.map((paper) => paper.context),
+        contextPersonIds,
         aid: linked ? aid : UNLINKED_AID,
         userInput: text,
         conversationHistory: [...messages, { role: "user", content: text }],
         currentQuery: currentQuery || null,
         pastQueries,
         priorInputs: [...priorInputs, text],
-        searchResults: shortlistForChat(),
+        searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
-        intent,
+        intent: activeIntent,
         signal: chatController.signal,
       });
       if (chatController.signal.aborted) return;
       chatAbortRef.current = null;
+      if (result.intent === "mentor" || result.intent === "collaborator") {
+        activeIntent = result.intent;
+        setIntent(activeIntent);
+      }
 
       if (result.action === "confirm" && currentQuery) {
         addMessage("assistant", "Searching now.");
         setPhase(PHASE.SEARCHING);
-        await runSearch();
+        await runSearch(activeIntent);
       } else if (result.action === "search") {
         const query = result.query;
         const justification = result.justification || "";
+        setSearchIntent(activeIntent);
         setCurrentQuery(query);
         setPastQueries((prev) => [...prev, query]);
         if (previousPhase === PHASE.DONE || previousPhase === PHASE.IDLE) {
@@ -798,7 +875,7 @@ export default function Home() {
     void handleSendRef.current?.(text);
   }, [phase, queuedFollowUp]);
 
-  const isLoading = switchingPersona || phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING;
+  const isLoading = phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING;
   const canStop = isLoading;
 
   const orderedCandidates = useMemo(() => {
@@ -810,18 +887,41 @@ export default function Home() {
     [savedPeople]
   );
 
+  const toggleContextPerson = useCallback((authorId) => {
+    const value = Number(authorId);
+    if (!Number.isInteger(value)) return;
+    setContextPersonIds((current) => {
+      if (current.includes(value)) return current.filter((id) => id !== value);
+      if (current.length >= 8) {
+        setProfileNotice("Add up to 8 saved people to this chat.");
+        return current;
+      }
+      return [...current, value];
+    });
+  }, []);
+
   const suggestedPrompts =
-    intent === 'mentor' && mentorContextIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
+    contextPersonIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
       ? [
-          `How does ${savedPeople.find((person) => Number(person.authorId) === mentorContextIds[0])?.name || 'the included person'} fit my learning goal?`,
-          mentorContextIds.length > 1 ? 'Compare the included people using their publications' : 'What should I ask this person about mentoring?',
-          'Find more mentors for my learning goal',
+          `How does ${contextPeople[0]?.name || 'the selected person'} fit my research idea?`,
+          contextPersonIds.length > 1 ? 'Compare the selected people using their publications' : 'What evidence supports this person as a fit?',
+          intent === 'mentor' ? 'Find more mentors for my learning goal' : 'What expertise should this team add next?',
         ]
       : phase === PHASE.AWAITING_CONFIRM
       ? copy.promptsConfirm
       : candidates.length > 0
-        ? followUpPrompts(orderedCandidates, rerankedMap, copy)
-        : copy.promptsIdle;
+        ? followUpPrompts(orderedCandidates, rerankedMap, PERSONA_COPY[searchIntent] || copy)
+      : copy.promptsIdle;
+
+  const graphHandoffPerson = contextPeople.find(
+    (person) => Number(person.authorId) === graphHandoffPersonId
+  );
+  const graphHandoffDraftPrompts = graphHandoffPerson
+    ? [
+        "What evidence supports this person’s fit for my topic?",
+        "What complementary expertise would a team around them need?",
+      ]
+    : [];
 
   const handleAttachFiles = useCallback(async (fileList) => {
     const { attached, skippedType, skippedSize } = await readAttachedFiles(fileList, attachedPapers.length);
@@ -861,22 +961,17 @@ export default function Home() {
     });
     setSavedPeople((prev) => [person, ...prev.filter((item) => Number(item.authorId) !== authorId)]);
     setSavedPeopleReady(true);
-    setProfileNotice("Saved.");
+    setProfileNotice("Saved. Use Add people in the composer when you want them in this chat.");
   };
+
+  const returnToGraph = useCallback(() => {
+    void persistSessionNow();
+    postToBridge({ type: BRIDGE_MSG.RETURN_TO_GRAPH });
+  }, [persistSessionNow]);
 
   const unsavePerson = (authorId) => {
     postToBridge({ type: BRIDGE_MSG.UNSAVE_PERSON, authorId: Number(authorId) });
     setSavedPeople((prev) => prev.filter((person) => Number(person.authorId) !== Number(authorId)));
-  };
-
-  const toggleTeamMember = (authorId) => {
-    const normalizedId = Number(authorId);
-    if (!Number.isInteger(normalizedId)) return;
-    setTeamMemberIds((current) =>
-      current.includes(normalizedId)
-        ? current.filter((id) => id !== normalizedId)
-        : [...current, normalizedId].slice(-25)
-    );
   };
 
   const openReportModal = (page, seed = "") => {
@@ -926,31 +1021,6 @@ export default function Home() {
     }
   };
 
-  const handleIntentChange = async (nextIntent) => {
-    if (nextIntent === intent || switchingPersonaRef.current || isLoading || sessionStatus.loading) return;
-    switchingPersonaRef.current = true;
-    setSwitchingPersona(true);
-    window.clearTimeout(sessionSaveTimerRef.current);
-    try {
-      if (matrixUserToken && messages.length) {
-        const sessionId = await ensureCurrentSession();
-        await saveChatSession({ sessionId, aid, focalAuthorName: focalName || '', messages,
-          state: buildSessionStateSnapshot(), authToken: matrixUserToken });
-      }
-    } catch {
-      switchingPersonaRef.current = false;
-      setSwitchingPersona(false);
-      setProfileNotice('Could not save this conversation.');
-      return;
-    }
-    const params = new URLSearchParams(window.location.search);
-    params.set("intent", nextIntent);
-    params.set('fresh', '1');
-    params.delete("session");
-    // A fresh document prevents old requests, save callbacks and selected context leaking across modes.
-    window.location.assign(`${window.location.pathname}?${params.toString()}`);
-  };
-
   useEffect(() => {
     const onKey = (event) => {
       if (event.key !== "Escape") return;
@@ -967,10 +1037,10 @@ export default function Home() {
       {sessionStatus.error && <div className="session-status session-status-error">{sessionStatus.error}</div>}
       {!matrixUserToken ? (
         <div className="session-empty">Sign in on the graph to keep chats.</div>
-      ) : sessions.filter((session) => (session.intent || intent) === intent).length === 0 ? (
+      ) : sessions.length === 0 ? (
         <div className="session-empty">No previous chats yet.</div>
       ) : (
-        sessions.filter((session) => (session.intent || intent) === intent).map((session) => (
+        sessions.map((session) => (
           <button
             key={session.id}
             className={`session-chip ${session.id === currentSessionId ? "active" : ""}`}
@@ -982,7 +1052,10 @@ export default function Home() {
             role="menuitem"
           >
             <span className="session-chip-title">{session.title || "Untitled session"}</span>
-            <span className="session-chip-meta">{relativeTime(session.last_message_at)}</span>
+            <span className="session-chip-meta">
+              <span>{session.intent === "mentor" ? "Mentor" : "Team"}</span>
+              <span>{relativeTime(session.last_message_at)}</span>
+            </span>
           </button>
         ))
       )}
@@ -1002,41 +1075,52 @@ export default function Home() {
     );
   }
 
-  const shellClass = ["app-container", inIframe ? "is-embedded" : ""].filter(Boolean).join(" ");
+  const hasActiveConversation = messages.length > 0 || candidates.length > 0 || phase !== PHASE.IDLE;
+  const shellClass = ["app-container", hasActiveConversation ? "has-active-conversation" : "", inIframe ? "is-embedded" : ""].filter(Boolean).join(" ");
+  const hasResultWorkspace = candidates.length > 0 || phase === PHASE.SEARCHING || phase === PHASE.RERANKING;
+  const workspaceClass = "conversation-only";
+  const selectedContextNames = contextPeople.map((person) => person.name);
+  const inlineResults = hasResultWorkspace ? (
+    <ResultsWorkspace
+      copy={resultsCopy}
+      candidates={candidates}
+      orderedCandidates={orderedCandidates}
+      rerankedMap={rerankedMap}
+      phase={phase}
+      currentQuery={currentQuery}
+      savedIds={savedIds}
+      teamBuilding={searchIntent === "collaborator"}
+      teamNames={selectedContextNames}
+      selectionDisabled={isLoading}
+      onOpenProfile={openProfile}
+      onSave={savePerson}
+      onUnsave={unsavePerson}
+      onRetryNotes={handleRetryNotes}
+      rerankError={rerankError}
+    />
+  ) : null;
 
   return (
     <div className={shellClass}>
       <FocalAuthorBar
-        copy={copy}
         intent={intent}
         authorInfo={authorInfo}
         seekerName={seekerName}
-        profileContextEnabled={intent === "collaborator" && linked}
-        inIframe={inIframe}
+        profileContextEnabled={linked}
         sessionStatus={sessionStatus}
         matrixUserToken={matrixUserToken}
         historyOpen={historyOpen}
         historyMenu={historyMenu}
         isLoading={isLoading}
-        onIntentChange={handleIntentChange}
         onOpenFocal={() => openProfile(aid)}
         onNewSession={handleNewSession}
         onToggleHistory={() => setHistoryOpen((open) => !open)}
+        onReturnToGraph={inIframe ? returnToGraph : undefined}
       />
 
-      <div className="workspace">
-        <SessionSidebar
-          sessions={sessions}
-          currentSessionId={currentSessionId}
-          sessionStatus={sessionStatus}
-          matrixUserToken={matrixUserToken}
-          isLoading={isLoading}
-          onNewSession={handleNewSession}
-          onSelectSession={handleSelectSession}
-        />
+      <div className={`workspace ${workspaceClass}`}>
         <ChatPane
-          copy={copy}
-          authorName={focalName || ""}
+          starters={GENERAL_STARTERS}
           messages={messages}
           phase={phase}
           isLoading={isLoading}
@@ -1046,8 +1130,22 @@ export default function Home() {
           attachedPapers={attachedPapers}
           onAttachFiles={handleAttachFiles}
           onRemoveAttachment={removeAttachment}
+          savedPeople={savedPeople}
+          contextPeople={contextPeople}
+          contextPersonIds={contextPersonIds}
+          onToggleContextPerson={toggleContextPerson}
+          resultsWorkspace={inlineResults}
+          notice={profileNotice}
+          onDismissNotice={() => setProfileNotice("")}
           suggestedPrompts={suggestedPrompts}
-          promptMeta={copy.promptMeta}
+          draftPrompts={graphHandoffDraftPrompts}
+          searchPlan={phase === PHASE.AWAITING_CONFIRM && currentQuery ? {
+            query: currentQuery,
+            intent,
+            contextCount: contextPersonIds.length,
+          } : null}
+          onConfirmSearchPlan={handleConfirmSearchPlan}
+          onClearSearchContext={clearSearchContext}
           queuedFollowUp={queuedFollowUp}
           onSend={handleSend}
           onStop={handleStop}
@@ -1056,34 +1154,6 @@ export default function Home() {
           citations={orderedCandidates.flatMap((candidate) => rerankedMap[candidate.author_id]?.papers || candidate.papers || []).slice(0, 8)}
         />
 
-        <ResultsWorkspace
-          copy={resultsCopy}
-          candidates={candidates}
-          orderedCandidates={orderedCandidates}
-          rerankedMap={rerankedMap}
-          phase={phase}
-          currentQuery={currentQuery}
-          savedPeople={savedPeople}
-          savedIds={savedIds}
-          teamBuilding={intent === "collaborator"}
-          teamMemberIds={new Set(intent === 'mentor' ? mentorContextIds : teamMemberIds)}
-          selectionDisabled={isLoading}
-          profileNotice={profileNotice}
-          onDismissNotice={() => setProfileNotice("")}
-          onOpenProfile={openProfile}
-          onSave={savePerson}
-          onUnsave={unsavePerson}
-          onRetryNotes={handleRetryNotes}
-          rerankError={rerankError}
-          onToggleTeam={intent === 'mentor' ? (id) => {
-            const value = Number(id);
-            if (!mentorContextIds.includes(value) && mentorContextIds.length >= 8) {
-              setProfileNotice('Include up to 8 people.');
-              return;
-            }
-            setMentorContextIds((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
-          } : toggleTeamMember}
-        />
       </div>
 
       <ConfirmPopover

@@ -5,6 +5,7 @@ export const BRIDGE_MSG = {
   REQUEST_SAVED: "bridge2ai-request-saved",
   SAVED_PEOPLE: "bridge2ai-saved-people",
   OPEN_PERSON_RESULT: "bridge2ai-open-person-result",
+  RETURN_TO_GRAPH: "bridge2ai-return-to-graph",
 };
 
 export function inBridgeIframe() {
