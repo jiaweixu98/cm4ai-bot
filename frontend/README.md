@@ -10,23 +10,24 @@ Create a local env file:
 cp .env.local.example .env.local
 ```
 
-Start the frontend:
+Start the frontend on the isolated development port:
 
 ```bash
 npm install
-npm run dev -- --port 3000
+npm run dev -- --hostname 127.0.0.1 --port 3100
 ```
 
 Default local URL:
 
-- `http://localhost:3000`
+- `http://127.0.0.1:3100`
 
-By default, `frontend/.env.local.example` points:
+For the integrated local workspace, configure:
 
-- `NEXT_PUBLIC_API_URL` to `http://localhost:8000`
-- `BRIDGE_REPORT_API_URL` to `http://localhost:5173/api/report-error`
+- `NEXT_PUBLIC_API_URL` to `http://127.0.0.1:8100`
+- `MATRIX_BACKEND_URL` to `http://127.0.0.1:8100`
+- `BRIDGE_REPORT_API_URL` to `http://127.0.0.1:4173/api/report-error`
 
-So the backend should be running on `8000`, and the graph app should be running on `5173` if you want to test report-feedback flows end to end.
+The backend should be running on `8100`, and the graph app should be running on `4173` for end-to-end integration. Ports `3000`, `8000`, and the `/home/ubuntu` checkouts are production on the shared host.
 
 ## Local Development With Backend
 
@@ -38,10 +39,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-uvicorn main:app --reload --port 8000
+MATRIX_LLM_MODE=mock uvicorn main:app --reload --host 127.0.0.1 --port 8100
 ```
 
-If you are testing the integrated Bridge2AI flow, also run `bridge2aikg` separately on its default dev port (`5173`).
+If you are testing the integrated Bridge2AI flow, also run `bridge2aikg` separately on `127.0.0.1:4173`.
 
 In local development, `bridge2aikg` uses a mock ORCID session instead of real ORCID OAuth. Real ORCID login must be verified in a deployed environment.
 
