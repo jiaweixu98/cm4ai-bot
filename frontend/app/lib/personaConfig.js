@@ -4,6 +4,52 @@ export function parsePersonaIntent(value) {
   return value === "mentor" ? "mentor" : "collaborator";
 }
 
+export function inferPersonaIntent(value, fallback = "collaborator") {
+  const text = String(value || "").toLowerCase();
+  const mentorSignals = [
+    /\bmentor(?:ship)?\b/,
+    /\b(advisor|adviser|supervisor|professor)\b/,
+    /\blearn (?:from|with|about)\b/,
+    /\bhelp me learn\b/,
+    /\b(guidance|coaching|training)\b/,
+    /\bwho (?:can|should) i (?:learn from|ask)\b/,
+  ];
+  const collaboratorSignals = [
+    /\b(collaborator|collaboration|co-?investigator|partner)\b/,
+    /\b(build|form|strengthen|complete) (?:a |my |our )?team\b/,
+    /\b(team member|team[- ]building|research team)\b/,
+    /\b(expert|expertise|specialist) (?:in|for)\b/,
+    /\b(missing skill|capability|complementary)\b/,
+    /\bwho (?:can|could) (?:join|complement|add to)\b/,
+  ];
+  const mentorScore = mentorSignals.reduce((score, pattern) => score + Number(pattern.test(text)), 0);
+  const collaboratorScore = collaboratorSignals.reduce((score, pattern) => score + Number(pattern.test(text)), 0);
+  if (mentorScore > collaboratorScore) return "mentor";
+  if (collaboratorScore > mentorScore) return "collaborator";
+  return fallback === "mentor" ? "mentor" : "collaborator";
+}
+
+export const GENERAL_STARTERS = [
+  {
+    intent: "mentor",
+    icon: "mentor",
+    label: "Find a mentor",
+    prompt: "Find a mentor for privacy-preserving federated analysis",
+  },
+  {
+    intent: "collaborator",
+    icon: "team",
+    label: "Find collaborators",
+    prompt: "Find a collaborator for prospective clinical validation across health systems",
+  },
+  {
+    intent: "collaborator",
+    icon: "clinical",
+    label: "Build a clinical AI team",
+    prompt: "Find collaborators for clinical NLP and EHR phenotyping",
+  },
+];
+
 export function parseAidParam(value) {
   const aid = String(value || "").trim();
   if (!aid || aid.toLowerCase() === UNLINKED_AID) return UNLINKED_AID;

@@ -1,5 +1,6 @@
 export const MAX_ATTACHED_FILES = 5;
 export const MAX_FILE_BYTES = 200 * 1024;
+export const MAX_CONTEXT_CHARS = 1200;
 export const ACCEPTED_EXTENSIONS = [".txt", ".md", ".markdown", ".tex"];
 
 let attachCounter = 0;
@@ -23,6 +24,13 @@ function titleFromText(text, fileName) {
     if (line.length >= 12) return line.slice(0, 140);
   }
   return cleanFileName(fileName) || "Dropped draft";
+}
+
+function contextFromText(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_CONTEXT_CHARS);
 }
 
 function extensionOf(name) {
@@ -50,7 +58,12 @@ export async function readAttachedFiles(fileList, existingCount = 0) {
       const title = titleFromText(text, file.name);
       if (!title) continue;
       attachCounter += 1;
-      attached.push({ id: `attach-${Date.now()}-${attachCounter}`, title, filename: file.name });
+      attached.push({
+        id: `attach-${Date.now()}-${attachCounter}`,
+        title,
+        filename: file.name,
+        context: contextFromText(text),
+      });
     } catch {
       skippedType += 1;
     }

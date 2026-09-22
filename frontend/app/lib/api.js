@@ -46,7 +46,6 @@ export async function checkConfirmation({ userText, currentQuery, priorInputs })
 }
 
 export async function searchCandidates({
-  representativeTitles = '',
   aid,
   query,
   topK = 8,
@@ -64,7 +63,6 @@ export async function searchCandidates({
       aid: aid || "unlinked",
       query,
       top_k: topK,
-      representative_titles: representativeTitles.split('\n').map((title) => title.trim()).filter(Boolean).slice(0, 10),
       bridge2ai_only: Boolean(bridge2aiOnly),
       outside_network: Boolean(outsideNetwork),
       team_member_ids: Array.isArray(teamMemberIds) ? teamMemberIds.map(String) : [],
@@ -167,7 +165,7 @@ export function rerankCandidates({ aid, query, candidates }, onBatch, onComplete
 }
 
 export async function chatMessage({
-  representativeTitles = '',
+  attachedContext = [],
   contextPersonIds = [],
   aid,
   userInput,
@@ -188,7 +186,9 @@ export async function chatMessage({
       aid: aid || "unlinked",
       user_input: userInput,
       context_person_ids: contextPersonIds.map(String),
-      representative_titles: representativeTitles.split('\n').map((title) => title.trim()).filter(Boolean).slice(0, 10),
+      attached_context: Array.isArray(attachedContext)
+        ? attachedContext.map((text) => String(text || "").trim().slice(0, 1200)).filter(Boolean).slice(0, 5)
+        : [],
       conversation_history: conversationHistory || [],
       current_query: currentQuery || null,
       past_queries: pastQueries || [],

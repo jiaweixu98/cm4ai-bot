@@ -59,16 +59,7 @@ export async function POST(request) {
     }
 
     let rows = [];
-    const titles = Array.isArray(body.representative_titles) ? body.representative_titles.filter((t) => typeof t === 'string' && t.trim()).slice(0, 10).map((t) => t.trim().slice(0, 500)) : [];
-    const paperSearch = bridge2aiOnly && titles.length > 0;
-    if (paperSearch) {
-      const token = process.env.BRIDGE_INTERNAL_API_TOKEN;
-      const { ok, status, payload } = await proxyJson('/api/author-preview', {
-        full_name: 'Researcher', affiliation: '', papers: titles.map((title) => ({ title })), top_k: topK + (/^\d+$/.test(aid) ? 1 : 0), bridge2ai_only: true,
-      }, token ? { 'x-bridge-api-token': token } : {});
-      if (!ok) return Response.json({ error: 'Paper-based mentor search is unavailable' }, { status });
-      rows = (payload.nearest_authors || []).filter((person) => String(person.author_id) !== aid);
-    } else if (bridge2aiOnly) {
+    if (bridge2aiOnly) {
       const { ok, status, payload } = await proxyJson(
         "/api/search",
         {
@@ -100,7 +91,7 @@ export async function POST(request) {
     const candidates = (
       await Promise.all((Array.isArray(rows) ? rows : []).map(asCandidate).filter(Boolean).map(enrichPapers))
     ).slice(0, topK);
-    return Response.json({ candidates: candidates.map((candidate) => ({ ...candidate, search_basis: paperSearch ? 'representative_papers' : 'research_need' })), total: candidates.length });
+    return Response.json({ candidates: candidates.map((candidate) => ({ ...candidate, search_basis: 'research_need' })), total: candidates.length });
   } catch (error) {
     console.error("search-people failed:", error);
     return Response.json({ error: "Search failed" }, { status: 500 });
