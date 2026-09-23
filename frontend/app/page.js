@@ -73,6 +73,7 @@ export default function Home() {
   const [sessionStatus, setSessionStatus] = useState({ loading: true, saving: false, error: "" });
 
   const [currentQuery, setCurrentQuery] = useState("");
+  const [researchPlan, setResearchPlan] = useState(null);
   const [pastQueries, setPastQueries] = useState([]);
   const [priorInputs, setPriorInputs] = useState([]);
   const [candidates, setCandidates] = useState([]);
@@ -112,6 +113,7 @@ export default function Home() {
     setMessages([]);
     setPhase(PHASE.IDLE);
     setCurrentQuery("");
+    setResearchPlan(null);
     setPastQueries([]);
     setPriorInputs([]);
     setCandidates([]);
@@ -138,6 +140,7 @@ export default function Home() {
     () => ({
       phase,
       currentQuery,
+      researchPlan,
       pastQueries,
       priorInputs,
       candidates,
@@ -149,7 +152,7 @@ export default function Home() {
       contextPersonIds,
       graphContextPeople,
     }),
-    [phase, currentQuery, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople]
+    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople]
   );
 
   const applySessionSnapshot = useCallback((session) => {
@@ -178,6 +181,7 @@ export default function Home() {
     setMessages(restoredMessages);
     setPhase(Array.isArray(snapshot.candidates) && snapshot.candidates.length ? PHASE.DONE : PHASE.IDLE);
     setCurrentQuery(typeof snapshot.currentQuery === "string" ? snapshot.currentQuery : "");
+    setResearchPlan(snapshot.researchPlan && typeof snapshot.researchPlan === "object" ? snapshot.researchPlan : null);
     setPastQueries(Array.isArray(snapshot.pastQueries) ? snapshot.pastQueries : []);
     setPriorInputs(Array.isArray(snapshot.priorInputs) ? snapshot.priorInputs : []);
     setCandidates(Array.isArray(snapshot.candidates) ? snapshot.candidates : []);
@@ -657,7 +661,7 @@ export default function Home() {
               })
             : [],
           seekerPapers: [],
-          query: currentQuery,
+          query: researchPlan?.question || currentQuery,
           intent: activeIntent,
           candidates: cands,
           signal: rerankController.signal,
@@ -690,7 +694,7 @@ export default function Home() {
         if (rerankAbortRef.current === rerankController) rerankAbortRef.current = null;
       }
     },
-    [currentQuery, intent, aid, linked, contextPeople, contextPersonIds]
+    [currentQuery, researchPlan, intent, aid, linked, contextPeople, contextPersonIds]
   );
 
   const handleRetryNotes = useCallback(() => {
@@ -719,6 +723,7 @@ export default function Home() {
         bridge2aiOnly: activeIntent === "mentor",
         outsideNetwork: activeIntent === "collaborator",
         teamMemberIds: activeIntent === "collaborator" ? contextPersonIds : [],
+        researchPlan,
         signal: searchController.signal,
       });
       if (searchController.signal.aborted) return;
@@ -764,6 +769,7 @@ export default function Home() {
     attachedPapers,
     candidates.length,
     currentQuery,
+    researchPlan,
     intent,
     linked,
     runRerank,
@@ -819,6 +825,7 @@ export default function Home() {
         searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
         intent: activeIntent,
+        pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
         signal: chatController.signal,
       });
       if (chatController.signal.aborted) return;
@@ -826,6 +833,9 @@ export default function Home() {
       if (result.intent === "mentor" || result.intent === "collaborator") {
         activeIntent = result.intent;
         setIntent(activeIntent);
+      }
+      if (result.research_plan && typeof result.research_plan === "object") {
+        setResearchPlan(result.research_plan);
       }
 
       if (result.action === "confirm" && currentQuery) {
@@ -848,6 +858,10 @@ export default function Home() {
         if (justification) msg += ` ${justification.replace(/\s+/g, " ").trim()}`;
         addMessage("assistant", msg);
         setPhase(PHASE.AWAITING_CONFIRM);
+      } else if (result.action === "clarify") {
+        const reply = result.reply || "What detail matters most for this search?";
+        addMessage("assistant", reply);
+        setPhase(PHASE.IDLE);
       } else {
         const reply = result.reply || "Ask about someone in the list, or describe a new topic.";
         addMessage("assistant", reply);
@@ -1143,6 +1157,9 @@ export default function Home() {
             query: currentQuery,
             intent,
             contextCount: contextPersonIds.length,
+            question: researchPlan?.question || "",
+            fields: researchPlan?.fields || null,
+            affiliationFilters: researchPlan?.affiliation_filters || [],
           } : null}
           onConfirmSearchPlan={handleConfirmSearchPlan}
           onClearSearchContext={clearSearchContext}

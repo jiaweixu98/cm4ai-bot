@@ -26,10 +26,32 @@ async function mockApi(page, capture) {
       if (data.user_input === "Search that") {
         payload = { action: "confirm" };
       } else {
+        const mentor = data.intent === "mentor";
         payload = {
           action: "search",
-          query: data.intent === "mentor" ? "federated analysis" : "clinical validation",
+          query: mentor ? "federated clinical analysis" : "clinical model validation",
           justification: "I focused the search on the research need you described.",
+          research_plan: {
+            schema_version: "research-fit-v1",
+            question: mentor ? "Learn federated analysis across clinical sites" : "Find a collaborator for clinical model validation",
+            intent: mentor ? "mentor" : "collaborator",
+            fields: {
+              topic: mentor ? ["federated analysis"] : ["clinical model"],
+              method: [],
+              population: [],
+              setting: mentor ? ["clinical sites"] : [],
+              evidence_stage: mentor ? [] : ["validation"],
+              needed_capability: mentor ? ["learn federated analysis"] : ["model validation"],
+              constraints: [],
+            },
+            affiliation_filters: [],
+            scope: mentor ? "bridge2ai" : "all",
+            context: { team_author_ids: [], selected_work_ids: [], exclude_recorded_direct_coauthors: !mentor },
+            retrieval_query: mentor ? "federated clinical analysis" : "clinical model validation",
+            status: "ready",
+            clarification_question: null,
+            clarification_options: [],
+          },
         };
       }
     } else if (url.pathname === "/api/search-people") {
@@ -107,11 +129,14 @@ async function mockApi(page, capture) {
     await app.getByText("Optional one-time context.", { exact: false }).waitFor();
     await app.locator(".attach-chip").waitFor();
     await app.getByRole("button", { name: "Learn from a researcher" }).click();
+    await app.getByText("Topic:", { exact: false }).waitFor();
     await app.getByRole("button", { name: "Search that", exact: true }).click();
     await app.getByRole("heading", { name: /Potential mentors/ }).waitFor();
     assert.equal(capture.chats[0].intent, "mentor");
     assert.match(capture.chats[0].attached_context[0], /Cross-site EHR phenotyping draft/);
     assert.equal(capture.searches[0].bridge2ai_only, true);
+    assert.equal(capture.searches[0].research_plan.schema_version, "research-fit-v1");
+    assert.deepEqual(capture.searches[0].research_plan.fields.topic, ["federated analysis"]);
     assert.equal(capture.searches[0].outside_network, false);
     assert.equal("representative_titles" in capture.searches[0], false);
     assert.equal(await app.locator(".attach-chip").count(), 0);
@@ -127,6 +152,7 @@ async function mockApi(page, capture) {
     assert.equal(capture.chats.at(-1).intent, "collaborator");
     assert.equal(capture.searches.at(-1).outside_network, true);
     assert.deepEqual(capture.searches.at(-1).team_member_ids, ["11"]);
+    assert.equal(capture.searches.at(-1).research_plan.fields.evidence_stage[0], "validation");
 
     for (const width of [1440, 1024, 768, 390]) {
       await page.setViewportSize({ width, height: 900 });

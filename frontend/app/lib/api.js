@@ -52,6 +52,7 @@ export async function searchCandidates({
   bridge2aiOnly = false,
   outsideNetwork = false,
   teamMemberIds = [],
+  researchPlan = null,
   signal,
 }) {
   // Same-origin Next route talks to the already-loaded MATRIX backend.
@@ -66,6 +67,7 @@ export async function searchCandidates({
       bridge2ai_only: Boolean(bridge2aiOnly),
       outside_network: Boolean(outsideNetwork),
       team_member_ids: Array.isArray(teamMemberIds) ? teamMemberIds.map(String) : [],
+      research_plan: researchPlan && typeof researchPlan === "object" ? researchPlan : null,
     }),
   });
   if (!res.ok) throw new Error("Search failed");
@@ -176,6 +178,7 @@ export async function chatMessage({
   searchResults,
   searchPhase,
   intent,
+  pendingResearchPlan = null,
   signal,
 }) {
   const res = await fetch("/api/chat-lite", {
@@ -196,6 +199,9 @@ export async function chatMessage({
       search_results: searchResults || [],
       search_phase: searchPhase || null,
       intent: intent || null,
+      pending_research_plan: pendingResearchPlan && typeof pendingResearchPlan === "object"
+        ? pendingResearchPlan
+        : null,
     }),
   });
   const payload = await res.json().catch(() => ({}));

@@ -77,6 +77,18 @@ export default function ChatPane({
 
   const contextPersonSet = new Set(contextPersonIds.map(Number));
   const selectedPeople = contextPeople.filter((person) => contextPersonSet.has(Number(person.authorId)));
+  const planFields = searchPlan?.fields && typeof searchPlan.fields === "object"
+    ? [
+        ["Topic", searchPlan.fields.topic],
+        ["Method", searchPlan.fields.method],
+        ["Population", searchPlan.fields.population],
+        ["Setting", searchPlan.fields.setting],
+        ["Evidence", searchPlan.fields.evidence_stage],
+        ["Need", searchPlan.fields.needed_capability],
+        ["Constraint", searchPlan.fields.constraints],
+        ["Affiliation (saved for a future source-backed filter)", searchPlan.affiliationFilters],
+      ].filter(([, values]) => Array.isArray(values) && values.length > 0)
+    : [];
   const toggleContextFromPicker = (authorId) => {
     onToggleContextPerson?.(authorId);
     setPeoplePickerOpen(false);
@@ -330,10 +342,19 @@ export default function ChatPane({
                   {searchPlan.intent === "mentor" ? "Mentor search" : "Team search"}
                   {searchPlan.contextCount > 0 ? ` · ${searchPlan.contextCount} ${searchPlan.contextCount === 1 ? "person" : "people"} in context` : ""}
                 </span>
+                {planFields.length > 0 && (
+                  <div className="search-plan-fields" aria-label="Interpreted research need">
+                    {planFields.map(([label, values]) => (
+                      <span key={label} className="search-plan-field">
+                        <span>{label}:</span> {values.join(", ")}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="search-plan-actions">
                 <button type="button" className="search-plan-edit" onClick={() => {
-                  setInputValue(searchPlan.query);
+                  setInputValue(searchPlan.question || searchPlan.query);
                   inputRef.current?.focus();
                 }}>
                   Edit

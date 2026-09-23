@@ -2602,6 +2602,24 @@ body,
   font-size: 0.7rem;
 }
 
+.search-plan-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 2px;
+}
+
+.search-plan-field {
+  color: #555b67;
+  font-size: 0.68rem;
+  line-height: 1.3;
+}
+
+.search-plan-field > span {
+  color: #777b86;
+  font-weight: 650;
+}
+
 .search-plan-actions {
   display: inline-flex;
   flex: 0 0 auto;

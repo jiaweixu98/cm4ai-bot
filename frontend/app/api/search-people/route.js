@@ -54,6 +54,9 @@ export async function POST(request) {
     const teamMemberIds = Array.isArray(body.team_member_ids)
       ? body.team_member_ids.map(String).filter(Boolean).slice(0, 25)
       : [];
+    const researchPlan = body.research_plan && typeof body.research_plan === "object"
+      ? body.research_plan
+      : null;
     if (!query) {
       return Response.json({ error: "query is required" }, { status: 400 });
     }
@@ -69,6 +72,7 @@ export async function POST(request) {
           bridge2ai_only: true,
           outside_network: false,
           team_member_ids: teamMemberIds,
+          research_plan: researchPlan,
         },
       );
       if (!ok) {
@@ -81,6 +85,7 @@ export async function POST(request) {
         query,
         top_k: topK,
         team_member_ids: teamMemberIds,
+        research_plan: researchPlan,
       });
       if (!ok) {
         return Response.json({ error: "Collaborator search is unavailable" }, { status: status || 502 });
