@@ -33,20 +33,20 @@ export const GENERAL_STARTERS = [
   {
     intent: "mentor",
     icon: "mentor",
-    label: "Find a mentor",
+    label: "Mentor example",
     prompt: "Find a mentor for privacy-preserving federated analysis",
   },
   {
     intent: "collaborator",
     icon: "team",
-    label: "Find collaborators",
+    label: "Collaborator example",
     prompt: "Find a collaborator for prospective clinical validation across health systems",
   },
   {
     intent: "collaborator",
-    icon: "clinical",
-    label: "Build a clinical AI team",
-    prompt: "Find collaborators for clinical NLP and EHR phenotyping",
+    icon: "team",
+    label: "Build a research team",
+    prompt: "I am building a research team for prospective clinical validation across health systems",
   },
 ];
 
@@ -88,7 +88,7 @@ export const PERSONA_COPY = {
     resultsTitle: "People",
     emptyHeadline: (name) =>
       name ? `Find the right collaborator for ${name}` : "Find the right collaborator for this work",
-    emptyBody: "Ask for a method, population, or skill your team needs. MATRIX finds researchers whose papers cover that gap.",
+    emptyBody: "Ask for a method, population, or skill you need. MATRIX finds researchers whose papers cover that need.",
     exampleLabel: "Example questions",
     promptsIdle: [
       "Single-cell and spatial omics integration",

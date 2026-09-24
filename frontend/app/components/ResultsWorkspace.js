@@ -9,7 +9,7 @@ export default function ResultsWorkspace({
   phase,
   currentQuery,
   savedIds,
-  teamBuilding,
+  isCollaboratorSearch,
   teamNames = [],
   onOpenProfile,
   onSave,
@@ -21,11 +21,11 @@ export default function ResultsWorkspace({
   const stage = stageForPhase(phase);
   const context = Object.values(rerankedMap).find((note) => note.source === 'llm');
   const contextText = context?.context_basis === 'need_profile_team'
-    ? `Using one-time attached context and ${context.team_count} team members.`
+    ? `Using one-time attached context and ${context.team_count} selected people.`
     : context?.context_basis === 'need_profile' ? 'Using one-time attached context.'
-    : context?.context_basis === 'need_team' ? `Using ${context.team_count} team ${context.team_count === 1 ? 'member' : 'members'}.`
+    : context?.context_basis === 'need_team' ? `Using ${context.team_count} selected ${context.team_count === 1 ? 'person' : 'people'} as context.`
     : '';
-  const resultHeading = teamBuilding ? "Potential collaborators" : "Potential mentors";
+  const resultHeading = isCollaboratorSearch ? "Potential collaborators" : "Potential mentors";
 
   return (
     <section className="results-pane inline-results-pane" aria-live="polite">
@@ -76,9 +76,9 @@ export default function ResultsWorkspace({
                 pending={phase === "explaining" && !rerankedMap[candidate.author_id]}
                 index={index}
                 copy={copy}
-                intent={teamBuilding ? "collaborator" : "mentor"}
+                intent={isCollaboratorSearch ? "collaborator" : "mentor"}
                 currentQuery={currentQuery}
-                teamNames={teamBuilding ? teamNames : []}
+                teamNames={isCollaboratorSearch ? teamNames : []}
                 saved={savedIds.has(Number(candidate.author_id))}
                 onOpenProfile={onOpenProfile}
                 onSave={onSave}

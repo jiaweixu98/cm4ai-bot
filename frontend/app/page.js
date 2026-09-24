@@ -64,6 +64,7 @@ export default function Home() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [queuedFollowUp, setQueuedFollowUp] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState(null);
+  const [contextAction, setContextAction] = useState(null);
 
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
@@ -122,6 +123,7 @@ export default function Home() {
     setExpandedCards({});
     setProfileNotice("");
     setQueuedFollowUp("");
+    setContextAction(null);
   }, []);
 
   const upsertSessionSummary = useCallback((session) => {
@@ -173,7 +175,7 @@ export default function Home() {
           authorId: Number(person?.authorId),
           name: String(person?.name || "").trim(),
           affiliation: String(person?.affiliation || "").trim(),
-          source: "graph",
+          source: person?.source === "matrix" ? "matrix" : "graph",
         }))
         .filter((person) => Number.isInteger(person.authorId) && person.name)
         .slice(0, 8)
@@ -742,13 +744,13 @@ export default function Home() {
       }
       const teamContext =
         activeIntent === "collaborator" && contextPersonIds.length > 0
-          ? ` Using ${contextPersonIds.length} selected ${contextPersonIds.length === 1 ? "person" : "people"} as team context.`
+          ? ` Using ${contextPersonIds.length} selected ${contextPersonIds.length === 1 ? "person" : "people"} as context.`
           : "";
       addMessage(
         "assistant",
         attachedCount > 0
-          ? `Researchers for **${currentQuery}**. Your one-time attachment${attachedCount === 1 ? "" : "s"} helped frame this request.${teamContext}`
-          : `Researchers for **${currentQuery}**.${teamContext}`
+          ? `Researchers for "${currentQuery}". Your one-time attachment${attachedCount === 1 ? "" : "s"} helped frame this request.${teamContext}`
+          : `Researchers for "${currentQuery}".${teamContext}`
       );
       setAttachedPapers([]);
       setPhase(PHASE.RERANKING);
@@ -788,6 +790,10 @@ export default function Home() {
     const text = String(presetText ?? inputValue).trim();
     if (!text) return;
     let activeIntent = requestedIntent || inferPersonaIntent(text, intent);
+    const contextMode = activeIntent === "collaborator" && contextAction === "assess" && contextPersonIds.length > 0
+      ? "review_saved_people"
+      : null;
+    setContextAction(null);
     if (activeIntent !== intent) setIntent(activeIntent);
     if (phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
       setQueuedFollowUp(text);
@@ -825,6 +831,7 @@ export default function Home() {
         searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
         intent: activeIntent,
+        contextMode,
         pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
         signal: chatController.signal,
       });
@@ -854,7 +861,7 @@ export default function Home() {
           setRerankProgress({ done: 0, total: 0 });
           setExpandedCards({});
         }
-        let msg = `Search **${query}**?`;
+        let msg = `Search for "${query}"?`;
         if (justification) msg += ` ${justification.replace(/\s+/g, " ").trim()}`;
         addMessage("assistant", msg);
         setPhase(PHASE.AWAITING_CONFIRM);
@@ -914,12 +921,43 @@ export default function Home() {
     });
   }, []);
 
+  const addContextPerson = useCallback((person) => {
+    const authorId = Number(person?.authorId ?? person?.author_id);
+    const name = String(person?.name || "").trim();
+    if (!Number.isInteger(authorId) || !name) return;
+    setGraphContextPeople((current) => [
+      { authorId, name, affiliation: String(person?.affiliation || "").trim(), source: "matrix" },
+      ...current.filter((item) => Number(item.authorId) !== authorId),
+    ].slice(0, 8));
+    setContextPersonIds((current) => {
+      if (current.includes(authorId)) return current;
+      if (current.length >= 8) {
+        setProfileNotice("Add up to 8 people to this chat.");
+        return current;
+      }
+      return [...current, authorId];
+    });
+  }, []);
+
+  const handleUseStarter = useCallback((starter) => {
+    const nextIntent = starter?.intent === "mentor" ? "mentor" : "collaborator";
+    setIntent(nextIntent);
+    setInputValue(String(starter?.prompt || ""));
+  }, []);
+
+  const prepareContextAction = useCallback((action) => {
+    setContextAction(action);
+    setInputValue(action === "assess"
+      ? "How do these people fit my research idea? "
+      : "Find a researcher to add for ");
+  }, []);
+
   const suggestedPrompts =
     contextPersonIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
       ? [
           `How does ${contextPeople[0]?.name || 'the selected person'} fit my research idea?`,
           contextPersonIds.length > 1 ? 'Compare the selected people using their publications' : 'What evidence supports this person as a fit?',
-          intent === 'mentor' ? 'Find more mentors for my learning goal' : 'What expertise should this team add next?',
+          intent === 'mentor' ? 'Find more mentors for my learning goal' : 'Find another collaborator for this research idea',
         ]
       : phase === PHASE.AWAITING_CONFIRM
       ? copy.promptsConfirm
@@ -1067,7 +1105,7 @@ export default function Home() {
           >
             <span className="session-chip-title">{session.title || "Untitled session"}</span>
             <span className="session-chip-meta">
-              <span>{session.intent === "mentor" ? "Mentor" : "Team"}</span>
+              <span>{session.intent === "mentor" ? "Mentor" : "Collaborators"}</span>
               <span>{relativeTime(session.last_message_at)}</span>
             </span>
           </button>
@@ -1103,7 +1141,7 @@ export default function Home() {
       phase={phase}
       currentQuery={currentQuery}
       savedIds={savedIds}
-      teamBuilding={searchIntent === "collaborator"}
+      isCollaboratorSearch={searchIntent === "collaborator"}
       teamNames={selectedContextNames}
       selectionDisabled={isLoading}
       onOpenProfile={openProfile}
@@ -1148,6 +1186,11 @@ export default function Home() {
           contextPeople={contextPeople}
           contextPersonIds={contextPersonIds}
           onToggleContextPerson={toggleContextPerson}
+          intent={intent}
+          onAddContextPerson={addContextPerson}
+          onSavePerson={savePerson}
+          onPrepareContextAction={prepareContextAction}
+          onUseStarter={handleUseStarter}
           resultsWorkspace={inlineResults}
           notice={profileNotice}
           onDismissNotice={() => setProfileNotice("")}

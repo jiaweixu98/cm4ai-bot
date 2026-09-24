@@ -15,6 +15,16 @@ export async function fetchAuthor(aid) {
   return res.json();
 }
 
+export async function searchPeopleByName(name, signal) {
+  const query = String(name || "").trim();
+  if (query.length < 2) return [];
+  const params = new URLSearchParams({ name: query, limit: "8" });
+  const res = await fetch(`${API_BASE}/api/people?${params.toString()}`, { signal });
+  if (!res.ok) throw new Error("People search is unavailable");
+  const payload = await res.json();
+  return Array.isArray(payload?.people) ? payload.people : [];
+}
+
 export async function generateQuery({ aid, userInput, currentQuery, pastQueries, priorInputs }) {
   const res = await fetch(`${API_BASE}/api/generate-query`, {
     method: "POST",
@@ -179,6 +189,7 @@ export async function chatMessage({
   searchPhase,
   intent,
   pendingResearchPlan = null,
+  contextMode = null,
   signal,
 }) {
   const res = await fetch("/api/chat-lite", {
@@ -199,6 +210,7 @@ export async function chatMessage({
       search_results: searchResults || [],
       search_phase: searchPhase || null,
       intent: intent || null,
+      context_mode: contextMode || null,
       pending_research_plan: pendingResearchPlan && typeof pendingResearchPlan === "object"
         ? pendingResearchPlan
         : null,
