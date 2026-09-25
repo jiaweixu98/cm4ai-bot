@@ -2,6 +2,7 @@
 fastapi
 uvicorn[standard]
 openai
+openai-agents==0.22.3
 torch==2.5.1
 faiss-cpu
 adapters==1.1.1

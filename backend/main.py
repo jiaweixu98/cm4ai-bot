@@ -727,6 +727,7 @@ def _get_author_details(author_id: str) -> dict:
         "name": features.get("FullName", info.get("title", "Unknown")),
         "affiliation": features.get("Affiliation", "Unknown"),
         "papers": features.get("Top Cited or Most Recent Papers", []),
+        "recent_year": features.get("RecentYear") or "",
     }
 
 
@@ -1674,6 +1675,11 @@ class ChatMessageItem(BaseModel):
     content: str
 
 
+class AgentWorkingContext(BaseModel):
+    goal: str = Field(default="", max_length=500)
+    requirements: list[str] = Field(default_factory=list, max_length=8)
+
+
 class ChatRequest(BaseModel):
     aid: str = "unlinked"
     user_input: str
@@ -1688,6 +1694,7 @@ class ChatRequest(BaseModel):
     context_person_ids: list[str] = Field(default_factory=list, max_length=25)
     attached_context: list[str] = Field(default_factory=list, max_length=5)
     pending_research_plan: ResearchPlan | None = None
+    working_context: AgentWorkingContext = Field(default_factory=AgentWorkingContext)
 
 
 class ChatSessionUpsertRequest(BaseModel):
@@ -1730,8 +1737,69 @@ def _resolve_chat_intent(user_text: str, fallback: str | None) -> str:
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
-    """Unified chat endpoint with 3-way intent classification."""
+async def chat(req: ChatRequest, request: Request):
+    """Research chat. The agent runtime is the default; MATRIX_CHAT_RUNTIME=classic
+    restores the older search/confirm/chat classifier."""
+    if os.environ.get("MATRIX_CHAT_RUNTIME", "agents") != "classic":
+        from research_agent import run_research_turn, stream_research_turn
+        from research_tools import ResearchTools, openalex_enabled
+
+        if not req.user_input.strip() or len(req.user_input) > 4000:
+            raise HTTPException(400, "Provide a message of 1–4000 characters")
+
+        def agent_search(query, scope, excluded):
+            nodes = load_author_nodes()
+            if scope == "bridge2ai":
+                # Retain the established index for this first agent slice.
+                _, rows = _preview_similar_authors(_model_encode(query), 8 + len(excluded), True)
+                return [dict(row, retrieval_score=row["score"]) for row in rows
+                        if row["author_id"] not in excluded][:8]
+            rows = _retrieve_candidates(query, "unlinked", 8, network_weighting=False,
+                                        exclude_collaborators=False, exclude_author_ids=excluded)
+            return [_serialize_search_candidate(aid, score, nodes) for aid, score in rows]
+
+        agent_model = os.environ.get("MATRIX_AGENT_MODEL", MODEL_NAME_CHAT)
+        services = ResearchTools(_find_people_by_name, _get_author_details, agent_search,
+                                 path=_get_shortest_path, openalex=openalex_enabled())
+        agent_model = [agent_model, _CHAT_FALLBACK_MODEL]
+
+        if "text/event-stream" in request.headers.get("accept", ""):
+            async def agent_events():
+                try:
+                    async with llm_request_slot("research-agent"):
+                        async for kind, value in stream_research_turn(req, services, agent_model):
+                            yield {"event": kind, "data": json.dumps(value if kind == "result" else {"label": value})}
+                except HTTPException as exc:
+                    yield {"event": "error", "data": json.dumps({"error": str(exc.detail)})}
+                except Exception as exc:
+                    # Do not log private prompts, tool payloads or provider response bodies.
+                    logger.warning("Research agent failed: %s", type(exc).__name__)
+                    yield {"event": "error", "data": json.dumps({"error": "Research request could not finish. Please retry."})}
+
+            return EventSourceResponse(agent_events(), ping=10)
+
+        async with llm_request_slot("research-agent"):
+            task = asyncio.create_task(run_research_turn(req, services, agent_model))
+            try:
+                while not task.done():
+                    if await request.is_disconnected():
+                        task.cancel()
+                        raise HTTPException(499, "Chat request was cancelled")
+                    await asyncio.wait({task}, timeout=0.2)
+                return await task
+            except HTTPException:
+                raise
+            except Exception as exc:
+                # Do not log private prompts, tool payloads or provider response bodies.
+                logger.warning("Research agent failed: %s", type(exc).__name__)
+                raise HTTPException(502, "Research request could not finish. Please retry.") from None
+            finally:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
     async with llm_request_slot("chat"):
         resolved_intent = _resolve_chat_intent(req.user_input, req.intent)
         user_bg = UNLINKED_BACKGROUND if resolved_intent == 'mentor' else _get_user_background(req.aid)
@@ -1843,6 +1911,31 @@ async def chat(req: ChatRequest):
         return {**result, "intent": resolved_intent}
 
 
+class AttachmentTextRequest(BaseModel):
+    filename: str = Field(default="", max_length=300)
+    data_base64: str = Field(max_length=14_500_000)
+
+
+@app.post("/api/attachment-text")
+async def attachment_text(req: AttachmentTextRequest):
+    suffix = Path(req.filename.lower()).suffix
+    if suffix not in {".pdf", ".docx"}:
+        raise HTTPException(status_code=400, detail="Attach a PDF or Word document")
+    try:
+        data = attachments.decode(req.data_base64)
+        if suffix == ".docx":
+            text = attachments.docx_text(data)
+        else:
+            text = await asyncio.to_thread(attachments.pdf_text, _get_openai_client(),
+                                           [MODEL_NAME_CHAT, _CHAT_FALLBACK_MODEL], data, req.filename)
+    except (ValueError, KeyError, zipfile.BadZipFile) as exc:
+        logger.warning("Attachment not readable: %s", type(exc).__name__)
+        raise HTTPException(status_code=422, detail="Could not read this document") from None
+    if not text:
+        raise HTTPException(status_code=422, detail="No readable text in this document")
+    return {"text": text}
+
+
 @app.get("/api/chat-sessions")
 async def list_sessions(aid: str, request: Request, intent: str | None = None):
     identity = _require_matrix_session_identity(request)
@@ -1911,31 +2004,6 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = 100
     bridge2ai_only: bool = False
-class AttachmentTextRequest(BaseModel):
-    filename: str = Field(default="", max_length=300)
-    data_base64: str = Field(max_length=14_500_000)
-
-
-@app.post("/api/attachment-text")
-async def attachment_text(req: AttachmentTextRequest):
-    suffix = Path(req.filename.lower()).suffix
-    if suffix not in {".pdf", ".docx"}:
-        raise HTTPException(status_code=400, detail="Attach a PDF or Word document")
-    try:
-        data = attachments.decode(req.data_base64)
-        if suffix == ".docx":
-            text = attachments.docx_text(data)
-        else:
-            text = await asyncio.to_thread(attachments.pdf_text, _get_openai_client(),
-                                           [MODEL_NAME_CHAT, _CHAT_FALLBACK_MODEL], data, req.filename)
-    except (ValueError, KeyError, zipfile.BadZipFile) as exc:
-        logger.warning("Attachment not readable: %s", type(exc).__name__)
-        raise HTTPException(status_code=422, detail="Could not read this document") from None
-    if not text:
-        raise HTTPException(status_code=422, detail="No readable text in this document")
-    return {"text": text}
-
-
     outside_network: bool = False
     team_member_ids: list[str] = Field(default_factory=list)
     research_plan: ResearchPlan | None = None
