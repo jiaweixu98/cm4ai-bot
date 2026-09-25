@@ -33,20 +33,20 @@ export const GENERAL_STARTERS = [
   {
     intent: "mentor",
     icon: "mentor",
-    label: "Mentor example",
-    prompt: "Find a mentor for privacy-preserving federated analysis",
+    label: "Find a mentor",
+    prompt: "I'm a wet-lab biologist moving into AI-ready data standards. Who could I learn from?",
   },
   {
     intent: "collaborator",
     icon: "team",
-    label: "Collaborator example",
-    prompt: "Find a collaborator for prospective clinical validation across health systems",
+    label: "Build a team",
+    prompt: "Build a team to deploy a sepsis early-warning model across hospitals: clinical, ML and implementation expertise",
   },
   {
     intent: "collaborator",
-    icon: "team",
-    label: "Build a research team",
-    prompt: "I am building a research team for prospective clinical validation across health systems",
+    icon: "sparkle",
+    label: "Find a niche",
+    prompt: "I work on federated learning with EHR data. Where is a less crowded niche I could move into?",
   },
 ];
 
