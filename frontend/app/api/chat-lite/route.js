@@ -12,11 +12,23 @@ export async function POST(request) {
 
     const response = await fetch(`${BACKEND}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: request.headers.get("accept") || "application/json",
+      },
       body: JSON.stringify(body),
       signal: request.signal,
       cache: "no-store",
     });
+    if (response.ok && response.body && (response.headers.get("content-type") || "").includes("text/event-stream")) {
+      return new Response(response.body, {
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
+        },
+      });
+    }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const detail = response.status === 429

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CHAT_WINDOW } from "../lib/matrixUi";
+import { searchPeopleByName } from "../lib/api";
 import { StarterIcon, IconClose, IconPaperclip, IconSend, IconStop, IconTeam } from "./icons";
 import MessageBubble from "./MessageBubble";
 
@@ -7,6 +8,7 @@ export default function ChatPane({
   starters,
   messages,
   phase,
+  statusLabel = "",
   isLoading,
   canStop,
   inputValue,
@@ -29,6 +31,11 @@ export default function ChatPane({
   contextPeople = [],
   contextPersonIds = [],
   onToggleContextPerson,
+  intent = "collaborator",
+  onAddContextPerson,
+  onSavePerson,
+  onPrepareContextAction,
+  onUseStarter,
   resultsWorkspace = null,
   notice = "",
   onDismissNotice,
@@ -37,25 +44,46 @@ export default function ChatPane({
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const scrollerRef = useRef(null);
+  const peoplePickerRef = useRef(null);
+  const peoplePickerButtonRef = useRef(null);
   const pinnedRef = useRef(true);
   const [showEarlier, setShowEarlier] = useState(false);
   const [peoplePickerOpen, setPeoplePickerOpen] = useState(false);
+  const [personSearch, setPersonSearch] = useState("");
+  const [personMatches, setPersonMatches] = useState([]);
+  const [personSearchState, setPersonSearchState] = useState("idle");
+  const [peoplePickerStyle, setPeoplePickerStyle] = useState({});
   const empty = messages.length === 0 && !isLoading;
   const queueable = phase === "searching" || phase === "explaining";
   const visibleMessages = showEarlier || messages.length <= CHAT_WINDOW ? messages : messages.slice(-CHAT_WINDOW);
   const phaseLabel =
     phase === "generating"
-      ? "Reading your request"
+      ? statusLabel || "Reading your request"
       : phase === "searching"
         ? "Searching"
         : phase === "explaining"
           ? "Writing notes"
           : "";
 
+  const lastMessage = messages[messages.length - 1];
+  const lastMessageId = lastMessage?.id;
+  const lastMessageRole = lastMessage?.role;
   useEffect(() => {
-    if (!pinnedRef.current) return;
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, phase, visibleMessages.length]);
+    // Bring the start of a new message into view so long answers read top-down,
+    // but leave the position alone if the user scrolled up to read earlier turns.
+    if (!lastMessageId) return;
+    if (lastMessageRole !== "user" && !pinnedRef.current) return;
+    const node = scrollerRef.current?.querySelector(`[data-msg-id="${CSS.escape(lastMessageId)}"]`);
+    node?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [lastMessageId, lastMessageRole]);
+
+  let resultsAnchorId = null;
+  for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+    if (visibleMessages[i].hasResults) {
+      resultsAnchorId = visibleMessages[i].id;
+      break;
+    }
+  }
 
   const onScroll = () => {
     const node = scrollerRef.current;
@@ -77,27 +105,104 @@ export default function ChatPane({
 
   const contextPersonSet = new Set(contextPersonIds.map(Number));
   const selectedPeople = contextPeople.filter((person) => contextPersonSet.has(Number(person.authorId)));
-  const planFields = searchPlan?.fields && typeof searchPlan.fields === "object"
-    ? [
-        ["Topic", searchPlan.fields.topic],
-        ["Method", searchPlan.fields.method],
-        ["Population", searchPlan.fields.population],
-        ["Setting", searchPlan.fields.setting],
-        ["Evidence", searchPlan.fields.evidence_stage],
-        ["Need", searchPlan.fields.needed_capability],
-        ["Constraint", searchPlan.fields.constraints],
-        ["Affiliation (saved for a future source-backed filter)", searchPlan.affiliationFilters],
-      ].filter(([, values]) => Array.isArray(values) && values.length > 0)
-    : [];
-  const toggleContextFromPicker = (authorId) => {
-    onToggleContextPerson?.(authorId);
+  useEffect(() => {
+    const query = personSearch.trim();
+    if (!peoplePickerOpen || query.length < 2) {
+      setPersonMatches([]);
+      setPersonSearchState("idle");
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setPersonSearchState("loading");
+      try {
+        const matches = await searchPeopleByName(query, controller.signal);
+        if (!controller.signal.aborted) {
+          setPersonMatches(matches);
+          setPersonSearchState("ready");
+        }
+      } catch {
+        if (!controller.signal.aborted) setPersonSearchState("error");
+      }
+    }, 180);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [peoplePickerOpen, personSearch]);
+
+  const closePeoplePicker = () => {
     setPeoplePickerOpen(false);
+    setPersonSearch("");
+    setPersonMatches([]);
+    setPersonSearchState("idle");
   };
-  const contextPicker = (savedPeople.length > 0 || selectedPeople.length > 0) ? (
+
+  useEffect(() => {
+    if (!peoplePickerOpen) return undefined;
+
+    const positionPicker = () => {
+      const trigger = peoplePickerButtonRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const inset = 12;
+      const width = Math.min(320, Math.max(220, window.innerWidth - inset * 2));
+      const left = Math.min(Math.max(inset, rect.left), Math.max(inset, window.innerWidth - width - inset));
+      const spaceAbove = rect.top - inset;
+      const spaceBelow = window.innerHeight - rect.bottom - inset;
+      const openAbove = spaceAbove > spaceBelow;
+      const availableHeight = Math.max(96, Math.floor(openAbove ? spaceAbove : spaceBelow));
+
+      setPeoplePickerStyle(openAbove
+        ? { bottom: `${Math.max(inset, window.innerHeight - rect.top + 7)}px`, left: `${left}px`, width: `${width}px`, maxHeight: `${availableHeight}px` }
+        : { top: `${Math.max(inset, rect.bottom + 7)}px`, left: `${left}px`, width: `${width}px`, maxHeight: `${availableHeight}px` }
+      );
+    };
+    const closeOnPointerDown = (event) => {
+      if (peoplePickerRef.current?.contains(event.target) || peoplePickerButtonRef.current?.contains(event.target)) return;
+      closePeoplePicker();
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") closePeoplePicker();
+    };
+
+    positionPicker();
+    window.addEventListener("resize", positionPicker);
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("resize", positionPicker);
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [peoplePickerOpen]);
+
+  const personId = (person) => Number(person?.authorId ?? person?.author_id);
+  const selectPickerPerson = (person) => {
+    const authorId = personId(person);
+    if (!Number.isInteger(authorId)) return;
+    const included = contextPersonSet.has(authorId);
+    if (included) {
+      onToggleContextPerson?.(authorId);
+    } else {
+      onAddContextPerson?.({ ...person, authorId });
+    }
+    closePeoplePicker();
+  };
+  const savePickerPerson = (person) => {
+    const authorId = personId(person);
+    if (!Number.isInteger(authorId)) return;
+    onSavePerson?.({ ...person, author_id: String(authorId) });
+  };
+  const prepareContextAction = (action) => {
+    onPrepareContextAction?.(action);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+  const contextPicker = (
     <div className="context-picker-wrap">
       {selectedPeople.length > 0 && (
         <div className="selected-context-block" aria-label="People added to this chat">
-          <span className="selected-context-label">In this chat</span>
+          <span className="selected-context-label">{intent === "collaborator" ? "People for this research" : "In this chat"}</span>
           <div className="selected-context-chips">
           {selectedPeople.map((person) => (
             <button
@@ -114,30 +219,107 @@ export default function ChatPane({
           </div>
         </div>
       )}
+      {intent === "collaborator" && selectedPeople.length > 0 && (
+        <div className="context-next-step" aria-label="Choose what to do with selected people">
+          <span>Next step</span>
+          <button type="button" onClick={() => prepareContextAction("assess")}>Assess fit</button>
+          <button type="button" onClick={() => prepareContextAction("find")}>Find someone to add</button>
+        </div>
+      )}
       {peoplePickerOpen && (
-        <div className="people-picker" role="dialog" aria-label="Add saved people to this chat">
-          <div className="people-picker-heading">Add saved people</div>
-          <div className="people-picker-list">
-            {savedPeople.map((person) => {
-              const included = contextPersonSet.has(Number(person.authorId));
-              return (
-                <button
-                  key={person.authorId}
-                  type="button"
-                  className={`people-picker-option ${included ? "is-included" : ""}`}
-                  aria-pressed={included}
-                  onClick={() => toggleContextFromPicker(person.authorId)}
-                >
-                  <span>{person.name}</span>
-                  <span>{included ? "Added" : "Add"}</span>
-                </button>
-              );
-            })}
-          </div>
+        <div ref={peoplePickerRef} className="people-picker" style={peoplePickerStyle} role="dialog" aria-label="Add people to this chat">
+          <div className="people-picker-heading">Add people</div>
+          {savedPeople.length > 0 && (
+            <>
+              <div className="people-picker-section-label">Saved people</div>
+              <div className="people-picker-list people-picker-saved-list">
+                {savedPeople.slice(0, 5).map((person) => {
+                  const authorId = personId(person);
+                  const included = contextPersonSet.has(authorId);
+                  return (
+                    <div key={authorId} className="people-picker-option">
+                      <span className="people-picker-person">
+                        <strong>{person.name}</strong>
+                        {person.affiliation && <small>{person.affiliation}</small>}
+                      </span>
+                      <button
+                        type="button"
+                        className="people-picker-action"
+                        onClick={() => selectPickerPerson(person)}
+                        aria-pressed={included}
+                      >
+                        {included ? "Added" : "Add"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {savedPeople.length > 5 && (
+                <p className="people-picker-more">{savedPeople.length - 5} more saved people. Search by name to find one.</p>
+              )}
+            </>
+          )}
+          <label className="people-picker-search-label" htmlFor="people-picker-search">
+            {savedPeople.length > 0 ? "Find someone else" : "Search by name"}
+          </label>
+          <input
+            id="people-picker-search"
+            className="people-picker-search"
+            type="search"
+            value={personSearch}
+            onChange={(event) => setPersonSearch(event.target.value)}
+            placeholder="Search by name"
+            autoComplete="off"
+            autoFocus
+          />
+          {personSearch.trim().length < 2 ? (
+            <p className="people-picker-status">Start typing a name to search the research catalog.</p>
+          ) : personSearchState === "loading" ? (
+            <p className="people-picker-status">Searching people...</p>
+          ) : personSearchState === "error" ? (
+            <p className="people-picker-status">Search is unavailable. Try again.</p>
+          ) : personMatches.length === 0 ? (
+            <p className="people-picker-status">No matching people found.</p>
+          ) : (
+            <div className="people-picker-list">
+              {personMatches.map((person) => {
+                const authorId = personId(person);
+                const included = contextPersonSet.has(authorId);
+                const saved = savedPeople.some((savedPerson) => Number(savedPerson.authorId) === authorId);
+                return (
+                  <div key={authorId} className="people-picker-option">
+                    <span className="people-picker-person">
+                      <strong>{person.name}</strong>
+                      {person.affiliation && <small>{person.affiliation}</small>}
+                    </span>
+                    <span className="people-picker-actions">
+                      <button
+                        type="button"
+                        className="people-picker-action"
+                        onClick={() => selectPickerPerson(person)}
+                        aria-pressed={included}
+                      >
+                        {included ? "Added" : "Add"}
+                      </button>
+                      {!saved && (
+                        <button
+                          type="button"
+                          className="people-picker-save"
+                          onClick={() => savePickerPerson(person)}
+                        >
+                          Save
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>
-  ) : null;
+  );
 
   const composer = (landing = false) => (
     <div className={`chat-input-wrapper ${landing ? "landing-composer" : ""}`}>
@@ -159,24 +341,23 @@ export default function ChatPane({
         </div>
       )}
       <div className="chat-action-group">
-        {savedPeople.length > 0 && (
-          <button
-            className={`chat-context-btn ${selectedPeople.length > 0 ? "has-people" : ""}`}
-            type="button"
-            aria-expanded={peoplePickerOpen}
-            aria-label="Add saved people to this chat"
-            onClick={() => setPeoplePickerOpen((open) => !open)}
-          >
-            <IconTeam />
-            <span>{selectedPeople.length ? `${selectedPeople.length} people` : "Add people"}</span>
-          </button>
-        )}
+        <button
+          ref={peoplePickerButtonRef}
+          className={`chat-context-btn ${selectedPeople.length > 0 ? "has-people" : ""}`}
+          type="button"
+          aria-expanded={peoplePickerOpen}
+          aria-label="Add people to this chat"
+          onClick={() => peoplePickerOpen ? closePeoplePicker() : setPeoplePickerOpen(true)}
+        >
+          <IconTeam />
+          <span>{selectedPeople.length ? `${selectedPeople.length} people` : "Add people"}</span>
+        </button>
         <input
           ref={fileInputRef}
           type="file"
           className="sr-only"
           multiple
-          accept=".txt,.md,.markdown,.tex"
+          accept=".pdf,.docx,.txt,.md,.markdown,.tex"
           aria-label="Attach research context files"
           onChange={(event) => {
             if (event.target.files?.length) onAttachFiles?.(event.target.files);
@@ -188,7 +369,7 @@ export default function ChatPane({
           onClick={() => fileInputRef.current?.click()}
           type="button"
           aria-label="Attach research context files"
-          title="Attach .txt, .md, or .tex research context"
+          title="Attach a paper, draft, CV or abstract (PDF, Word, .txt, .md, .tex)"
         >
           <IconPaperclip />
         </button>
@@ -263,14 +444,21 @@ export default function ChatPane({
                 ))}
               </div>
             )}
-            <p className="starter-heading">See what MATRIX can do</p>
+            <p className="starter-heading">Try an example</p>
             <div className="starter-grid">
               {starters.map((starter) => (
                 <button
                   key={`${starter.intent}-${starter.label}`}
                   type="button"
                   className="starter-card"
-                  onClick={() => onSend(starter.prompt, starter.intent)}
+                  onClick={() => {
+                    if (onUseStarter) {
+                      onUseStarter(starter);
+                      return;
+                    }
+                    setInputValue(starter.prompt);
+                    requestAnimationFrame(() => inputRef.current?.focus());
+                  }}
                 >
                   <span className="starter-icon">
                     <StarterIcon name={starter.icon} />
@@ -285,15 +473,19 @@ export default function ChatPane({
           </div>
         )}
         {visibleMessages.map((msg) => (
-          <MessageBubble
-            key={msg.id}
-            message={msg}
-            citations={citations}
-            onRetry={onRetry}
-            onReport={onReport}
-          />
+          <div key={msg.id} data-msg-id={msg.id} className="message-anchor">
+            {(msg.content || !msg.hasResults) && (
+              <MessageBubble
+                message={msg}
+                citations={citations}
+                onRetry={onRetry}
+                onReport={onReport}
+              />
+            )}
+            {msg.id === resultsAnchorId && resultsWorkspace}
+          </div>
         ))}
-        {resultsWorkspace}
+        {!resultsAnchorId && resultsWorkspace}
         {isLoading && (
           <div className="message message-assistant">
             <div className="message-avatar message-avatar-assistant">M</div>
@@ -339,18 +531,9 @@ export default function ChatPane({
                 <span className="search-plan-label">Search plan</span>
                 <strong>{searchPlan.query}</strong>
                 <span>
-                  {searchPlan.intent === "mentor" ? "Mentor search" : "Team search"}
-                  {searchPlan.contextCount > 0 ? ` · ${searchPlan.contextCount} ${searchPlan.contextCount === 1 ? "person" : "people"} in context` : ""}
+                  {searchPlan.intent === "mentor" ? "Mentor search" : "Collaborator search"}
+                  {searchPlan.contextCount > 0 ? ` · ${searchPlan.contextCount} ${searchPlan.contextCount === 1 ? "person" : "people"} selected` : ""}
                 </span>
-                {planFields.length > 0 && (
-                  <div className="search-plan-fields" aria-label="Interpreted research need">
-                    {planFields.map(([label, values]) => (
-                      <span key={label} className="search-plan-field">
-                        <span>{label}:</span> {values.join(", ")}
-                      </span>
-                    ))}
-                  </div>
-                )}
               </div>
               <div className="search-plan-actions">
                 <button type="button" className="search-plan-edit" onClick={() => {

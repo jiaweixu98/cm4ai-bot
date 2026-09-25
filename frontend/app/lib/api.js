@@ -15,6 +15,16 @@ export async function fetchAuthor(aid) {
   return res.json();
 }
 
+export async function searchPeopleByName(name, signal) {
+  const query = String(name || "").trim();
+  if (query.length < 2) return [];
+  const params = new URLSearchParams({ name: query, limit: "8" });
+  const res = await fetch(`${API_BASE}/api/people?${params.toString()}`, { signal });
+  if (!res.ok) throw new Error("People search is unavailable");
+  const payload = await res.json();
+  return Array.isArray(payload?.people) ? payload.people : [];
+}
+
 export async function generateQuery({ aid, userInput, currentQuery, pastQueries, priorInputs }) {
   const res = await fetch(`${API_BASE}/api/generate-query`, {
     method: "POST",
@@ -179,18 +189,21 @@ export async function chatMessage({
   searchPhase,
   intent,
   pendingResearchPlan = null,
+  contextMode = null,
+  workingContext = {},
+  onStatus,
   signal,
 }) {
   const res = await fetch("/api/chat-lite", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream, application/json" },
     signal,
     body: JSON.stringify({
       aid: aid || "unlinked",
       user_input: userInput,
       context_person_ids: contextPersonIds.map(String),
       attached_context: Array.isArray(attachedContext)
-        ? attachedContext.map((text) => String(text || "").trim().slice(0, 1200)).filter(Boolean).slice(0, 5)
+        ? attachedContext.map((text) => String(text || "").trim().slice(0, 6000)).filter(Boolean).slice(0, 5)
         : [],
       conversation_history: conversationHistory || [],
       current_query: currentQuery || null,
@@ -199,16 +212,53 @@ export async function chatMessage({
       search_results: searchResults || [],
       search_phase: searchPhase || null,
       intent: intent || null,
+      context_mode: contextMode || null,
+      working_context: workingContext && typeof workingContext === "object" ? workingContext : {},
       pending_research_plan: pendingResearchPlan && typeof pendingResearchPlan === "object"
         ? pendingResearchPlan
         : null,
     }),
   });
+  if (res.ok && res.body && (res.headers.get("content-type") || "").includes("text/event-stream")) {
+    return readChatStream(res.body, onStatus);
+  }
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(payload.error || "Chat is unavailable. Try again.");
   }
   return payload;
+}
+
+async function readChatStream(body, onStatus) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = done ? "" : frames.pop() || "";
+    for (const frame of frames) {
+      let event = "message";
+      const data = [];
+      for (const line of frame.split(/\r?\n/)) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+      }
+      if (!data.length) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(data.join("\n"));
+      } catch {
+        continue;
+      }
+      if (event === "status") onStatus?.(String(parsed.label || ""));
+      else if (event === "result") return parsed;
+      else if (event === "error") throw new Error(parsed.error || "Chat is unavailable. Try again.");
+    }
+    if (done) break;
+  }
+  throw new Error("Chat ended before an answer arrived. Try again.");
 }
 
 export async function listChatSessions({ aid, intent, authToken }) {

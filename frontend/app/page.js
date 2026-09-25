@@ -54,6 +54,7 @@ export default function Home() {
   const [authorInfo, setAuthorInfo] = useState(null);
   const [seekerName, setSeekerName] = useState("");
   const [matrixUserToken, setMatrixUserToken] = useState("");
+  const [followUps, setFollowUps] = useState([]);
   const [savedPeople, setSavedPeople] = useState([]);
   const [savedPeopleReady, setSavedPeopleReady] = useState(false);
   const [contextPersonIds, setContextPersonIds] = useState([]);
@@ -64,10 +65,15 @@ export default function Home() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [queuedFollowUp, setQueuedFollowUp] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState(null);
+  const [contextAction, setContextAction] = useState(null);
 
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [phase, setPhase] = useState(PHASE.IDLE);
+  const [agentStatus, setAgentStatus] = useState("");
+  const [shortlistKind, setShortlistKind] = useState("");
+  const [candidatesReviewed, setCandidatesReviewed] = useState(0);
+  const [workingContext, setWorkingContext] = useState({ goal: "", requirements: [] });
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [sessionStatus, setSessionStatus] = useState({ loading: true, saving: false, error: "" });
@@ -113,6 +119,8 @@ export default function Home() {
     setMessages([]);
     setPhase(PHASE.IDLE);
     setCurrentQuery("");
+    setWorkingContext({ goal: "", requirements: [] });
+    setShortlistKind("");
     setResearchPlan(null);
     setPastQueries([]);
     setPriorInputs([]);
@@ -122,6 +130,8 @@ export default function Home() {
     setExpandedCards({});
     setProfileNotice("");
     setQueuedFollowUp("");
+    setContextAction(null);
+    setFollowUps([]);
   }, []);
 
   const upsertSessionSummary = useCallback((session) => {
@@ -151,8 +161,11 @@ export default function Home() {
       searchIntent,
       contextPersonIds,
       graphContextPeople,
+      workingContext,
+      shortlistKind,
+      candidatesReviewed,
     }),
-    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople]
+    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed]
   );
 
   const applySessionSnapshot = useCallback((session) => {
@@ -173,7 +186,7 @@ export default function Home() {
           authorId: Number(person?.authorId),
           name: String(person?.name || "").trim(),
           affiliation: String(person?.affiliation || "").trim(),
-          source: "graph",
+          source: person?.source === "matrix" ? "matrix" : "graph",
         }))
         .filter((person) => Number.isInteger(person.authorId) && person.name)
         .slice(0, 8)
@@ -181,6 +194,18 @@ export default function Home() {
     setMessages(restoredMessages);
     setPhase(Array.isArray(snapshot.candidates) && snapshot.candidates.length ? PHASE.DONE : PHASE.IDLE);
     setCurrentQuery(typeof snapshot.currentQuery === "string" ? snapshot.currentQuery : "");
+    setWorkingContext(
+      snapshot.workingContext && typeof snapshot.workingContext === "object"
+        ? {
+            goal: String(snapshot.workingContext.goal || "").slice(0, 500),
+            requirements: Array.isArray(snapshot.workingContext.requirements)
+              ? snapshot.workingContext.requirements.map(String).slice(0, 8)
+              : [],
+          }
+        : { goal: "", requirements: [] }
+    );
+    setShortlistKind(typeof snapshot.shortlistKind === "string" ? snapshot.shortlistKind : "");
+    setCandidatesReviewed(Number(snapshot.candidatesReviewed) || 0);
     setResearchPlan(snapshot.researchPlan && typeof snapshot.researchPlan === "object" ? snapshot.researchPlan : null);
     setPastQueries(Array.isArray(snapshot.pastQueries) ? snapshot.pastQueries : []);
     setPriorInputs(Array.isArray(snapshot.priorInputs) ? snapshot.priorInputs : []);
@@ -641,7 +666,7 @@ export default function Home() {
   }, [candidates, intent, rerankedMap]);
 
   const runRerank = useCallback(
-    async (cands, activeIntent = intent) => {
+    async (cands, activeIntent = intent, queryOverride = "") => {
       const rerankController = new AbortController();
       rerankAbortRef.current = rerankController;
       setRerankProgress({ done: 0, total: 1 });
@@ -661,7 +686,7 @@ export default function Home() {
               })
             : [],
           seekerPapers: [],
-          query: researchPlan?.question || currentQuery,
+          query: queryOverride || researchPlan?.question || currentQuery,
           intent: activeIntent,
           candidates: cands,
           signal: rerankController.signal,
@@ -742,13 +767,13 @@ export default function Home() {
       }
       const teamContext =
         activeIntent === "collaborator" && contextPersonIds.length > 0
-          ? ` Using ${contextPersonIds.length} selected ${contextPersonIds.length === 1 ? "person" : "people"} as team context.`
+          ? ` Using ${contextPersonIds.length} selected ${contextPersonIds.length === 1 ? "person" : "people"} as context.`
           : "";
       addMessage(
         "assistant",
         attachedCount > 0
-          ? `Researchers for **${currentQuery}**. Your one-time attachment${attachedCount === 1 ? "" : "s"} helped frame this request.${teamContext}`
-          : `Researchers for **${currentQuery}**.${teamContext}`
+          ? `Researchers for "${currentQuery}". Your one-time attachment${attachedCount === 1 ? "" : "s"} helped frame this request.${teamContext}`
+          : `Researchers for "${currentQuery}".${teamContext}`
       );
       setAttachedPapers([]);
       setPhase(PHASE.RERANKING);
@@ -788,6 +813,10 @@ export default function Home() {
     const text = String(presetText ?? inputValue).trim();
     if (!text) return;
     let activeIntent = requestedIntent || inferPersonaIntent(text, intent);
+    const contextMode = activeIntent === "collaborator" && contextAction === "assess" && contextPersonIds.length > 0
+      ? "review_saved_people"
+      : null;
+    setContextAction(null);
     if (activeIntent !== intent) setIntent(activeIntent);
     if (phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
       setQueuedFollowUp(text);
@@ -825,7 +854,12 @@ export default function Home() {
         searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
         intent: activeIntent,
+        contextMode,
+        workingContext,
         pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
+        onStatus: (label) => {
+          if (!chatController.signal.aborted) setAgentStatus(label);
+        },
         signal: chatController.signal,
       });
       if (chatController.signal.aborted) return;
@@ -838,13 +872,78 @@ export default function Home() {
         setResearchPlan(result.research_plan);
       }
 
-      if (result.action === "confirm" && currentQuery) {
+      if (result.action === "agent") {
+        setAgentStatus("");
+        const newResults = Array.isArray(result.shortlist) && result.shortlist.length > 0
+          && result.result_update !== "keep" && result.result_update !== "clear";
+        if (result.reply || newResults) {
+          addMessage("assistant", result.reply || "", { citations: result.citations, hasResults: newResults });
+        }
+        setFollowUps(Array.isArray(result.suggested_followups)
+          ? result.suggested_followups.map(String).filter(Boolean).slice(0, 3)
+          : []);
+        if (result.working_context && typeof result.working_context === "object") {
+          setWorkingContext({
+            goal: String(result.working_context.goal || "").slice(0, 500),
+            requirements: Array.isArray(result.working_context.requirements)
+              ? result.working_context.requirements.map(String).slice(0, 8)
+              : [],
+          });
+        }
+        const shortlist = Array.isArray(result.shortlist) ? result.shortlist.slice(0, RESULT_LIMIT) : [];
+        const resultUpdate = ["keep", "replace", "clear"].includes(result.result_update)
+          ? result.result_update
+          : shortlist.length > 0 ? "replace" : "keep";
+        if (resultUpdate === "clear" || (resultUpdate === "replace" && shortlist.length === 0)) {
+          setCandidates([]);
+          setRerankedMap({});
+          setRerankProgress({ done: 0, total: 0 });
+          setExpandedCards({});
+          setShortlistKind("");
+          if (resultUpdate === "clear") setCurrentQuery("");
+        }
+        if (resultUpdate === "replace" && shortlist.length > 0) {
+          const title = String(result.shortlist_title || text);
+          const kind = result.shortlist_kind;
+          setShortlistKind(kind || "");
+          setCandidatesReviewed(Number(result.candidates_reviewed) || 0);
+          setSearchIntent(kind === "mentors" ? "mentor" : "collaborator");
+          setCurrentQuery(title);
+          setPastQueries((prev) => [...prev, title]);
+          setCandidates(shortlist.map((person) => ({
+            author_id: String(person.author_id),
+            name: person.name,
+            affiliation: person.affiliation || "Affiliation unavailable",
+            is_bridge2ai_member: Boolean(person.is_bridge2ai_member),
+            role: String(person.role || ""),
+            latest_year: String(person.latest_year || ""),
+            connection: person.connection && Number.isInteger(person.connection.hops) ? person.connection : null,
+            mutual_coauthors: [],
+            papers: Array.isArray(person.papers) ? person.papers.slice(0, 3) : [],
+          })));
+          setRerankedMap(Object.fromEntries(shortlist.map((person) => [String(person.author_id), {
+            explanation: person.why,
+            justification: person.why,
+            evidence_paper_index: 0,
+            source: "agent",
+          }])));
+          setRerankProgress({ done: 1, total: 1 });
+          setRerankError(false);
+          setExpandedCards(Object.fromEntries(shortlist.slice(0, 3).map((c) => [String(c.author_id), true])));
+          setPhase(PHASE.DONE);
+        } else if (resultUpdate !== "keep" || candidates.length === 0) {
+          setPhase(previousPhase === PHASE.GENERATING ? PHASE.IDLE : previousPhase);
+        } else {
+          setPhase(PHASE.DONE);
+        }
+      } else if (result.action === "confirm" && currentQuery) {
         addMessage("assistant", "Searching now.");
         setPhase(PHASE.SEARCHING);
         await runSearch(activeIntent);
       } else if (result.action === "search") {
         const query = result.query;
         const justification = result.justification || "";
+        setShortlistKind("");
         setSearchIntent(activeIntent);
         setCurrentQuery(query);
         setPastQueries((prev) => [...prev, query]);
@@ -854,7 +953,7 @@ export default function Home() {
           setRerankProgress({ done: 0, total: 0 });
           setExpandedCards({});
         }
-        let msg = `Search **${query}**?`;
+        let msg = `Search for "${query}"?`;
         if (justification) msg += ` ${justification.replace(/\s+/g, " ").trim()}`;
         addMessage("assistant", msg);
         setPhase(PHASE.AWAITING_CONFIRM);
@@ -868,6 +967,7 @@ export default function Home() {
         setPhase(previousPhase === PHASE.GENERATING ? PHASE.IDLE : previousPhase);
       }
     } catch (error) {
+      setAgentStatus("");
       if (chatController.signal.aborted) return;
       chatAbortRef.current = null;
       if (error?.name === "AbortError") {
@@ -914,12 +1014,45 @@ export default function Home() {
     });
   }, []);
 
+  const addContextPerson = useCallback((person) => {
+    const authorId = Number(person?.authorId ?? person?.author_id);
+    const name = String(person?.name || "").trim();
+    if (!Number.isInteger(authorId) || !name) return;
+    setGraphContextPeople((current) => [
+      { authorId, name, affiliation: String(person?.affiliation || "").trim(), source: "matrix" },
+      ...current.filter((item) => Number(item.authorId) !== authorId),
+    ].slice(0, 8));
+    setContextPersonIds((current) => {
+      if (current.includes(authorId)) return current;
+      if (current.length >= 8) {
+        setProfileNotice("Add up to 8 people to this chat.");
+        return current;
+      }
+      return [...current, authorId];
+    });
+  }, []);
+
+  const handleUseStarter = useCallback((starter) => {
+    const nextIntent = starter?.intent === "mentor" ? "mentor" : "collaborator";
+    setIntent(nextIntent);
+    setInputValue(String(starter?.prompt || ""));
+  }, []);
+
+  const prepareContextAction = useCallback((action) => {
+    setContextAction(action);
+    setInputValue(action === "assess"
+      ? "How do these people fit my research idea? "
+      : "Find a researcher to add for ");
+  }, []);
+
   const suggestedPrompts =
-    contextPersonIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
+    followUps.length > 0 && phase !== PHASE.AWAITING_CONFIRM
+      ? followUps
+      : contextPersonIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
       ? [
           `How does ${contextPeople[0]?.name || 'the selected person'} fit my research idea?`,
           contextPersonIds.length > 1 ? 'Compare the selected people using their publications' : 'What evidence supports this person as a fit?',
-          intent === 'mentor' ? 'Find more mentors for my learning goal' : 'What expertise should this team add next?',
+          intent === 'mentor' ? 'Find more mentors for my learning goal' : 'Find another collaborator for this research idea',
         ]
       : phase === PHASE.AWAITING_CONFIRM
       ? copy.promptsConfirm
@@ -944,7 +1077,7 @@ export default function Home() {
     }
     const skipped = skippedType + skippedSize;
     if (skipped > 0) {
-      setProfileNotice(`Skipped ${skipped} file${skipped === 1 ? "" : "s"}: only .txt, .md or .tex under 200 KB.`);
+      setProfileNotice(`Skipped ${skipped} file${skipped === 1 ? "" : "s"}: use PDF or Word under 10 MB, or .txt, .md or .tex under 200 KB.`);
     }
   }, [attachedPapers.length]);
 
@@ -1067,7 +1200,7 @@ export default function Home() {
           >
             <span className="session-chip-title">{session.title || "Untitled session"}</span>
             <span className="session-chip-meta">
-              <span>{session.intent === "mentor" ? "Mentor" : "Team"}</span>
+              <span>{session.intent === "mentor" ? "Mentor" : "Collaborators"}</span>
               <span>{relativeTime(session.last_message_at)}</span>
             </span>
           </button>
@@ -1103,7 +1236,9 @@ export default function Home() {
       phase={phase}
       currentQuery={currentQuery}
       savedIds={savedIds}
-      teamBuilding={searchIntent === "collaborator"}
+      isCollaboratorSearch={searchIntent === "collaborator"}
+      heading={shortlistKind === "researchers" ? "Researchers" : ""}
+      candidatesReviewed={candidatesReviewed}
       teamNames={selectedContextNames}
       selectionDisabled={isLoading}
       onOpenProfile={openProfile}
@@ -1137,6 +1272,7 @@ export default function Home() {
           starters={GENERAL_STARTERS}
           messages={messages}
           phase={phase}
+          statusLabel={agentStatus}
           isLoading={isLoading}
           canStop={canStop}
           inputValue={inputValue}
@@ -1148,6 +1284,11 @@ export default function Home() {
           contextPeople={contextPeople}
           contextPersonIds={contextPersonIds}
           onToggleContextPerson={toggleContextPerson}
+          intent={intent}
+          onAddContextPerson={addContextPerson}
+          onSavePerson={savePerson}
+          onPrepareContextAction={prepareContextAction}
+          onUseStarter={handleUseStarter}
           resultsWorkspace={inlineResults}
           notice={profileNotice}
           onDismissNotice={() => setProfileNotice("")}
