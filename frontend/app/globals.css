@@ -622,8 +622,15 @@ select:focus-visible,
 }
 
 .msg-p + .msg-p,
-.msg-list {
-  margin-top: 8px;
+.msg-list,
+.msg-section + .msg-p,
+.msg-p + .msg-section,
+.msg-section + .msg-section {
+  margin-top: 10px;
+}
+
+.msg-section > .msg-p + .msg-list {
+  margin-top: 4px;
 }
 
 .msg-list {
@@ -644,6 +651,18 @@ select:focus-visible,
   font-size: 0.78em;
   text-decoration: none;
 }
+
+.msg-sources {
+  margin: 10px 0 0;
+  padding: 8px 0 0 18px;
+  border-top: 1px solid var(--matrix-border);
+  font-size: 0.78rem;
+  color: var(--matrix-text-2);
+}
+
+.msg-sources li + li { margin-top: 3px; }
+.msg-sources a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.msg-source-year { color: var(--matrix-text-3); }
 
 .message-meta time {
   white-space: nowrap;
@@ -1172,6 +1191,33 @@ select:focus-visible,
   white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.collab-card-name-link {
+  all: unset;
+  cursor: pointer;
+}
+
+.collab-card-name-link:hover,
+.collab-card-name-link:focus-visible {
+  text-decoration: underline;
+}
+
+.collab-card-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 0.74rem;
+  color: var(--matrix-text-3);
+}
+
+.collab-card-focus {
+  margin-top: 4px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--matrix-text-2);
+  text-transform: capitalize;
 }
 
 .collab-card-role {
@@ -2035,6 +2081,16 @@ body {
 .paper-title svg {
   flex: 0 0 auto;
   margin-top: 2px;
+}
+
+a.paper-title {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.paper-title:hover,
+a.paper-title:focus-visible {
+  text-decoration: underline;
 }
 
 .person-save svg {
@@ -3218,4 +3274,11 @@ body,
     padding-bottom: max(12px, env(safe-area-inset-bottom));
   }
 
+}
+
+.message-anchor {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  scroll-margin-top: 12px;
 }

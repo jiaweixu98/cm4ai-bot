@@ -10,6 +10,8 @@ export default function ResultsWorkspace({
   currentQuery,
   savedIds,
   isCollaboratorSearch,
+  heading = "",
+  candidatesReviewed = 0,
   teamNames = [],
   onOpenProfile,
   onSave,
@@ -25,7 +27,7 @@ export default function ResultsWorkspace({
     : context?.context_basis === 'need_profile' ? 'Using one-time attached context.'
     : context?.context_basis === 'need_team' ? `Using ${context.team_count} selected ${context.team_count === 1 ? 'person' : 'people'} as context.`
     : '';
-  const resultHeading = isCollaboratorSearch ? "Potential collaborators" : "Potential mentors";
+  const resultHeading = heading || (isCollaboratorSearch ? "Potential collaborators" : "Potential mentors");
 
   return (
     <section className="results-pane inline-results-pane" aria-live="polite">
@@ -49,6 +51,7 @@ export default function ResultsWorkspace({
           <div className="results-header">
             <h2>{resultHeading} <span className="count-badge">{candidates.length}</span></h2>
             {currentQuery && <div className="query-text">For {currentQuery}</div>}
+            {candidatesReviewed > candidates.length && <p className="results-context">Ranked from {candidatesReviewed} catalog researchers</p>}
             {contextText && <p className="results-context">{contextText}</p>}
             {phase === "explaining" && (
               <div className="stage-progress">

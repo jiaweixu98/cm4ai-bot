@@ -116,6 +116,10 @@ export function normalizeMessage(message, index) {
     content: String(message?.content || ""),
     at: message?.at || null,
     stopped: Boolean(message?.stopped),
+    ...(message?.hasResults ? { hasResults: true } : {}),
+    ...(Array.isArray(message?.citations) && message.citations.length > 0
+      ? { citations: message.citations.slice(0, 40) }
+      : {}),
   };
 }
 

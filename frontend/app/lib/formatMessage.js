@@ -12,16 +12,31 @@ export function FormattedText({ content, citations = [] }) {
     <>
       {blocks.map((block, blockIndex) => {
         const lines = block.split("\n");
-        const listItems = lines.filter((line) => /^\s*([-*]|\d+\.)\s+/.test(line));
-        if (listItems.length >= 2 && listItems.length === lines.length) {
+        const isItem = (line) => /^\s*([-*]|\d+\.)\s+/.test(line);
+        const firstItem = lines.findIndex(isItem);
+        const lead = firstItem < 0 ? lines : lines.slice(0, firstItem);
+        const items = firstItem < 0 ? [] : lines.slice(firstItem);
+        if (items.length >= 1 && items.every(isItem) && (items.length >= 2 || lead.length > 0)) {
           return (
-            <ul key={blockIndex} className="msg-list">
-              {lines.map((line, lineIndex) => (
-                <li key={lineIndex}>
-                  <InlineText text={line.replace(/^\s*([-*]|\d+\.)\s+/, "")} citations={citations} />
-                </li>
-              ))}
-            </ul>
+            <div key={blockIndex} className="msg-section">
+              {lead.length > 0 && (
+                <p className="msg-p">
+                  {lead.map((line, lineIndex) => (
+                    <span key={lineIndex}>
+                      {lineIndex > 0 && <br />}
+                      <InlineText text={line} citations={citations} />
+                    </span>
+                  ))}
+                </p>
+              )}
+              <ul className="msg-list">
+                {items.map((line, lineIndex) => (
+                  <li key={lineIndex}>
+                    <InlineText text={line.replace(/^\s*([-*]|\d+\.)\s+/, "")} citations={citations} />
+                  </li>
+                ))}
+              </ul>
+            </div>
           );
         }
         return (

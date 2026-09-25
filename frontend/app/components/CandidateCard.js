@@ -12,6 +12,13 @@ function Paper({ paper }) {
   </div>;
 }
 
+function connectionText({ hops, via = [] }) {
+  if (hops === 1) return 'Your coauthor';
+  const names = via.filter(Boolean);
+  if (hops === 2 && names.length) return `Shared coauthor: ${names[0]}`;
+  return names.length ? `Coauthor path via ${names.join(' → ')}` : `${hops} coauthor steps from you`;
+}
+
 function CandidateCard({ candidate, ranked, index, saved, intent, currentQuery, teamNames, onOpenProfile, onSave, onUnsave, pending }) {
   const papers = (candidate.papers || []).slice(0, 3);
   const note = pending
@@ -24,8 +31,16 @@ function CandidateCard({ candidate, ranked, index, saved, intent, currentQuery, 
     <div className="collab-card-header">
       <div className="collab-card-rank" title="Search result position">{index + 1}</div>
       <div className="collab-card-info">
-        <h3 className="collab-card-name">{candidate.name}</h3>
+        <h3 className="collab-card-name">
+          <button type="button" className="collab-card-name-link" title="Open graph profile"
+            onClick={() => onOpenProfile(candidate.author_id)}>{candidate.name}</button>
+        </h3>
         {candidate.affiliation && <div className="collab-card-affiliation">{candidate.affiliation}</div>}
+        {candidate.role && <div className="collab-card-focus">{candidate.role}</div>}
+        {(candidate.latest_year || candidate.connection) && <div className="collab-card-facts">
+          {candidate.latest_year && <span>Latest paper {candidate.latest_year}</span>}
+          {candidate.connection && <span>{connectionText(candidate.connection)}</span>}
+        </div>}
         {candidate.is_bridge2ai_member && <span className="collab-card-role">Bridge2AI</span>}
       </div>
       <button type="button" className={`person-save ${saved ? 'is-saved' : ''}`} aria-pressed={saved}

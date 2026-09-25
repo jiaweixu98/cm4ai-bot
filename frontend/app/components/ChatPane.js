@@ -8,6 +8,7 @@ export default function ChatPane({
   starters,
   messages,
   phase,
+  statusLabel = "",
   isLoading,
   canStop,
   inputValue,
@@ -57,17 +58,32 @@ export default function ChatPane({
   const visibleMessages = showEarlier || messages.length <= CHAT_WINDOW ? messages : messages.slice(-CHAT_WINDOW);
   const phaseLabel =
     phase === "generating"
-      ? "Reading your request"
+      ? statusLabel || "Reading your request"
       : phase === "searching"
         ? "Searching"
         : phase === "explaining"
           ? "Writing notes"
           : "";
 
+  const lastMessage = messages[messages.length - 1];
+  const lastMessageId = lastMessage?.id;
+  const lastMessageRole = lastMessage?.role;
   useEffect(() => {
-    if (!pinnedRef.current) return;
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, phase, visibleMessages.length]);
+    // Bring the start of a new message into view so long answers read top-down,
+    // but leave the position alone if the user scrolled up to read earlier turns.
+    if (!lastMessageId) return;
+    if (lastMessageRole !== "user" && !pinnedRef.current) return;
+    const node = scrollerRef.current?.querySelector(`[data-msg-id="${CSS.escape(lastMessageId)}"]`);
+    node?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [lastMessageId, lastMessageRole]);
+
+  let resultsAnchorId = null;
+  for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+    if (visibleMessages[i].hasResults) {
+      resultsAnchorId = visibleMessages[i].id;
+      break;
+    }
+  }
 
   const onScroll = () => {
     const node = scrollerRef.current;
@@ -457,15 +473,19 @@ export default function ChatPane({
           </div>
         )}
         {visibleMessages.map((msg) => (
-          <MessageBubble
-            key={msg.id}
-            message={msg}
-            citations={citations}
-            onRetry={onRetry}
-            onReport={onReport}
-          />
+          <div key={msg.id} data-msg-id={msg.id} className="message-anchor">
+            {(msg.content || !msg.hasResults) && (
+              <MessageBubble
+                message={msg}
+                citations={citations}
+                onRetry={onRetry}
+                onReport={onReport}
+              />
+            )}
+            {msg.id === resultsAnchorId && resultsWorkspace}
+          </div>
         ))}
-        {resultsWorkspace}
+        {!resultsAnchorId && resultsWorkspace}
         {isLoading && (
           <div className="message message-assistant">
             <div className="message-avatar message-avatar-assistant">M</div>

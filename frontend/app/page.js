@@ -54,6 +54,7 @@ export default function Home() {
   const [authorInfo, setAuthorInfo] = useState(null);
   const [seekerName, setSeekerName] = useState("");
   const [matrixUserToken, setMatrixUserToken] = useState("");
+  const [followUps, setFollowUps] = useState([]);
   const [savedPeople, setSavedPeople] = useState([]);
   const [savedPeopleReady, setSavedPeopleReady] = useState(false);
   const [contextPersonIds, setContextPersonIds] = useState([]);
@@ -69,6 +70,10 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [phase, setPhase] = useState(PHASE.IDLE);
+  const [agentStatus, setAgentStatus] = useState("");
+  const [shortlistKind, setShortlistKind] = useState("");
+  const [candidatesReviewed, setCandidatesReviewed] = useState(0);
+  const [workingContext, setWorkingContext] = useState({ goal: "", requirements: [] });
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [sessionStatus, setSessionStatus] = useState({ loading: true, saving: false, error: "" });
@@ -114,6 +119,8 @@ export default function Home() {
     setMessages([]);
     setPhase(PHASE.IDLE);
     setCurrentQuery("");
+    setWorkingContext({ goal: "", requirements: [] });
+    setShortlistKind("");
     setResearchPlan(null);
     setPastQueries([]);
     setPriorInputs([]);
@@ -124,6 +131,7 @@ export default function Home() {
     setProfileNotice("");
     setQueuedFollowUp("");
     setContextAction(null);
+    setFollowUps([]);
   }, []);
 
   const upsertSessionSummary = useCallback((session) => {
@@ -153,8 +161,11 @@ export default function Home() {
       searchIntent,
       contextPersonIds,
       graphContextPeople,
+      workingContext,
+      shortlistKind,
+      candidatesReviewed,
     }),
-    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople]
+    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed]
   );
 
   const applySessionSnapshot = useCallback((session) => {
@@ -183,6 +194,18 @@ export default function Home() {
     setMessages(restoredMessages);
     setPhase(Array.isArray(snapshot.candidates) && snapshot.candidates.length ? PHASE.DONE : PHASE.IDLE);
     setCurrentQuery(typeof snapshot.currentQuery === "string" ? snapshot.currentQuery : "");
+    setWorkingContext(
+      snapshot.workingContext && typeof snapshot.workingContext === "object"
+        ? {
+            goal: String(snapshot.workingContext.goal || "").slice(0, 500),
+            requirements: Array.isArray(snapshot.workingContext.requirements)
+              ? snapshot.workingContext.requirements.map(String).slice(0, 8)
+              : [],
+          }
+        : { goal: "", requirements: [] }
+    );
+    setShortlistKind(typeof snapshot.shortlistKind === "string" ? snapshot.shortlistKind : "");
+    setCandidatesReviewed(Number(snapshot.candidatesReviewed) || 0);
     setResearchPlan(snapshot.researchPlan && typeof snapshot.researchPlan === "object" ? snapshot.researchPlan : null);
     setPastQueries(Array.isArray(snapshot.pastQueries) ? snapshot.pastQueries : []);
     setPriorInputs(Array.isArray(snapshot.priorInputs) ? snapshot.priorInputs : []);
@@ -643,7 +666,7 @@ export default function Home() {
   }, [candidates, intent, rerankedMap]);
 
   const runRerank = useCallback(
-    async (cands, activeIntent = intent) => {
+    async (cands, activeIntent = intent, queryOverride = "") => {
       const rerankController = new AbortController();
       rerankAbortRef.current = rerankController;
       setRerankProgress({ done: 0, total: 1 });
@@ -663,7 +686,7 @@ export default function Home() {
               })
             : [],
           seekerPapers: [],
-          query: researchPlan?.question || currentQuery,
+          query: queryOverride || researchPlan?.question || currentQuery,
           intent: activeIntent,
           candidates: cands,
           signal: rerankController.signal,
@@ -832,7 +855,11 @@ export default function Home() {
         searchPhase: previousPhase,
         intent: activeIntent,
         contextMode,
+        workingContext,
         pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
+        onStatus: (label) => {
+          if (!chatController.signal.aborted) setAgentStatus(label);
+        },
         signal: chatController.signal,
       });
       if (chatController.signal.aborted) return;
@@ -845,13 +872,78 @@ export default function Home() {
         setResearchPlan(result.research_plan);
       }
 
-      if (result.action === "confirm" && currentQuery) {
+      if (result.action === "agent") {
+        setAgentStatus("");
+        const newResults = Array.isArray(result.shortlist) && result.shortlist.length > 0
+          && result.result_update !== "keep" && result.result_update !== "clear";
+        if (result.reply || newResults) {
+          addMessage("assistant", result.reply || "", { citations: result.citations, hasResults: newResults });
+        }
+        setFollowUps(Array.isArray(result.suggested_followups)
+          ? result.suggested_followups.map(String).filter(Boolean).slice(0, 3)
+          : []);
+        if (result.working_context && typeof result.working_context === "object") {
+          setWorkingContext({
+            goal: String(result.working_context.goal || "").slice(0, 500),
+            requirements: Array.isArray(result.working_context.requirements)
+              ? result.working_context.requirements.map(String).slice(0, 8)
+              : [],
+          });
+        }
+        const shortlist = Array.isArray(result.shortlist) ? result.shortlist.slice(0, RESULT_LIMIT) : [];
+        const resultUpdate = ["keep", "replace", "clear"].includes(result.result_update)
+          ? result.result_update
+          : shortlist.length > 0 ? "replace" : "keep";
+        if (resultUpdate === "clear" || (resultUpdate === "replace" && shortlist.length === 0)) {
+          setCandidates([]);
+          setRerankedMap({});
+          setRerankProgress({ done: 0, total: 0 });
+          setExpandedCards({});
+          setShortlistKind("");
+          if (resultUpdate === "clear") setCurrentQuery("");
+        }
+        if (resultUpdate === "replace" && shortlist.length > 0) {
+          const title = String(result.shortlist_title || text);
+          const kind = result.shortlist_kind;
+          setShortlistKind(kind || "");
+          setCandidatesReviewed(Number(result.candidates_reviewed) || 0);
+          setSearchIntent(kind === "mentors" ? "mentor" : "collaborator");
+          setCurrentQuery(title);
+          setPastQueries((prev) => [...prev, title]);
+          setCandidates(shortlist.map((person) => ({
+            author_id: String(person.author_id),
+            name: person.name,
+            affiliation: person.affiliation || "Affiliation unavailable",
+            is_bridge2ai_member: Boolean(person.is_bridge2ai_member),
+            role: String(person.role || ""),
+            latest_year: String(person.latest_year || ""),
+            connection: person.connection && Number.isInteger(person.connection.hops) ? person.connection : null,
+            mutual_coauthors: [],
+            papers: Array.isArray(person.papers) ? person.papers.slice(0, 3) : [],
+          })));
+          setRerankedMap(Object.fromEntries(shortlist.map((person) => [String(person.author_id), {
+            explanation: person.why,
+            justification: person.why,
+            evidence_paper_index: 0,
+            source: "agent",
+          }])));
+          setRerankProgress({ done: 1, total: 1 });
+          setRerankError(false);
+          setExpandedCards(Object.fromEntries(shortlist.slice(0, 3).map((c) => [String(c.author_id), true])));
+          setPhase(PHASE.DONE);
+        } else if (resultUpdate !== "keep" || candidates.length === 0) {
+          setPhase(previousPhase === PHASE.GENERATING ? PHASE.IDLE : previousPhase);
+        } else {
+          setPhase(PHASE.DONE);
+        }
+      } else if (result.action === "confirm" && currentQuery) {
         addMessage("assistant", "Searching now.");
         setPhase(PHASE.SEARCHING);
         await runSearch(activeIntent);
       } else if (result.action === "search") {
         const query = result.query;
         const justification = result.justification || "";
+        setShortlistKind("");
         setSearchIntent(activeIntent);
         setCurrentQuery(query);
         setPastQueries((prev) => [...prev, query]);
@@ -875,6 +967,7 @@ export default function Home() {
         setPhase(previousPhase === PHASE.GENERATING ? PHASE.IDLE : previousPhase);
       }
     } catch (error) {
+      setAgentStatus("");
       if (chatController.signal.aborted) return;
       chatAbortRef.current = null;
       if (error?.name === "AbortError") {
@@ -953,7 +1046,9 @@ export default function Home() {
   }, []);
 
   const suggestedPrompts =
-    contextPersonIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
+    followUps.length > 0 && phase !== PHASE.AWAITING_CONFIRM
+      ? followUps
+      : contextPersonIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
       ? [
           `How does ${contextPeople[0]?.name || 'the selected person'} fit my research idea?`,
           contextPersonIds.length > 1 ? 'Compare the selected people using their publications' : 'What evidence supports this person as a fit?',
@@ -1142,6 +1237,8 @@ export default function Home() {
       currentQuery={currentQuery}
       savedIds={savedIds}
       isCollaboratorSearch={searchIntent === "collaborator"}
+      heading={shortlistKind === "researchers" ? "Researchers" : ""}
+      candidatesReviewed={candidatesReviewed}
       teamNames={selectedContextNames}
       selectionDisabled={isLoading}
       onOpenProfile={openProfile}
@@ -1175,6 +1272,7 @@ export default function Home() {
           starters={GENERAL_STARTERS}
           messages={messages}
           phase={phase}
+          statusLabel={agentStatus}
           isLoading={isLoading}
           canStop={canStop}
           inputValue={inputValue}

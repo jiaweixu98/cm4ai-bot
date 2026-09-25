@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { FormattedText } from "../lib/formatMessage";
 import { relativeTime } from "../lib/matrixUi";
+import { paperTitle } from "../lib/personaConfig";
 import { IconCopy, IconFlag, IconRetry } from "./icons";
 
 export default function MessageBubble({
@@ -30,7 +31,21 @@ export default function MessageBubble({
       </div>
       <div className="message-stack">
         <div className={`message-bubble message-bubble-${message.role}`}>
-          <FormattedText content={full} citations={citations} />
+          <FormattedText content={full} citations={message.citations || citations} />
+          {message.citations?.length > 0 && (
+            <ol className="msg-sources">
+              {message.citations.map((source, index) => (
+                <li key={source.evidence_id || index}>
+                  {source.url ? (
+                    <a href={source.url} target="_blank" rel="noopener noreferrer">{paperTitle(source)}</a>
+                  ) : (
+                    paperTitle(source)
+                  )}
+                  {source.year && <span className="msg-source-year"> ({source.year})</span>}
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
         <div className="message-meta">
           {message.at && <time dateTime={new Date(message.at).toISOString()}>{relativeTime(message.at)}</time>}
