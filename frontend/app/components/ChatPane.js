@@ -341,7 +341,7 @@ export default function ChatPane({
           type="file"
           className="sr-only"
           multiple
-          accept=".txt,.md,.markdown,.tex"
+          accept=".pdf,.docx,.txt,.md,.markdown,.tex"
           aria-label="Attach research context files"
           onChange={(event) => {
             if (event.target.files?.length) onAttachFiles?.(event.target.files);
@@ -353,7 +353,7 @@ export default function ChatPane({
           onClick={() => fileInputRef.current?.click()}
           type="button"
           aria-label="Attach research context files"
-          title="Attach .txt, .md, or .tex research context"
+          title="Attach a paper, draft, CV or abstract (PDF, Word, .txt, .md, .tex)"
         >
           <IconPaperclip />
         </button>

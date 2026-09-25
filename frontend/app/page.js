@@ -982,7 +982,7 @@ export default function Home() {
     }
     const skipped = skippedType + skippedSize;
     if (skipped > 0) {
-      setProfileNotice(`Skipped ${skipped} file${skipped === 1 ? "" : "s"}: only .txt, .md or .tex under 200 KB.`);
+      setProfileNotice(`Skipped ${skipped} file${skipped === 1 ? "" : "s"}: use PDF or Word under 10 MB, or .txt, .md or .tex under 200 KB.`);
     }
   }, [attachedPapers.length]);
 

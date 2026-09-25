@@ -12,6 +12,7 @@ import logging
 import concurrent.futures
 import time
 import unicodedata
+import zipfile
 from pathlib import Path
 from collections import deque
 from contextlib import asynccontextmanager
@@ -38,6 +39,7 @@ from data_loader import (
     load_specter_model,
     load_publication_counts,
 )
+import attachments
 from retriever import Retriever
 from session_store import (
     create_chat_session,
@@ -1909,6 +1911,31 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = 100
     bridge2ai_only: bool = False
+class AttachmentTextRequest(BaseModel):
+    filename: str = Field(default="", max_length=300)
+    data_base64: str = Field(max_length=14_500_000)
+
+
+@app.post("/api/attachment-text")
+async def attachment_text(req: AttachmentTextRequest):
+    suffix = Path(req.filename.lower()).suffix
+    if suffix not in {".pdf", ".docx"}:
+        raise HTTPException(status_code=400, detail="Attach a PDF or Word document")
+    try:
+        data = attachments.decode(req.data_base64)
+        if suffix == ".docx":
+            text = attachments.docx_text(data)
+        else:
+            text = await asyncio.to_thread(attachments.pdf_text, _get_openai_client(),
+                                           [MODEL_NAME_CHAT, _CHAT_FALLBACK_MODEL], data, req.filename)
+    except (ValueError, KeyError, zipfile.BadZipFile) as exc:
+        logger.warning("Attachment not readable: %s", type(exc).__name__)
+        raise HTTPException(status_code=422, detail="Could not read this document") from None
+    if not text:
+        raise HTTPException(status_code=422, detail="No readable text in this document")
+    return {"text": text}
+
+
     outside_network: bool = False
     team_member_ids: list[str] = Field(default_factory=list)
     research_plan: ResearchPlan | None = None
