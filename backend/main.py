@@ -98,7 +98,7 @@ async def llm_request_slot(endpoint_name: str):
 # ---------- models ----------
 # Small, fast model for chat, query drafting, and rerank. Override via env without
 # editing tracked files.
-MODEL_NAME_CHAT = os.environ.get("MATRIX_CHAT_MODEL", "gpt-5.6-luna").strip() or "gpt-5.6-luna"
+MODEL_NAME_CHAT = os.environ.get("MATRIX_CHAT_MODEL", "gpt-6-luna").strip() or "gpt-6-luna"
 MODEL_NAME_EXPERTISE = os.environ.get("MATRIX_QUERY_MODEL", MODEL_NAME_CHAT).strip() or MODEL_NAME_CHAT
 MODEL_NAME_RERANKING = os.environ.get("MATRIX_RERANK_MODEL", MODEL_NAME_CHAT).strip() or MODEL_NAME_CHAT
 UNLINKED_AUTHOR_IDS = {"", "0", "unlinked", "none", "null"}
@@ -204,7 +204,7 @@ def _is_linked_author_id(author_id: str | None) -> bool:
 
 
 _failed_chat_models: set[str] = set()
-_CHAT_FALLBACK_MODEL = "gpt-4.1-mini"
+_CHAT_FALLBACK_MODEL = os.environ.get("MATRIX_FALLBACK_MODEL", "gpt-5.6-luna").strip() or "gpt-5.6-luna"
 
 
 def _why_chat_complete(messages: list[dict], max_tokens: int = 1800):
