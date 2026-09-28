@@ -228,8 +228,13 @@ def _why_chat_complete(messages: list[dict], max_tokens: int = 1800):
     return _chat_complete(messages, MODEL_NAME_CHAT, max_tokens)
 
 
-def _chat_complete(messages: list[dict], model: str, max_tokens: int | None = None):
-    """Create a chat completion, tolerating token-param and model-name differences."""
+def _chat_complete(messages: list[dict], model: str, max_tokens: int | None = None,
+                   reasoning_effort: str | None = None):
+    """Create a chat completion, tolerating token-param and model-name differences.
+
+    Reasoning models reject max_tokens and count hidden reasoning against
+    max_completion_tokens, so short answers need a low reasoning_effort.
+    """
     client = _get_openai_client()
     models: list[str] = []
     for candidate in (model, _CHAT_FALLBACK_MODEL):
@@ -240,9 +245,11 @@ def _chat_complete(messages: list[dict], model: str, max_tokens: int | None = No
     last_error: Exception | None = None
     for candidate in models:
         kwargs: dict[str, Any] = {"model": candidate, "messages": messages}
+        if max_tokens is not None:
+            kwargs["max_completion_tokens"] = max_tokens
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
         try:
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
             response = client.chat.completions.create(**kwargs)
             if candidate != model:
                 logger.warning("Chat model %s unavailable; using %s", model, candidate)
@@ -252,12 +259,16 @@ def _chat_complete(messages: list[dict], model: str, max_tokens: int | None = No
         except Exception as exc:
             last_error = exc
             message = str(exc).lower()
-            if max_tokens is not None and "max_tokens" in message:
-                kwargs.pop("max_tokens", None)
-                kwargs["max_completion_tokens"] = max_tokens
+            retry = dict(kwargs)
+            if "reasoning_effort" in message:
+                retry.pop("reasoning_effort", None)
+            if max_tokens is not None and "max_completion_tokens" in message:
+                retry.pop("max_completion_tokens", None)
+                retry["max_tokens"] = max_tokens
+            if retry != kwargs:
                 try:
-                    response = client.chat.completions.create(**kwargs)
-                    logger.info("Chat completion used %s with max_completion_tokens", candidate)
+                    response = client.chat.completions.create(**retry)
+                    logger.info("Chat completion used %s with %s", candidate, sorted(set(retry) - {"messages"}))
                     return response
                 except Exception as retry_exc:
                     last_error = retry_exc
@@ -1087,7 +1098,7 @@ def _is_confirmation(user_text: str, query: str, prior_inputs: list[str] | None 
         if txt:
             messages.append({"role": "user", "content": str(txt)})
     messages.append({"role": "user", "content": user_message})
-    response = _chat_complete(messages, MODEL_NAME_CHAT, max_tokens=8)
+    response = _chat_complete(messages, MODEL_NAME_CHAT, max_tokens=16, reasoning_effort="none")
     ans = (response.choices[0].message.content or "").strip().upper()
     return ans.startswith("Y")
 
