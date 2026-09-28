@@ -26,7 +26,7 @@ _research_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="matri
 # External lookups must not queue behind index work from other conversations.
 _network_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="matrix-openalex")
 logger = logging.getLogger("matrix.research_agent")
-REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
+REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh"}
 MAX_TURNS = 14
 TURN_SECONDS = 170
 _MODEL_NUMBER = re.compile(r"\s*\[\d{1,3}\]")
