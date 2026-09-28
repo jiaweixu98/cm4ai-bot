@@ -34,7 +34,6 @@ export default function ChatPane({
   intent = "collaborator",
   onAddContextPerson,
   onSavePerson,
-  onPrepareContextAction,
   onUseStarter,
   resultsWorkspace = null,
   notice = "",
@@ -194,41 +193,10 @@ export default function ChatPane({
     if (!Number.isInteger(authorId)) return;
     onSavePerson?.({ ...person, author_id: String(authorId) });
   };
-  const prepareContextAction = (action) => {
-    onPrepareContextAction?.(action);
-    requestAnimationFrame(() => inputRef.current?.focus());
-  };
   const contextPicker = (
     <div className="context-picker-wrap">
-      {selectedPeople.length > 0 && (
-        <div className="selected-context-block" aria-label="People added to this chat">
-          <span className="selected-context-label">{intent === "collaborator" ? "People for this research" : "In this chat"}</span>
-          <div className="selected-context-chips">
-          {selectedPeople.map((person) => (
-            <button
-              key={person.authorId}
-              type="button"
-              className="selected-context-chip"
-              onClick={() => onToggleContextPerson?.(person.authorId)}
-              aria-label={`Remove ${person.name} from this chat`}
-            >
-              <span className={person.source === "graph" ? "context-source-dot" : ""} aria-hidden="true" />
-              {person.name} <IconClose />
-            </button>
-          ))}
-          </div>
-        </div>
-      )}
-      {intent === "collaborator" && selectedPeople.length > 0 && (
-        <div className="context-next-step" aria-label="Choose what to do with selected people">
-          <span>Next step</span>
-          <button type="button" onClick={() => prepareContextAction("assess")}>Assess fit</button>
-          <button type="button" onClick={() => prepareContextAction("find")}>Find someone to add</button>
-        </div>
-      )}
       {peoplePickerOpen && (
         <div ref={peoplePickerRef} className="people-picker" style={peoplePickerStyle} role="dialog" aria-label="Add people to this chat">
-          <div className="people-picker-heading">Add people</div>
           {savedPeople.length > 0 && (
             <>
               <div className="people-picker-section-label">Saved people</div>
@@ -323,11 +291,22 @@ export default function ChatPane({
 
   const composer = (landing = false) => (
     <div className={`chat-input-wrapper ${landing ? "landing-composer" : ""}`}>
+      {selectedPeople.length > 0 && (
+        <div className="selected-context-chips" aria-label="People added to this chat">
+          {selectedPeople.map((person) => (
+            <button key={person.authorId} type="button" className="selected-context-chip"
+              onClick={() => onToggleContextPerson?.(person.authorId)} aria-label={`Remove ${person.name} from this chat`}>
+              {person.name}<IconClose />
+            </button>
+          ))}
+        </div>
+      )}
+      {peoplePickerOpen && contextPicker}
       <textarea
         ref={inputRef}
         className="chat-input"
         aria-label="Describe the research help you need"
-        placeholder={queueable ? "Queue a follow-up" : landing ? "Work on anything" : "Message MATRIX"}
+        placeholder={queueable ? "Queue a follow-up" : selectedPeople.length === 1 ? `Ask about ${selectedPeople[0].name}’s research…` : selectedPeople.length > 1 ? "Ask about these researchers…" : landing ? "Work on anything" : "Message MATRIX"}
         value={inputValue}
         onChange={(event) => setInputValue(event.target.value)}
         onKeyDown={handleKeyDown}
@@ -413,7 +392,6 @@ export default function ChatPane({
         {empty && (
           <div className="chat-empty-state">
             <h1>What should we work on?</h1>
-            {contextPicker}
             {composer(true)}
             {draftPrompts.length > 0 && (
               <div className="handoff-prompt-row" aria-label="Questions about the selected researcher">
@@ -553,7 +531,6 @@ export default function ChatPane({
               </div>
             </section>
           )}
-          {contextPicker}
           {attachedPapers.length > 0 && (
             <div className="attach-chips" aria-label="Attached research context">
               {attachedPapers.map((paper) => (

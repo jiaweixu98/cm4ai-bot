@@ -36,7 +36,6 @@ function CandidateCard({ candidate, ranked, index, saved, intent, currentQuery, 
             onClick={() => onOpenProfile(candidate.author_id)}>{candidate.name}</button>
         </h3>
         {candidate.affiliation && <div className="collab-card-affiliation">{candidate.affiliation}</div>}
-        {candidate.role && <div className="collab-card-focus">{candidate.role}</div>}
         {(candidate.latest_year || candidate.connection) && <div className="collab-card-facts">
           {candidate.latest_year && <span>Latest paper {candidate.latest_year}</span>}
           {candidate.connection && <span>{connectionText(candidate.connection)}</span>}
@@ -61,7 +60,7 @@ function CandidateCard({ candidate, ranked, index, saved, intent, currentQuery, 
         <div className="collab-match-reason"><span className="evidence-label">Why this person</span><p>{note.explanation}</p></div>
       )}
       {papers[lead] && <div className="lead-evidence"><span className="evidence-label">Supporting publication</span><Paper paper={papers[lead]} /></div>}
-      {remaining.length > 0 && <details className="more-evidence"><summary>More publications <span>{remaining.length}</span></summary>{remaining.map((paper, i) => <Paper key={i} paper={paper} />)}</details>}
+      {remaining.length > 0 && <details className="more-evidence"><summary>More publications</summary>{remaining.map((paper, i) => <Paper key={i} paper={paper} />)}</details>}
     </div>
     <div className="collab-actions"><button type="button" className="card-action primary" onClick={() => onOpenProfile(candidate.author_id)}>View on graph <IconExternal /></button></div>
   </article>;
