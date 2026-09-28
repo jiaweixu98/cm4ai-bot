@@ -83,9 +83,11 @@ class ResearchTools:
     _niche_reviewed: set = field(default_factory=set)
 
     def topic_coverage(self, author_id: str, topics: list[str]) -> dict:
-        """Count a person's listed papers whose titles contain a topic's key words."""
+        """Count a person's listed papers whose titles contain a topic's key words,
+        and name the OpenAlex topics or MeSH terms on their profile that share them."""
         raw = self.details(str(author_id)) or {}
         titles = [_title_tokens(paper_title(p)) for p in raw.get("papers", []) if paper_title(p)]
+        profile_terms = [str(t) for t in [*(raw.get("topics") or []), *(raw.get("mesh") or [])] if str(t).strip()]
         per_topic, matched = [], set()
         for topic in topics[:6]:
             words = _title_tokens(topic)
@@ -94,7 +96,9 @@ class ResearchTools:
             need = min(2, len(words)) if len(words) <= 4 else max(2, len(words) // 3)
             hits = {i for i, t in enumerate(titles) if len(words & t) >= need}
             matched |= hits
-            per_topic.append({"topic": topic, "papers": len(hits), "short": len(words) <= 4})
+            profile = [term for term in profile_terms if words & _title_tokens(term)]
+            per_topic.append({"topic": topic, "papers": len(hits), "short": len(words) <= 4,
+                              "profile_terms": profile[:4]})
         return {"listed_papers": len(titles), "matching_papers": len(matched), "per_topic": per_topic}
 
     def _charge(self, name: str):
@@ -136,9 +140,10 @@ class ResearchTools:
                         record[target] = str(value)
                 doi = str(paper.get("DOI") or paper.get("doi") or "").strip()
                 pmid = str(paper.get("PMID") or paper.get("pmid") or "").strip()
+                if doi and not doi.lower().startswith("http"):
+                    doi = f"https://doi.org/{doi.removeprefix('doi:')}"
                 if "url" not in record and (doi or pmid.isdigit()):
-                    record["url"] = (f"https://doi.org/{doi}" if doi
-                                     else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+                    record["url"] = doi or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
             self.evidence[eid] = record
             records.append(record)
         affiliation = raw.get("affiliation", "") if raw.get("affiliation") not in {None, "Unknown"} else ""
@@ -151,7 +156,10 @@ class ResearchTools:
                  for y in [str(p.get("PubYear") or p.get("year") or "")] if y.isdigit()]
         latest = str(raw.get("recent_year") or "") or (str(max(years)) if years else "")
         person = {"author_id": author_id, "name": raw["name"], "affiliation": affiliation,
-                  "profile_evidence_id": profile_eid, "latest_year": latest, "papers": records}
+                  "profile_evidence_id": profile_eid, "latest_year": latest, "papers": records,
+                  "orcid": raw.get("orcid") or "",
+                  "research_topics": list(raw.get("topics") or [])[:6],
+                  "mesh": list(raw.get("mesh") or [])[:8]}
         self._remember({k: v for k, v in person.items() if k != "papers"})
         return person
 
