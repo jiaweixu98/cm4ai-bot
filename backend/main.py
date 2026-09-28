@@ -104,6 +104,9 @@ async def llm_request_slot(endpoint_name: str):
 MODEL_NAME_CHAT = os.environ.get("MATRIX_CHAT_MODEL", "gpt-6-luna").strip() or "gpt-6-luna"
 MODEL_NAME_EXPERTISE = os.environ.get("MATRIX_QUERY_MODEL", MODEL_NAME_CHAT).strip() or MODEL_NAME_CHAT
 MODEL_NAME_RERANKING = os.environ.get("MATRIX_RERANK_MODEL", MODEL_NAME_CHAT).strip() or MODEL_NAME_CHAT
+REASONING_QUERY = os.environ.get("MATRIX_QUERY_REASONING", "low").strip().lower() or None
+REASONING_RERANK = os.environ.get("MATRIX_RERANK_REASONING", "medium").strip().lower() or None
+REASONING_CHAT = os.environ.get("MATRIX_CHAT_REASONING", "medium").strip().lower() or None
 UNLINKED_AUTHOR_IDS = {"", "0", "unlinked", "none", "null"}
 UNLINKED_BACKGROUND = (
     "The signed-in user is not linked to a graph author profile. "
@@ -213,19 +216,22 @@ _CHAT_FALLBACK_MODEL = os.environ.get("MATRIX_FALLBACK_MODEL", "gpt-5.6-luna").s
 def _why_chat_complete(messages: list[dict], max_tokens: int = 1800):
     """Prefer JSON-mode notes from the primary chat model, then the shared helper."""
     client = _get_openai_client()
-    for token_key in ("max_completion_tokens", "max_tokens"):
+    attempts = [{"max_completion_tokens": max_tokens}, {"max_tokens": max_tokens}]
+    if REASONING_CHAT:
+        attempts.insert(0, {"max_completion_tokens": max_tokens, "reasoning_effort": REASONING_CHAT})
+    for extra in attempts:
         try:
             response = client.chat.completions.create(
                 model=MODEL_NAME_CHAT,
                 messages=messages,
                 response_format={"type": "json_object"},
-                **{token_key: max_tokens},
+                **extra,
             )
             logger.info("Why-notes completion used %s with JSON mode", MODEL_NAME_CHAT)
             return response
         except Exception as exc:
-            logger.warning("Why-notes JSON mode failed on %s/%s: %s", MODEL_NAME_CHAT, token_key, exc)
-    return _chat_complete(messages, MODEL_NAME_CHAT, max_tokens)
+            logger.warning("Why-notes JSON mode failed on %s/%s: %s", MODEL_NAME_CHAT, sorted(extra), exc)
+    return _chat_complete(messages, MODEL_NAME_CHAT, max_tokens, reasoning_effort=REASONING_CHAT)
 
 
 def _chat_complete(messages: list[dict], model: str, max_tokens: int | None = None,
@@ -1067,7 +1073,7 @@ def _generate_query(
             messages.append({"role": "user", "content": str(txt)})
     messages.append({"role": "user", "content": user_message})
 
-    response = _chat_complete(messages, MODEL_NAME_EXPERTISE)
+    response = _chat_complete(messages, MODEL_NAME_EXPERTISE, reasoning_effort=REASONING_QUERY)
     full = response.choices[0].message.content or ""
 
     query = full.strip()
@@ -1262,7 +1268,7 @@ def _classify_and_respond(
     )
     messages.append({"role": "user", "content": user_message})
 
-    response = _chat_complete(messages, MODEL_NAME_CHAT)
+    response = _chat_complete(messages, MODEL_NAME_CHAT, reasoning_effort=REASONING_CHAT)
     full = response.choices[0].message.content or ""
 
     # Parse action
@@ -1359,6 +1365,7 @@ def _rerank_batch(
             }
         ],
         MODEL_NAME_RERANKING,
+        reasoning_effort=REASONING_RERANK,
     )
     full = response.choices[0].message.content or ""
     results: list[dict] = []
