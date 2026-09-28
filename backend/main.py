@@ -36,6 +36,7 @@ from data_loader import (
     load_author_nodes,
     load_knowledge_graph_nx,
     load_embeddings_and_index,
+    load_core_index,
     load_specter_model,
     load_publication_counts,
 )
@@ -358,6 +359,12 @@ def _team_profile_embedding(
     return np.mean(np.stack(member_embeddings), axis=0, keepdims=True).astype(np.float32), applied_ids
 
 
+def _unit(vectors: np.ndarray) -> np.ndarray:
+    vectors = np.asarray(vectors, dtype=np.float32)
+    norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
+    return np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)
+
+
 def _query_with_team_context(
     query_text: str,
     team_member_ids: list[str] | None,
@@ -365,10 +372,11 @@ def _query_with_team_context(
     faiss_index,
 ) -> tuple[np.ndarray, list[str]]:
     """Keep the requested capability primary while adding selected team context."""
-    query_embedding = _model_encode(query_text)
+    query_embedding = _unit(_model_encode(query_text))
     team_embedding, applied_ids = _team_profile_embedding(team_member_ids, author_ids, faiss_index)
     if team_embedding is None:
         return query_embedding, []
+    team_embedding = _unit(team_embedding)
 
     # The query remains the dominant signal.  This is deterministic retrieval,
     # not an LLM ranking or an assertion that the team members collaborate.
@@ -672,6 +680,9 @@ def _build_catalog_author_details(author: dict) -> dict:
             "Venue": p.get("journal") or "",
             "PubYear": p.get("year") or "",
             "CitedCount": 0,
+            "DOI": p.get("doi") or None,
+            "PMID": p.get("pmid") or None,
+            "url": p.get("url") or None,
         }
         for p in papers
     ]
@@ -728,6 +739,9 @@ def _get_author_details(author_id: str) -> dict:
         "affiliation": features.get("Affiliation", "Unknown"),
         "papers": features.get("Top Cited or Most Recent Papers", []),
         "recent_year": features.get("RecentYear") or "",
+        "orcid": features.get("ORCID") or "",
+        "topics": features.get("topics") or [],
+        "mesh": features.get("mesh") or [],
     }
 
 
@@ -818,9 +832,9 @@ def _build_author_preview_embedding(
     return _model_encode(fallback_text), fallback_text
 
 
-# Consortium members are 341 of the 77,534 indexed authors (0.44%), so an
-# unrestricted nearest-neighbour search returns one or two of them in a top 10.
-# Restricting to members therefore has to search much deeper before truncating.
+# Consortium members are about 0.5% of indexed authors, so an unrestricted
+# nearest-neighbour search returns one or two of them in a top 10. Snapshots
+# ship a members-only index; without it, search deep and filter.
 BRIDGE2AI_ONLY_SEARCH_DEPTH = 4000
 
 
@@ -833,8 +847,14 @@ def _preview_similar_authors(author_embedding: np.ndarray, top_k: int = 8,
     author_ids, faiss_index = load_embeddings_and_index()
     if faiss_index is None or not author_ids:
         raise HTTPException(status_code=500, detail="Search index not available")
-    retriever = Retriever(author_ids, faiss_index)
-    depth = BRIDGE2AI_ONLY_SEARCH_DEPTH if bridge2ai_only else max(top_k * 4, 24)
+    depth = max(top_k * 4, 24)
+    core_ids, core_index = load_core_index() if bridge2ai_only else ([], None)
+    if core_index is not None and core_ids:
+        retriever = Retriever(core_ids, core_index)
+    else:
+        retriever = Retriever(author_ids, faiss_index)
+        if bridge2ai_only:
+            depth = BRIDGE2AI_ONLY_SEARCH_DEPTH
     results = retriever.search(author_embedding, depth)
     best_by_id: dict[str, float] = {}
     for key, distance in results:
@@ -897,7 +917,8 @@ def _get_mutual_coauthors(a: str, b: str, n: int = 3) -> list[str]:
         ranked = []
         for mid in mutual:
             feats = nodes.get(mid, {}).get("features", {})
-            ranked.append((feats.get("FullName", "Unknown"), feats.get("H-index", 0)))
+            ranked.append((feats.get("FullName", "Unknown"),
+                           feats.get("H-index") or feats.get("PaperNum") or 0))
         ranked.sort(key=lambda x: x[1], reverse=True)
         return [name for name, _ in ranked[:n]]
     except Exception:

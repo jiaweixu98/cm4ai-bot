@@ -31,6 +31,8 @@ _publication_counts: dict | None = None
 _knowledge_graph_nx: nx.Graph | None = None
 _author_ids: list | None = None
 _faiss_index = None
+_core_ids: list | None = None
+_core_index = None
 _tokenizer = None
 _model = None
 _resources_loaded = False
@@ -215,6 +217,23 @@ def load_embeddings_and_index():
     return [], None
 
 
+def load_core_index():
+    """Consortium-member-only index, when the snapshot ships one."""
+    global _core_ids, _core_index
+    if _core_index is not None and _core_ids is not None:
+        return _core_ids, _core_index
+    ids_path = os.path.join(LOCAL_DATA_DIR, "core_ids.pkl")
+    index_path = os.path.join(LOCAL_DATA_DIR, "faiss_core_index.bin")
+    if not (os.path.exists(ids_path) and os.path.exists(index_path)):
+        return [], None
+    import faiss
+
+    _core_index = faiss.read_index(index_path)
+    with open(ids_path, "rb") as f:
+        _core_ids = pickle.load(f)
+    return _core_ids, _core_index
+
+
 # ---------- SPECTER model ----------
 
 
@@ -267,6 +286,7 @@ def load_all():
     load_knowledge_graph_nx()
     logger.info("[4/5] FAISS index…")
     load_embeddings_and_index()
+    load_core_index()
     logger.info("[5/5] SPECTER model…")
     load_specter_model()
     _resources_loaded = True
