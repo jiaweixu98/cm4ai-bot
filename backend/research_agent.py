@@ -104,7 +104,7 @@ class AnswerBlock(BaseModel):
 class ShortlistEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     author_id: str
-    why: str = Field(description="One or two sentences on why this person fits the request.")
+    why: str = Field(description="Two or three sentences on why this person fits the request.")
     evidence_ids: list[str] = Field(description="This person's papers supporting the why, strongest first.")
 
 
@@ -140,7 +140,8 @@ search and summarize the literature. Adapt to what the user actually asks.
 - For "the second person" or earlier results, call read_context; it keeps display order.
 - read_abstracts gives abstracts for catalog papers; use it when titles are not enough
   to judge methods, settings or findings.
-- search_literature searches published work in OpenAlex for explicit literature,
+- search_literature searches the catalog's own papers (titles and abstracts) first and
+  OpenAlex only when those do not cover the topic, for explicit literature,
   reading-list, current-evidence or study-finding requests. It is not a replacement
   for local people discovery. For topics, competing
   approaches, reading lists and state of the art. Send only short topic keywords, never
@@ -183,8 +184,10 @@ search and summarize the literature. Adapt to what the user actually asks.
 
 # Grounding
 - Use only names, affiliations and papers returned by tools in this turn.
-- Catalog papers are titles unless read_abstracts returned an abstract. Describe
-  findings only from abstracts; from titles, discuss topic only.
+- Catalog papers are titles unless they carry an abstract. Search results include an
+  abstract excerpt for each person's best-matching papers; read_abstracts gives the
+  full text for others. Describe findings only from abstracts; from titles, discuss
+  topic only.
 - A coauthor path is a record of joint work, not an introduction or relationship. Cite
   the evidence_id get_connection returns for statements about the path.
 - No fit percentages. Never claim an action you did not perform.
@@ -210,8 +213,9 @@ answered normally with tools as needed.
 
 # Output
 - shortlist: when you recommend people, list them there, best first, with a specific
-  one-or-two-sentence why and that person's supporting evidence_ids. A convincing why
-  names what their cited papers actually do for this request, what this person brings
+  why of two or three sentences and that person's supporting evidence_ids. A convincing why
+  names what their cited papers actually do for this request (the method, data,
+  population or finding, from the abstract when one is present), what this person brings
   that the others on the list do not, and what the user would go to them for (learn X,
   collaborate on Y, read Z). Use title_coverage to tell whether their work covers every
   part of the request or one part. Never write generic phrases like "relevant
@@ -563,12 +567,12 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
 
     @function_tool(failure_error_function=_tool_error)
     async def read_abstracts(evidence_ids: list[str]) -> dict:
-        """Fetch abstracts (via OpenAlex) for up to 5 catalog papers already returned as evidence."""
+        """Fetch abstracts for up to 5 catalog papers already returned as evidence."""
         return await call(services.read_abstracts, evidence_ids, executor=_network_executor)
 
     @function_tool(failure_error_function=_tool_error)
     async def search_literature(query: str, from_year: int | None) -> dict:
-        """Search published work in OpenAlex with short topic keywords. Returns titles, authors, abstracts."""
+        """Search published work with short topic keywords. Returns titles, authors, abstracts."""
         request_text = req.user_input.casefold()
         allowed = ("literature", "paper", "study", "studies", "evidence", "finding", "result",
                    "recent", "current", "state of the art", "reading list", "approach", "niche", "trend")
@@ -615,8 +619,10 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
     tools = [resolve_person, read_person_evidence, search_people, assemble_team, read_context]
     if services.path is not None:
         tools.append(get_connection)
+    if services.openalex or services.library is not None:
+        tools += [read_abstracts, search_literature, get_paper_info]
     if services.openalex:
-        tools += [read_abstracts, search_literature, get_author_info, get_paper_info, analyze_niche]
+        tools += [get_author_info, analyze_niche]
 
     effort = os.environ.get("MATRIX_AGENT_REASONING", "medium").strip().lower()
     reasoning = Reasoning(effort=effort) if effort in REASONING_EFFORTS else None

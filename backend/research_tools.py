@@ -26,6 +26,9 @@ _OPENALEX_CACHE: dict[str, tuple[float, dict]] = {}
 _DOI = re.compile(r"(10\.\d{4,9}/[^\s\"<>]+)", re.I)
 _WORK_ID = re.compile(r"\b(W\d{4,12})\b")
 ABSTRACT_CHARS = 1500
+# Search results carry a shorter excerpt; read_abstracts returns the full text.
+EXCERPT_CHARS = 700
+LIBRARY_SCOPE = "papers by researchers in the catalog"
 RRF_K = 60
 
 
@@ -56,8 +59,25 @@ def _abstract_text(inverted: dict | None) -> str:
     if not inverted:
         return ""
     positions = [(pos, word) for word, spots in inverted.items() for pos in spots]
-    text = " ".join(word for _, word in sorted(positions))
+    return _clip_abstract(" ".join(word for _, word in sorted(positions)))
+
+
+def _clip_abstract(text) -> str:
+    text = " ".join(str(text or "").split())
     return text if len(text) <= ABSTRACT_CHARS else text[:ABSTRACT_CHARS].rsplit(" ", 1)[0] + " …"
+
+
+def library_paper(row: dict) -> dict:
+    """A papers.sqlite row in the catalog's paper shape, abstract included."""
+    return {"Title": row["title"], "PubYear": row.get("year"), "Venue": row.get("venue") or "",
+            "DOI": row.get("doi"), "PMID": row.get("pmid"), "CitedCount": row.get("cited_by"),
+            "OpenAlexWork": row.get("work_id"), "Abstract": row.get("abstract") or ""}
+
+
+def _with_excerpt(record: dict) -> dict:
+    if len(record.get("abstract") or "") <= EXCERPT_CHARS:
+        return record
+    return {**record, "abstract": record["abstract"][:EXCERPT_CHARS].rsplit(" ", 1)[0] + " …"}
 
 
 def openalex_enabled() -> bool:
@@ -71,6 +91,7 @@ class ResearchTools:
     search: Callable
     path: Callable | None = None
     openalex: bool = False
+    library: object | None = None
     people: dict = field(default_factory=dict)
     evidence: dict = field(default_factory=dict)
     result_people: list | None = None
@@ -121,6 +142,8 @@ class ResearchTools:
         papers = [p for p in raw.get("papers", []) if paper_title(p)]
         # A lexical ordering of the available titles, not a scientific fit score.
         papers = sorted(papers, key=lambda p: -len(terms & set(re.findall(r"\w+", paper_title(p).casefold()))))
+        if self.library is not None and question.strip() and limit:
+            papers = [library_paper(row) for row in self.library.matched_papers(author_id, question, 2)] + papers
         records = []
         seen = set()
         for paper in papers:
@@ -144,6 +167,10 @@ class ResearchTools:
                     doi = f"https://doi.org/{doi.removeprefix('doi:')}"
                 if "url" not in record and (doi or pmid.isdigit()):
                     record["url"] = doi or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                if paper.get("OpenAlexWork") and "work_id" not in record:
+                    record["work_id"] = str(paper["OpenAlexWork"])
+                if paper.get("Abstract") and not record.get("abstract"):
+                    record.update(abstract=_clip_abstract(paper["Abstract"]), text_level="abstract")
             self.evidence[eid] = record
             records.append(record)
         affiliation = raw.get("affiliation", "") if raw.get("affiliation") not in {None, "Unknown"} else ""
@@ -156,7 +183,8 @@ class ResearchTools:
                  for y in [str(p.get("PubYear") or p.get("year") or "")] if y.isdigit()]
         latest = str(raw.get("recent_year") or "") or (str(max(years)) if years else "")
         person = {"author_id": author_id, "name": raw["name"], "affiliation": affiliation,
-                  "profile_evidence_id": profile_eid, "latest_year": latest, "papers": records,
+                  "profile_evidence_id": profile_eid, "latest_year": latest,
+                  "papers": [_with_excerpt(r) for r in records],
                   "orcid": raw.get("orcid") or "",
                   "research_topics": list(raw.get("topics") or [])[:6],
                   "mesh": list(raw.get("mesh") or [])[:8]}
@@ -314,6 +342,20 @@ class ResearchTools:
             if record.get("abstract"):
                 results[eid] = {"status": "ok", "title": record["title"], "abstract": record["abstract"]}
                 continue
+            row = self._library_row(record)
+            if row:
+                # The export holds OpenAlex's own text, so a paper it has without an
+                # abstract has none in OpenAlex either.
+                abstract = _clip_abstract(row.get("abstract"))
+                if not abstract:
+                    results[eid] = {"status": "no_abstract_available", "title": record["title"]}
+                    continue
+                record.update(abstract=abstract, text_level="abstract",
+                              openalex_id=f"https://openalex.org/{row['work_id']}")
+                if row.get("doi") and not record.get("url"):
+                    record["url"] = row["doi"]
+                results[eid] = {"status": "ok", "title": record["title"], "abstract": abstract}
+                continue
             wanted = _normalize_title(record["title"])
             query = " ".join(wanted.split()[:30])
             try:
@@ -337,12 +379,58 @@ class ResearchTools:
         words = re.findall(r"[\w-]+", query)[:20]
         if not words:
             raise ValueError("Give short topic keywords")
+        from_year = from_year if from_year and 1900 < from_year < 2100 else None
+        local = self.library.search(" ".join(words), from_year, 8) if self.library else []
+        strong = [row for row in local if row["match"] != "any_word"]
+        works = [self._public(self._library_record(row)) for row in strong]
+        if len(works) >= 3 or not self.openalex:
+            works = works if len(works) >= 3 else [self._public(self._library_record(row)) for row in local]
+            return {"status": "ok" if works else "empty", "works": works, "searched": LIBRARY_SCOPE}
         params = {"search": " ".join(words), "per-page": 8}
-        if from_year and 1900 < from_year < 2100:
+        if from_year:
             params["filter"] = f"from_publication_date:{from_year}-01-01"
-        works = [self._public(self._work_record(work)) for work in self._openalex_get(params)
-                 if str(work.get("display_name") or "").strip()]
-        return {"status": "ok" if works else "empty", "works": works}
+        try:
+            external = self._openalex_get(params)
+        except ValueError:
+            if not local:
+                raise
+            works = [self._public(self._library_record(row)) for row in local]
+            return {"status": "ok", "works": works, "searched": LIBRARY_SCOPE}
+        seen = {_normalize_title(w["title"]) for w in works}
+        for work in external:
+            title = str(work.get("display_name") or "").strip()
+            if title and _normalize_title(title) not in seen and len(works) < 8:
+                seen.add(_normalize_title(title))
+                works.append(self._public(self._work_record(work)))
+        return {"status": "ok" if works else "empty", "works": works,
+                "searched": LIBRARY_SCOPE + " and OpenAlex" if strong else "OpenAlex"}
+
+    def _library_row(self, record: dict) -> dict | None:
+        if not self.library:
+            return None
+        for value in (record.get("work_id"), record.get("openalex_id")):
+            if value and (row := self.library.work(value)):
+                return row
+        if (doi := _DOI.search(str(record.get("url") or ""))) and (row := self.library.by_doi(doi.group(1))):
+            return row
+        return self.library.by_title(record.get("title"), record.get("year"))
+
+    def _library_record(self, row: dict) -> dict:
+        openalex_id = f"https://openalex.org/{row['work_id']}"
+        eid = "work:" + hashlib.sha256(openalex_id.encode()).hexdigest()[:20]
+        authors = []
+        for author_id, _ in self.library.authors(row["work_id"])[:6]:
+            name = (self.details(str(author_id)) or {}).get("name")
+            if name and name not in {"Unknown", "Researcher"}:
+                authors.append(name)
+        pmid = str(row.get("pmid") or "")
+        record = {"evidence_id": eid, "author_id": None, "title": row["title"], "year": str(row.get("year") or ""),
+                  "url": row.get("doi") or (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else openalex_id),
+                  "authors": authors, "source": "catalog_library", "openalex_id": openalex_id,
+                  "cited_by_count": row.get("cited_by"), "abstract": _clip_abstract(row.get("abstract"))}
+        record["text_level"] = "abstract" if record["abstract"] else "title"
+        self.evidence[eid] = {**self.evidence.get(eid, {}), **record}
+        return self.evidence[eid]
 
     @staticmethod
     def _public(record: dict) -> dict:
@@ -423,10 +511,18 @@ class ResearchTools:
         if not self.openalex:
             result["openalex_status"] = "disabled"
             return result
+        known_id = str((self.details(local["author_id"]) or {}).get("openalex_id") or "") if local else ""
+        known_id = known_id.rsplit("/", 1)[-1]
         try:
-            candidates = self._openalex_raw("authors", {"search": query_name, "per-page": 5},
-                                            AUTHOR_FIELDS).get("results") or []
-            match, basis = self._match_openalex_author(candidates, local)
+            match, basis, candidates = None, "", []
+            if re.fullmatch(r"A\d{4,12}", known_id):
+                profile = self._openalex_raw(f"authors/{known_id}", {}, AUTHOR_FIELDS)
+                if profile.get("id"):
+                    match, basis = profile, "catalog_openalex_id"
+            if not match:
+                candidates = self._openalex_raw("authors", {"search": query_name, "per-page": 5},
+                                                AUTHOR_FIELDS).get("results") or []
+                match, basis = self._match_openalex_author(candidates, local)
         except ValueError as exc:
             result["openalex_status"] = str(exc)
             return result
@@ -466,6 +562,11 @@ class ResearchTools:
         if not identifier:
             raise ValueError("Give a DOI, OpenAlex work ID, evidence ID or title")
         known = self.evidence.get(identifier)
+        row = self._library_row(known) if known else self._library_row(
+            {"work_id": (wid.group(1) if (wid := _WORK_ID.search(identifier)) else ""),
+             "url": identifier, "title": identifier})
+        if row:
+            return self._library_paper_info(row, known)
         work = None
         if known and known.get("openalex_id"):
             work = self._openalex_raw(f"works/{known['openalex_id'].rsplit('/', 1)[-1]}", {}, PAPER_FIELDS)
@@ -519,6 +620,32 @@ class ResearchTools:
                 "references_count": work.get("referenced_works_count"),
                 "topics": [t.get("display_name") for t in (work.get("topics") or [])[:4]],
                 "authors": authors, "catalog_people": catalog_people,
+                "abstract": record.get("abstract") or "", "text_level": record.get("text_level", "title")}
+
+    def _library_paper_info(self, row: dict, known: dict | None) -> dict:
+        record = self._library_record(row)
+        if known and known is not record:
+            known.update(abstract=record["abstract"] or known.get("abstract", ""), openalex_id=record["openalex_id"],
+                         text_level="abstract" if record["abstract"] or known.get("abstract") else known["text_level"])
+            self.evidence.pop(record["evidence_id"], None)
+            record = {**record, **known}
+        authors, catalog_people = [], []
+        for author_id, position in self.library.authors(row["work_id"])[:12]:
+            raw = self.details(str(author_id)) or {}
+            if not raw.get("name") or raw["name"] in {"Unknown", "Researcher"}:
+                continue
+            affiliation = raw.get("affiliation") if raw.get("affiliation") not in {None, "Unknown"} else ""
+            authors.append({"name": raw["name"], "position": position, "orcid": raw.get("orcid") or None,
+                            "institutions": [affiliation] if affiliation else []})
+            person = {"author_id": str(author_id), "name": raw["name"], "affiliation": affiliation or ""}
+            self._remember(person)
+            catalog_people.append({**person, "link_basis": "listed_author_in_catalog_papers"})
+        return {"status": "ok", "match_basis": "catalog_library", "evidence_id": record["evidence_id"],
+                "title": record["title"], "year": record.get("year"), "venue": row.get("venue"),
+                "doi": row.get("doi"), "cited_by_count": row.get("cited_by"),
+                "topics": [t for t in (row.get("primary_topic"), row.get("primary_field")) if t],
+                "authors": authors, "authors_listed": "catalog researchers only",
+                "catalog_people": catalog_people,
                 "abstract": record.get("abstract") or "", "text_level": record.get("text_level", "title")}
 
     # ---------- Team assembly ----------
