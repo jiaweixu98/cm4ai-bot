@@ -65,7 +65,6 @@ export default function Home() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [queuedFollowUp, setQueuedFollowUp] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState(null);
-  const [contextAction, setContextAction] = useState(null);
 
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
@@ -101,6 +100,7 @@ export default function Home() {
   const searchAbortRef = useRef(null);
   const rerankAbortRef = useRef(null);
   const handleSendRef = useRef(null);
+  const entryParamsRef = useRef(null);
 
   const copy = PERSONA_COPY[intent] || PERSONA_COPY.collaborator;
   const resultsCopy = PERSONA_COPY[searchIntent] || copy;
@@ -130,7 +130,6 @@ export default function Home() {
     setExpandedCards({});
     setProfileNotice("");
     setQueuedFollowUp("");
-    setContextAction(null);
     setFollowUps([]);
   }, []);
 
@@ -234,12 +233,17 @@ export default function Home() {
     let cancelled = false;
 
     const initialize = async () => {
-      const params = new URLSearchParams(window.location.search);
+      // React can replay this effect after URL cleanup. Keep the original entry
+      // parameters for this mount so the replay still receives the graph person.
+      if (entryParamsRef.current === null) {
+        entryParamsRef.current = new URLSearchParams(window.location.search);
+      }
+      const params = new URLSearchParams(entryParamsRef.current);
       const nextIntent = parsePersonaIntent(params.get("intent"));
-      const freshConversation = params.get('fresh') === '1';
       const graphContextId = parseAidParam(params.get("context_person_id"));
       const graphHandoff = params.get("handoff") === "person" && graphContextId !== UNLINKED_AID;
       const graphContextNumber = Number(graphContextId);
+      const freshConversation = params.get('fresh') === '1' || graphHandoff;
       if (freshConversation) {
         params.delete('fresh');
       }
@@ -292,14 +296,6 @@ export default function Home() {
         try {
           fetchedGraphPerson = await fetchAuthor(graphContextId);
           if (cancelled) return;
-          setGraphContextPeople([{
-            authorId: graphContextNumber,
-            name: String(fetchedGraphPerson?.name || "Selected researcher").trim(),
-            affiliation: String(fetchedGraphPerson?.affiliation || "").trim(),
-            papers: Array.isArray(fetchedGraphPerson?.papers) ? fetchedGraphPerson.papers : [],
-            source: "graph",
-          }]);
-          setGraphHandoffPersonId(graphContextNumber);
         } catch {
           if (cancelled) return;
           setGraphContextPeople([]);
@@ -310,13 +306,24 @@ export default function Home() {
         setGraphHandoffPersonId(null);
       }
       if (cancelled) return;
-      setUiReady(true);
 
       const applyGraphHandoff = () => {
         if (!graphHandoff || !Number.isInteger(graphContextNumber)) return;
-        const name = String(fetchedGraphPerson?.name || "this researcher").trim();
+        if (!fetchedGraphPerson?.name) {
+          setProfileNotice("The selected researcher could not be loaded. Reopen their graph profile and try again.");
+          return;
+        }
+        // Apply identity and selection together, after any history reset/restore.
+        setGraphContextPeople([{
+          authorId: graphContextNumber,
+          name: String(fetchedGraphPerson.name).trim(),
+          affiliation: String(fetchedGraphPerson.affiliation || "").trim(),
+          papers: Array.isArray(fetchedGraphPerson.papers) ? fetchedGraphPerson.papers : [],
+          source: "graph",
+        }]);
+        setGraphHandoffPersonId(graphContextNumber);
         setContextPersonIds([graphContextNumber]);
-        setInputValue(`How does ${name}'s published work fit my research topic or idea?`);
+        setInputValue("");
       };
 
       if (!resolvedToken) {
@@ -325,6 +332,7 @@ export default function Home() {
         applyGraphHandoff();
         setSessionStatus({ loading: false, saving: false, error: "" });
         sessionBootstrappedRef.current = true;
+        setUiReady(true);
         return;
       }
 
@@ -343,7 +351,7 @@ export default function Home() {
         ].sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
         setSessions(mergedSessions);
         let effectiveIntent = nextIntent;
-        const requestedSessionId = params.get("session") || "";
+        const requestedSessionId = graphHandoff ? "" : params.get("session") || "";
         const requestedSession = requestedSessionId
           ? mergedSessions.find((item) => item.id === requestedSessionId)
           : null;
@@ -375,13 +383,17 @@ export default function Home() {
         if (cancelled) return;
         console.error("Failed to restore chat sessions:", error);
         resetWorkflowState();
+        applyGraphHandoff();
         setSessionStatus({
           loading: false,
           saving: false,
           error: "Could not load chat history.",
         });
       } finally {
-        sessionBootstrappedRef.current = true;
+        if (!cancelled) {
+          sessionBootstrappedRef.current = true;
+          setUiReady(true);
+        }
       }
     };
 
@@ -813,10 +825,6 @@ export default function Home() {
     const text = String(presetText ?? inputValue).trim();
     if (!text) return;
     let activeIntent = requestedIntent || inferPersonaIntent(text, intent);
-    const contextMode = activeIntent === "collaborator" && contextAction === "assess" && contextPersonIds.length > 0
-      ? "review_saved_people"
-      : null;
-    setContextAction(null);
     if (activeIntent !== intent) setIntent(activeIntent);
     if (phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
       setQueuedFollowUp(text);
@@ -854,7 +862,6 @@ export default function Home() {
         searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
         intent: activeIntent,
-        contextMode,
         workingContext,
         pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
         onStatus: (label) => {
@@ -1036,13 +1043,6 @@ export default function Home() {
     const nextIntent = starter?.intent === "mentor" ? "mentor" : "collaborator";
     setIntent(nextIntent);
     setInputValue(String(starter?.prompt || ""));
-  }, []);
-
-  const prepareContextAction = useCallback((action) => {
-    setContextAction(action);
-    setInputValue(action === "assess"
-      ? "How do these people fit my research idea? "
-      : "Find a researcher to add for ");
   }, []);
 
   const suggestedPrompts =
@@ -1287,7 +1287,6 @@ export default function Home() {
           intent={intent}
           onAddContextPerson={addContextPerson}
           onSavePerson={savePerson}
-          onPrepareContextAction={prepareContextAction}
           onUseStarter={handleUseStarter}
           resultsWorkspace={inlineResults}
           notice={profileNotice}

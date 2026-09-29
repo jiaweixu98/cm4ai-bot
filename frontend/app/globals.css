@@ -2432,6 +2432,7 @@ body,
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas:
+    "context"
     "input"
     "meta"
     "actions";
@@ -2466,7 +2467,7 @@ body,
 }
 
 .chat-input::placeholder {
-  color: #97999f;
+  color: #62666f;
   opacity: 1;
 }
 
@@ -2538,60 +2539,15 @@ body,
 }
 
 .context-picker-wrap {
-  position: relative;
-}
-
-.selected-context-block {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 8px;
-  margin: -1px 0 8px;
-}
-
-.selected-context-label {
-  color: #777b86;
-  font-size: 0.68rem;
-  font-weight: 650;
-  letter-spacing: 0.01em;
+  position: absolute;
 }
 
 .selected-context-chips {
+  grid-area: context;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.context-next-step {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin: -3px 0 8px;
-}
-
-.context-next-step > span {
-  margin-right: 2px;
-  color: #777b86;
-  font-size: 0.68rem;
-  font-weight: 650;
-}
-
-.context-next-step button {
-  min-height: 27px;
-  padding: 4px 8px;
-  border: 1px solid rgba(18, 18, 18, 0.12);
-  border-radius: 999px;
-  background: #ffffff;
-  color: #55565c;
-  cursor: pointer;
-  font-size: 0.69rem;
-  font-weight: 600;
-}
-
-.context-next-step button:hover {
-  border-color: rgba(18, 18, 18, 0.28);
-  color: #202123;
+  margin-bottom: 8px;
 }
 
 .selected-context-chip {
@@ -2605,7 +2561,10 @@ body,
   background: #f7f7f7;
   color: #444654;
   cursor: pointer;
-  font-size: 0.7rem;
+  font-size: 0.8125rem;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .selected-context-chip:hover {
