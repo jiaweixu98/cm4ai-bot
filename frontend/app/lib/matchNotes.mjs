@@ -1,7 +1,16 @@
 export const titleOf = (paper) => String(typeof paper === 'string' ? paper : paper?.Title || paper?.title || '').trim();
 
-const MAX_WORDS = 55;
-const MAX_CHARS = 360;
+const MAX_WORDS = 90;
+const MAX_CHARS = 620;
+
+function clip(text) {
+  const words = text.split(/\s+/).filter(Boolean);
+  let clipped = words.length > MAX_WORDS ? words.slice(0, MAX_WORDS).join(' ') : text;
+  if (clipped.length > MAX_CHARS) clipped = clipped.slice(0, MAX_CHARS);
+  if (clipped === text) return text;
+  const sentenceEnd = clipped.search(/[.!?](?=[^.!?]*$)/);
+  return sentenceEnd > 80 ? clipped.slice(0, sentenceEnd + 1) : `${clipped.replace(/\s+\S*$/, '')}.`;
+}
 
 function shortenTopic(title) {
   const cleaned = String(title || '').replace(/\s+/g, ' ').trim();
@@ -85,9 +94,6 @@ export function validateNotes(candidates, payload, options = {}) {
     if (!text || words.length < 8 || !Number.isInteger(index) || index < 0) {
       return fallbackNote(candidate, options);
     }
-    let explanation = text;
-    if (words.length > MAX_WORDS) explanation = words.slice(0, MAX_WORDS).join(' ');
-    if (explanation.length > MAX_CHARS) explanation = `${explanation.slice(0, MAX_CHARS - 1).replace(/\s+\S*$/, '')}.`;
-    return { author_id: String(candidate.author_id), explanation, evidence_paper_index: index, source: 'llm' };
+    return { author_id: String(candidate.author_id), explanation: clip(text), evidence_paper_index: index, source: 'llm' };
   });
 }
