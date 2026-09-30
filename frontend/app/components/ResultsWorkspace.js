@@ -51,7 +51,7 @@ export default function ResultsWorkspace({
           <div className="results-header">
             <h2>{resultHeading} <span className="count-badge">{candidates.length}</span></h2>
             {currentQuery && <div className="query-text">For {currentQuery}</div>}
-            {candidatesReviewed > candidates.length && <p className="results-context">Ranked from {candidatesReviewed} catalog researchers</p>}
+            {candidatesReviewed > candidates.length && <p className="results-context">Considered {candidatesReviewed} matching researchers</p>}
             {contextText && <p className="results-context">{contextText}</p>}
             {phase === "explaining" && (
               <div className="stage-progress">
