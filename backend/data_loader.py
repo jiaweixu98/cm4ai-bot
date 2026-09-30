@@ -234,6 +234,20 @@ def load_core_index():
     return _core_ids, _core_index
 
 
+_paper_library = None
+
+
+def load_paper_library():
+    """The snapshot's papers.sqlite, or None for snapshots built without it."""
+    global _paper_library
+    if _paper_library is None:
+        from paper_library import PaperLibrary
+
+        _paper_library = PaperLibrary.open(LOCAL_DATA_DIR) or False
+        logger.info("Paper library: %s", "loaded" if _paper_library else "not in snapshot")
+    return _paper_library or None
+
+
 # ---------- SPECTER model ----------
 
 

@@ -36,6 +36,7 @@ function CandidateCard({ candidate, ranked, index, saved, intent, currentQuery, 
             onClick={() => onOpenProfile(candidate.author_id)}>{candidate.name}</button>
         </h3>
         {candidate.affiliation && <div className="collab-card-affiliation">{candidate.affiliation}</div>}
+        {candidate.role && <div className="collab-card-focus">{candidate.role}</div>}
         {(candidate.latest_year || candidate.connection) && <div className="collab-card-facts">
           {candidate.latest_year && <span>Latest paper {candidate.latest_year}</span>}
           {candidate.connection && <span>{connectionText(candidate.connection)}</span>}

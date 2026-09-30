@@ -8,6 +8,8 @@ vectors, and the database CSV export, all from the same export:
     <export>/01_deployed_data/tkg_merge_map_*.csv
     <export>/02_data/papers.csv
     <export>/02_data/authorships.csv
+    <export>/02_data/collaborator_papers.csv
+    <export>/02_data/paper_topics.csv
     <export>/03_cheaha/author_embeddings.npy
     <export>/03_cheaha/author_embedding_ids.json
 
@@ -38,6 +40,9 @@ import sys
 from collections import defaultdict
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from paper_library import PAPERS_DB, doi_key, title_key  # noqa: E402
 
 RECENT_N = 6
 CITED_N = 6
@@ -226,6 +231,90 @@ def build_indexes(emb_dir: str, keep: set, core: set, out_dir: str) -> None:
         del mat
 
 
+def build_paper_db(tables: str, merge: dict, keep: set, out_dir: str) -> dict:
+    """papers.sqlite: every titled paper in the export, its catalog authors, and a
+    title/abstract full-text index, so the research tools answer paper questions
+    from the export before calling OpenAlex."""
+    import sqlite3
+
+    csv.field_size_limit(sys.maxsize)
+    path = os.path.join(out_dir, PAPERS_DB)
+    if os.path.exists(path + ".tmp"):
+        os.remove(path + ".tmp")
+    db = sqlite3.connect(path + ".tmp")
+    db.executescript("""
+        PRAGMA journal_mode = OFF;
+        PRAGMA synchronous = OFF;
+        CREATE TABLE papers (work_id TEXT PRIMARY KEY, title TEXT NOT NULL, abstract TEXT, year INTEGER,
+                             venue TEXT, doi TEXT, doi_key TEXT, pmid TEXT, cited_by INTEGER,
+                             primary_topic TEXT, primary_field TEXT, title_key TEXT);
+        CREATE TABLE paper_authors (work_id TEXT NOT NULL, author_id INTEGER NOT NULL, position INTEGER,
+                                    PRIMARY KEY (work_id, author_id));
+    """)
+
+    def number(value):
+        return int(float(value)) if str(value or "").strip() else None
+
+    def paper_row(row, venue=None):
+        doi = (row.get("doi") or "").strip()
+        pmid = (row.get("pmid") or "").strip()
+        return (row["openalex_id"], row["title"].strip(), (row.get("abstract") or "").strip() or None,
+                number(row.get("publication_year")), venue, f"https://doi.org/{doi_key(doi)}" if doi else None,
+                doi_key(doi) or None, pmid if pmid.isdigit() else None, number(row.get("cited_by_count")) or 0,
+                title_key(row["title"]))
+
+    insert = ("INSERT INTO papers (work_id, title, abstract, year, venue, doi, doi_key, pmid, cited_by, title_key) "
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    with open(os.path.join(tables, "papers.csv"), newline="", encoding="utf-8") as f:
+        db.executemany(insert, (paper_row(r, (r.get("venue") or "").strip() or None)
+                                for r in csv.DictReader(f) if (r.get("title") or "").strip()))
+
+    def add_author(rows):
+        for r in rows:
+            aid = node_id(r["author_id"])
+            aid = merge.get(aid, aid)
+            if aid in keep:
+                yield r.get("paper_id") or r["openalex_id"], aid, number(r.get("author_position"))
+
+    with open(os.path.join(tables, "authorships.csv"), newline="", encoding="utf-8") as f:
+        db.executemany("INSERT OR IGNORE INTO paper_authors VALUES (?, ?, ?)", add_author(csv.DictReader(f)))
+    # Collaborators' papers carry their own text; they fill papers and abstracts papers.csv lacks.
+    with open(os.path.join(tables, "collaborator_papers.csv"), newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            if not (r.get("title") or "").strip():
+                continue
+            db.execute(insert.replace("INSERT", "INSERT OR IGNORE"), paper_row(r))
+            if (r.get("abstract") or "").strip():
+                db.execute("UPDATE papers SET abstract = ? WHERE work_id = ? AND abstract IS NULL",
+                           (r["abstract"].strip(), r["openalex_id"]))
+            db.executemany("INSERT OR IGNORE INTO paper_authors VALUES (?, ?, ?)", add_author([r]))
+    with open(os.path.join(tables, "paper_topics.csv"), newline="", encoding="utf-8") as f:
+        db.executemany("UPDATE papers SET primary_topic = ?, primary_field = ? WHERE work_id = ?",
+                       ((r["topic_name"], r["field_name"], r["paper_id"])
+                        for r in csv.DictReader(f) if r.get("is_primary") == "t"))
+    db.executescript("""
+        DELETE FROM paper_authors WHERE work_id NOT IN (SELECT work_id FROM papers);
+        CREATE INDEX papers_doi ON papers (doi_key);
+        CREATE INDEX papers_title ON papers (title_key);
+        CREATE INDEX paper_authors_author ON paper_authors (author_id);
+        CREATE VIRTUAL TABLE papers_fts USING fts5(title, abstract, content='papers', content_rowid='rowid',
+                                                   tokenize='porter unicode61');
+        INSERT INTO papers_fts (papers_fts) VALUES ('rebuild');
+    """)
+    db.commit()
+    stats = {
+        "papers": db.execute("SELECT COUNT(*) FROM papers").fetchone()[0],
+        "with_abstract": db.execute("SELECT COUNT(*) FROM papers WHERE abstract IS NOT NULL").fetchone()[0],
+        "author_links": db.execute("SELECT COUNT(*) FROM paper_authors").fetchone()[0],
+    }
+    db.execute("VACUUM")
+    db.close()
+    os.replace(path + ".tmp", path)
+    log(f"  {PAPERS_DB}: {stats['papers']:,} papers, {stats['with_abstract']:,} with abstracts, "
+        f"{stats['author_links']:,} catalog author links")
+    return stats
+
+
 def write_graph_paper_shards(graph_papers: dict, out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
     shards = defaultdict(dict)
@@ -264,6 +353,7 @@ SNAPSHOT_FILES = (
     "author_ids.pkl",
     "faiss_core_index.bin",
     "core_ids.pkl",
+    PAPERS_DB,
 )
 
 
@@ -309,6 +399,16 @@ def check_snapshot(snapshot: str, graph_metadata: str) -> int:
     stray = sum(1 for k, v in graph.items() for n in [k, *v] if not isinstance(n, str) or int(n) not in node_ids)
     if stray:
         problems.append(f"{stray} coauthor graph entries point outside the snapshot")
+    del graph
+
+    import sqlite3
+    db = sqlite3.connect(f"file:{os.path.join(snapshot, PAPERS_DB)}?mode=ro", uri=True)
+    if not db.execute("SELECT COUNT(*) FROM papers").fetchone()[0]:
+        problems.append(f"{PAPERS_DB} has no papers")
+    linked = {r[0] for r in db.execute("SELECT DISTINCT author_id FROM paper_authors")}
+    if linked - node_ids:
+        problems.append(f"{len(linked - node_ids)} {PAPERS_DB} authors are not snapshot people")
+    db.close()
 
     manifest_path = os.path.join(snapshot, "snapshot_manifest.json")
     recorded = json.load(open(manifest_path, encoding="utf-8")).get("sha256", {}) if os.path.exists(manifest_path) else {}
@@ -380,6 +480,9 @@ def main() -> None:
     log("building FAISS indexes")
     build_indexes(cheaha, keep, core, args.out)
 
+    log(f"building {PAPERS_DB}")
+    paper_db = build_paper_db(tables, merge, keep, args.out)
+
     if args.graph_papers_out:
         log(f"writing graph paper shards to {args.graph_papers_out}")
         write_graph_paper_shards(graph_papers, args.graph_papers_out)
@@ -393,6 +496,7 @@ def main() -> None:
             "merged_away_ids": len(merge),
             "coauthor_people": graph_people,
             "left_out_without_papers": dropped,
+            "paper_db": paper_db,
             "sha256": {name: sha256(os.path.join(args.out, name)) for name in SNAPSHOT_FILES},
         }, f, indent=2)
     log("done")

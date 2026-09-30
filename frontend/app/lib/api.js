@@ -97,7 +97,7 @@ export async function explainCandidates({
   const res = await fetch("/api/why-lines", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(22000)]),
+    signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(37000)]),
     body: JSON.stringify({
       aid,
       team_member_ids: teamMemberIds,
