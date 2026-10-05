@@ -10,6 +10,7 @@ import logging
 
 import numpy as np
 import networkx as nx
+from tkg_publications import resolve_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +19,10 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.environ.get("CACHE_DIR", os.path.join(_PROJECT_ROOT, "tmp", "matrix_cache"))
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-LOCAL_DATA_DIR = os.environ.get(
+LOCAL_DATA_DIR = resolve_snapshot(os.environ.get(
     "LOCAL_DATA_DIR",
     os.path.join(_PROJECT_ROOT, "data"),
-)
+))
 
 
 # ---------- singletons ----------

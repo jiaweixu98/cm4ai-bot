@@ -2334,7 +2334,12 @@ async def report_error(req: ErrorReportRequest):
 # ---------- health ----------
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    from data_loader import LOCAL_DATA_DIR
+    manifest_path = os.path.join(LOCAL_DATA_DIR,'snapshot_manifest.json')
+    manifest = json.load(open(manifest_path)) if os.path.isfile(manifest_path) else {}
+    return {"status":"ok", "app_version":"1.2.001", "snapshot_version":manifest.get('snapshot_version'),
+            "people":manifest.get('people'), "core":manifest.get('core'),
+            "publication_catalog":bool(load_paper_library())}
 
 
 if __name__ == "__main__":
