@@ -1879,7 +1879,8 @@ async def chat(req: ChatRequest, request: Request):
 
         agent_model = os.environ.get("MATRIX_AGENT_MODEL", MODEL_NAME_CHAT)
         services = ResearchTools(_find_people_by_name, _get_author_details, agent_search,
-                                 path=_get_shortest_path, openalex=openalex_enabled(),
+                                 path=_get_shortest_path, similar=similar_work_people,
+                                 openalex=openalex_enabled(),
                                  library=load_paper_library())
         agent_model = [agent_model, _CHAT_FALLBACK_MODEL]
 
@@ -2296,6 +2297,88 @@ async def rerank(req: RerankRequest):
 async def graph_path(aid: str, collaborator_id: str):
     path = _get_shortest_path(aid, collaborator_id)
     return {"path": path, "hops": len(path) - 1 if path else -1}
+
+
+def _panel_affiliation(value: str | None) -> str:
+    text = str(value or "").strip()
+    if text.casefold() in {"", "unknown", "affiliation unavailable"}:
+        return ""
+    return text
+
+
+def _panel_name(nodes: dict, author_id: str) -> tuple[str, str]:
+    node = nodes.get(author_id) or {}
+    features = node.get("features") or {}
+    name = str(features.get("FullName") or node.get("title") or "").strip()
+    if name.casefold() in {"", "unknown"}:
+        name = ""
+    return name, _panel_affiliation(features.get("Affiliation"))
+
+
+_SIMILAR_PUBLIC = ("author_id", "name", "affiliation", "their_title", "their_year", "your_title", "your_year")
+
+
+def similar_work_people(author_id: str) -> list[dict]:
+    """People with similar papers who have not written with this person.
+
+    Each row is one paper of theirs next to one paper of the focal person.
+    Recorded coauthors and anyone with a shared catalog paper are left out.
+    Rows also carry their_work_id and your_work_id for the chat tool.
+    """
+    author_id = str(author_id or "").strip()
+    if not author_id.isdigit() or len(author_id) > 20:
+        return []
+    from paper_vectors import load_paper_index
+
+    index = load_paper_index()
+    library = load_paper_library()
+    if index is None or library is None:
+        return []
+    nodes = load_author_nodes()
+    graph = load_knowledge_graph_nx()
+    exclude = {int(author_id)}
+    if author_id in graph:
+        exclude.update(int(neighbor) for neighbor in graph.neighbors(author_id) if str(neighbor).isdigit())
+    try:
+        exclude.update(library.shared_years(int(author_id)))
+    except Exception:
+        logger.warning("Shared-paper exclusion failed for author %s", author_id)
+    try:
+        rows = index.similar_work(int(author_id), library, exclude, 8)
+    except Exception:
+        logger.warning("Similar-work lookup failed for author %s", author_id)
+        return []
+    people = []
+    for row in rows:
+        other = str(row["author_id"])
+        name, affiliation = _panel_name(nodes, other)
+        if not name:
+            continue
+        people.append({
+            "author_id": other,
+            "name": name,
+            "affiliation": affiliation,
+            "their_title": row["their_title"],
+            "their_year": row.get("their_year"),
+            "your_title": row["your_title"],
+            "your_year": row.get("your_year"),
+            "their_work_id": row.get("their_work_id") or "",
+            "your_work_id": row.get("your_work_id") or "",
+        })
+    return people
+
+
+@app.get("/api/author/{aid}/similar-work")
+async def author_similar_work(aid: str):
+    """People with similar papers who have not written with this person."""
+    author_id = str(aid or "").strip()
+    if not author_id.isdigit() or len(author_id) > 20:
+        raise HTTPException(status_code=400, detail="Invalid author ID")
+    people = await asyncio.to_thread(similar_work_people, author_id)
+    return {
+        "author_id": author_id,
+        "people": [{key: person.get(key) for key in _SIMILAR_PUBLIC} for person in people],
+    }
 
 
 @app.get("/api/author/{aid}/details")

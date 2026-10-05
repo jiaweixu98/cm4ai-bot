@@ -135,6 +135,13 @@ search and summarize the literature. Adapt to what the user actually asks.
 - For discovery requests, search immediately. Ask only clarifications that would
   materially change the result. Pass the original question and up to three distinct,
   concrete requirements to one search_people call; it performs deterministic facet fusion.
+- find_similar_work lists people whose papers are close to one person's and who have
+  never written with them. Use it for "who works on things like mine", "similar to my
+  papers", or "has not written with me". Pass "" for the signed-in researcher, or a
+  catalog author_id after resolve_person. Keep the returned order. Each why names their
+  paper and the focal person's paper it is close to, and cites matched_paper_evidence_id.
+  A plain research need ("find mentors for X", "who could help with Y") still uses
+  search_people. If it returns empty with reason no_focal_person, ask which person to use.
 - For a named person: resolve_person, then read_person_evidence for the actual question.
   If ambiguous, ask which person and show the returned affiliations. Never guess.
 - For "the second person" or earlier results, call read_context; it keeps display order.
@@ -446,7 +453,7 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
                            or (piece.startswith("**") and "\n- " in piece))
         if text:
             paragraphs.append(text)
-    searched = any(call in {"search_people", "assemble_team"} for call in tools.calls)
+    searched = any(call in {"search_people", "assemble_team", "find_similar_work"} for call in tools.calls)
     result_update = ("replace" if cards or searched
                      else "keep" if answer.result_update == "replace" else answer.result_update)
     payload = {"action": "agent", "reply": "\n\n".join(paragraphs).strip(),
@@ -478,6 +485,7 @@ def _status_label(name: str, args: dict, tools: ResearchTools) -> str:
     roles = [_clip(r, 26) for r in (args.get("roles") or [])[:4]]
     labels = {
         "search_people": f"Searching researchers: {_clip(args.get('question', ''), 70)}",
+        "find_similar_work": "Finding similar work",
         "resolve_person": f"Looking up {_clip(args.get('name', ''), 60)}",
         "read_person_evidence": f"Reading {person}'s publications" if person else "Reading publications",
         "read_context": "Reviewing the current conversation",
@@ -555,6 +563,11 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
         return await call(services.search_people, question, requirements, scope, exclude_ids)
 
     @function_tool(failure_error_function=_tool_error)
+    async def find_similar_work(author_id: str) -> dict:
+        """People with similar papers who have not written with this person. Pass "" for the signed-in researcher."""
+        return await call(services.find_similar_work, author_id)
+
+    @function_tool(failure_error_function=_tool_error)
     async def get_connection(from_author_id: str, to_author_id: str) -> dict:
         """Find the shortest recorded coauthorship path between two catalog people."""
         return await call(services.get_connection, from_author_id, to_author_id)
@@ -616,7 +629,7 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
             selected.append({"author_id": person["author_id"], "name": person["name"],
                              "affiliation": person.get("affiliation", ""),
                              "papers": [{"evidence_id": p["evidence_id"], "title": p["title"]} for p in person["papers"]]})
-    tools = [resolve_person, read_person_evidence, search_people, assemble_team, read_context]
+    tools = [resolve_person, read_person_evidence, search_people, find_similar_work, assemble_team, read_context]
     if services.path is not None:
         tools.append(get_connection)
     if services.openalex or services.library is not None:

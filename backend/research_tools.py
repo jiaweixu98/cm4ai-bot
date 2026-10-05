@@ -109,6 +109,7 @@ class ResearchTools:
     details: Callable
     search: Callable
     path: Callable | None = None
+    similar: Callable | None = None
     openalex: bool = False
     library: object | None = None
     people: dict = field(default_factory=dict)
@@ -289,6 +290,65 @@ class ResearchTools:
         self.result_people, self.result_query = people, question or "; ".join(facets)
         return {"status": "ok" if people else "empty", "question": question,
                 "requirements": facets, "scope": scope, "ranking": "rrf-v1", "people": people}
+
+    def _pin_matched_paper(self, author_id: str, row: dict) -> dict | None:
+        """The similar-work paper, with its abstract, as this person's cited evidence."""
+        paper = None
+        work_id = str(row.get("their_work_id") or "").strip()
+        if self.library is not None and work_id:
+            try:
+                found = self.library.work(work_id)
+            except Exception:
+                found = None
+            if found and found.get("title"):
+                paper = library_paper(found)
+        if paper is None and row.get("their_title"):
+            paper = {"Title": row["their_title"], "PubYear": row.get("their_year")}
+        if paper is None:
+            return None
+        record = self._remember_paper(author_id, paper)
+        return _with_excerpt(record) if record else None
+
+    def find_similar_work(self, author_id: str) -> dict:
+        """People whose papers are close to this person's, and who have not written with them.
+
+        An empty author_id uses the signed-in researcher. Order is the paper-vector order.
+        """
+        self._charge("find_similar_work")
+        focal = str(author_id or "").strip() or str(self.self_id or "")
+        if self.similar is None:
+            return {"status": "empty", "people": []}
+        if not focal.isdigit():
+            return {"status": "empty", "people": [], "reason": "no_focal_person"}
+        try:
+            rows = list(self.similar(focal) or [])
+        except Exception:
+            return {"status": "empty", "people": []}
+        people = []
+        for row in rows:
+            other = str(row.get("author_id") or "")
+            if not other.isdigit() or other in {focal, str(self.self_id or "")}:
+                continue
+            person = self._person(other, "", 3)
+            if not person:
+                continue
+            pinned = self._pin_matched_paper(other, row)
+            papers = list(person.get("papers") or [])
+            if pinned:
+                papers = [pinned] + [p for p in papers if p.get("evidence_id") != pinned.get("evidence_id")]
+            people.append({
+                **person,
+                "papers": papers[:3],
+                "their_title": row.get("their_title") or "",
+                "their_year": row.get("their_year"),
+                "your_title": row.get("your_title") or "",
+                "your_year": row.get("your_year"),
+                "matched_paper_evidence_id": (pinned or {}).get("evidence_id", ""),
+            })
+        self.result_people = people
+        self.result_query = "similar to your recent work"
+        self.candidates_reviewed = len(people)
+        return {"status": "ok" if people else "empty", "question": self.result_query, "people": people}
 
     def get_connection(self, from_id: str, to_id: str) -> dict:
         self._charge("get_connection")

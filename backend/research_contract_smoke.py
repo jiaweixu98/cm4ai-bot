@@ -1,6 +1,6 @@
 """Lightweight contract checks for MATRIX research tools and answer publication."""
 
-from research_agent import AnswerBlock, AnswerPart, ResearchAnswer, ShortlistEntry, render_answer
+from research_agent import INSTRUCTIONS, AnswerBlock, AnswerPart, ResearchAnswer, ShortlistEntry, render_answer
 from research_tools import ResearchTools
 
 
@@ -166,6 +166,56 @@ def main():
 
     import research_skills
     assert set(research_skills.SKILLS) >= {"find_mentor", "build_team", "find_niche"}
+    assert "find_similar_work" in INSTRUCTIONS
+
+    def similar(_author_id):
+        return [
+            {"author_id": "1", "their_title": "Alpha methods for health data", "their_year": 2024,
+             "your_title": "Alpha and beta clinical systems", "your_year": 2023,
+             "their_work_id": "W123456789", "your_work_id": "W987654321"},
+            {"author_id": "3", "their_title": "Beta methods in hospitals", "their_year": 2022,
+             "your_title": "Alpha and beta clinical systems", "your_year": 2023,
+             "their_work_id": "", "your_work_id": ""},
+        ]
+
+    class Library:
+        def work(self, work_id):
+            if work_id == "W123456789":
+                return {"title": "Alpha methods for health data", "year": 2024, "work_id": work_id,
+                        "abstract": "Methods for clinical alpha signals.", "doi": "", "pmid": "",
+                        "venue": "", "cited_by": 1}
+            return None
+
+    near = ResearchTools(lambda *_: [], details, search, similar=similar, library=Library(), self_id="2")
+    found = near.find_similar_work("")
+    assert [person["author_id"] for person in found["people"]] == ["1", "3"], found
+    assert found["people"][0]["your_title"] == "Alpha and beta clinical systems"
+    assert found["people"][0]["papers"][0]["title"] == "Alpha methods for health data"
+    assert "clinical alpha" in found["people"][0]["papers"][0]["abstract"]
+    evidence_id = found["people"][0]["matched_paper_evidence_id"]
+    assert near.evidence[evidence_id]["source"] == "local_catalog"
+    assert near.result_query == "similar to your recent work"
+    paired = ResearchAnswer(
+        blocks=[AnswerBlock(kind="general", person_ids=[], parts=[
+            AnswerPart(text="These people have not written with you.", evidence_ids=[])])],
+        shortlist=[
+            ShortlistEntry(author_id="3", why="Casey Three studies beta methods in hospitals.",
+                           evidence_ids=[found["people"][1]["matched_paper_evidence_id"]]),
+            ShortlistEntry(author_id="1", why="Alex One studies alpha methods for health data.",
+                           evidence_ids=[evidence_id]),
+        ],
+        shortlist_kind="researchers", shortlist_title="", result_update="keep",
+        task_goal="", task_requirements=[], suggested_followups=[],
+    )
+    shown = render_answer(paired, near)
+    assert [card["author_id"] for card in shown["shortlist"]] == ["1", "3"]
+    assert shown["shortlist"][0]["papers"][0]["title"] == "Alpha methods for health data"
+    assert shown["result_update"] == "replace"
+    assert shown["shortlist_title"] == "similar to your recent work"
+    guest = ResearchTools(lambda *_: [], details, search, similar=similar)
+    assert guest.find_similar_work("")["reason"] == "no_focal_person"
+    missing = ResearchTools(lambda *_: [], details, search, self_id="2")
+    assert missing.find_similar_work("")["status"] == "empty" and "reason" not in missing.find_similar_work("2")
     print("research contract smoke: ok")
 
 
