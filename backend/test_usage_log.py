@@ -26,11 +26,19 @@ class UsageLogTests(unittest.TestCase):
             "chat_session_id": "not-a-uuid",
         })
         self.assertIsNotNone(row)
-        self.assertEqual(row[6], "q" * 2000)
+        self.assertEqual(row[6], "q" * 2500)
         self.assertEqual(row[5], 2500)
         self.assertEqual(len(row[13]), 60000)
         self.assertIsNone(row[11])
         self.assertIsNone(usage_log._row({"account_id": "guest", "event_type": "matrix_chat_turn"}))
+
+    def test_long_question_and_decision_trace_are_preserved(self):
+        trace = {"tools": [{"name": "search_people", "args": {"query": "topic " * 5000}}]}
+        row = usage_log._row({"account_id": ACCOUNT, "event_type": "matrix_chat_turn",
+                              "query_text": "q" * 65000, "response_summary": trace})
+        self.assertEqual(row[6], "q" * 60000)
+        self.assertEqual(row[5], 65000)
+        self.assertEqual(row[14].obj, trace)
 
     def test_guests_are_not_queued(self):
         with patch.object(usage_log._QUEUE, "put_nowait") as put:

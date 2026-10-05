@@ -33,7 +33,7 @@ _UUID = re.compile(
     re.IGNORECASE,
 )
 _SESSION_REF = re.compile(r"^[a-f0-9]{8,64}$", re.IGNORECASE)
-_QUERY_CAP = 2000
+_QUERY_CAP = 60_000
 _RESPONSE_CAP = 60_000
 
 _INSERT = """
@@ -113,7 +113,7 @@ def _row(fields: dict[str, Any]) -> tuple | None:
         _uuid(fields.get("chat_session_id")),
         _uuid(fields.get("turn_id")),
         response or None,
-        _json_value(fields.get("response_summary"), 24000) if fields.get("response_summary") else None,
+        _json_value(fields.get("response_summary"), 64_000) if fields.get("response_summary") else None,
     )
 
 
