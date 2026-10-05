@@ -142,6 +142,23 @@ search and summarize the literature. Adapt to what the user actually asks.
   paper and the focal person's paper it is close to, and cites matched_paper_evidence_id.
   A plain research need ("find mentors for X", "who could help with Y") still uses
   search_people. If it returns empty with reason no_focal_person, ask which person to use.
+- For promoting a paper or finding its audience, use find_paper_audience with its DOI,
+  work ID or exact title; for a new paper pass its supplied title and abstract instead.
+  Ask for the paper when missing. Keep the deterministic order and cite each person's
+  returned matching publications. These are potential audiences based on related work,
+  not confirmed readers, willing collaborators or contacts. Do not send messages.
+- For exploring a person's coauthors with specialty, institution, geography or a date
+  range, resolve the person then use explore_coauthors. Dates and specialties apply to
+  shared publications, not a person's overall career. Geography is the institution printed
+  on the shared paper (placed through its ROR id), never where someone lives now; say so
+  when you report it. Accepted geography: a country name or alias (USA, U.S., United States,
+  UK, Great Britain), an ISO code (US, DEU), a US state or Canadian province name (California,
+  Ontario) or "US-CA" style code, a city (San Diego), or a continent (Europe, North America).
+  A bare two-letter code is a country (CA is Canada). Regions like "Bay Area" are not
+  recognised; use the city or state. Institution accepts a name fragment or initials (UCSF).
+  If geography_complete is false or geography_unresolved_people is nonzero, some coauthors
+  could not be placed (no institution or ROR id on the paper): state that, with the count,
+  and do not claim the returned set exhausts all matching coauthors.
 - For a named person: resolve_person, then read_person_evidence for the actual question.
   If ambiguous, ask which person and show the returned affiliations. Never guess.
 - For "the second person" or earlier results, call read_context; it keeps display order.
@@ -318,6 +335,17 @@ def _shortlist_cards(answer: ResearchAnswer, tools: ResearchTools) -> list[dict]
         return []
     cards, seen = [], set()
     entries = {entry.author_id: entry for entry in answer.shortlist}
+    publication_discovery = any(call in {'find_paper_audience','explore_coauthors'} for call in tools.calls)
+    if not entries and publication_discovery:
+        # A valid prose answer must not make the navigable, deterministic result
+        # set disappear. Supply reasons only from the returned paper records.
+        for person in tools.result_people or []:
+            papers = [p for p in person.get('papers',[]) if p.get('evidence_id') and p.get('title')]
+            if papers:
+                prefix = 'Shared publication' if 'explore_coauthors' in tools.calls else 'Related publication'
+                entry = ShortlistEntry(author_id=person['author_id'],why=f'{prefix}: {papers[0]["title"]}',
+                                       evidence_ids=[p['evidence_id'] for p in papers[:2]])
+                entries[entry.author_id] = entry
     # The retrieval service owns candidate order. The model writes bounded reasons
     # for those candidates but cannot silently rerank the result set.
     for result_person in tools.result_people or []:
@@ -453,7 +481,7 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
                            or (piece.startswith("**") and "\n- " in piece))
         if text:
             paragraphs.append(text)
-    searched = any(call in {"search_people", "assemble_team", "find_similar_work"} for call in tools.calls)
+    searched = any(call in {"search_people", "assemble_team", "find_similar_work", "find_paper_audience", "explore_coauthors"} for call in tools.calls)
     result_update = ("replace" if cards or searched
                      else "keep" if answer.result_update == "replace" else answer.result_update)
     payload = {"action": "agent", "reply": "\n\n".join(paragraphs).strip(),
@@ -465,6 +493,10 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
                                    "requirements": [r.strip()[:300] for r in answer.task_requirements if r.strip()][:8]}}
     payload["suggested_followups"] = [q.strip()[:120] for q in answer.suggested_followups if q.strip()][:3]
     if cards:
+        if not payload['reply']:
+            payload['reply'] = ('Potential audience for your paper, based on related publications:'
+                if 'find_paper_audience' in tools.calls else 'Recorded coauthors matching your publication filters:'
+                if 'explore_coauthors' in tools.calls else 'Researchers with matching publication evidence:')
         payload.update(shortlist=cards, shortlist_kind=answer.shortlist_kind,
                        shortlist_title=answer.shortlist_title.strip()[:120] or tools.result_query[:120],
                        candidates_reviewed=tools.candidates_reviewed)
@@ -486,6 +518,8 @@ def _status_label(name: str, args: dict, tools: ResearchTools) -> str:
     labels = {
         "search_people": f"Searching researchers: {_clip(args.get('question', ''), 70)}",
         "find_similar_work": "Finding similar work",
+        "find_paper_audience": "Finding a paper’s audience",
+        "explore_coauthors": "Filtering recorded coauthors",
         "resolve_person": f"Looking up {_clip(args.get('name', ''), 60)}",
         "read_person_evidence": f"Reading {person}'s publications" if person else "Reading publications",
         "read_context": "Reviewing the current conversation",
@@ -568,6 +602,17 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
         return await call(services.find_similar_work, author_id)
 
     @function_tool(failure_error_function=_tool_error)
+    async def find_paper_audience(identifier: str, title: str, abstract: str) -> dict:
+        """Potential audience from matching papers. Use an identifier, or supplied title and abstract. Never invent the source paper."""
+        return await call(services.find_paper_audience, identifier, title, abstract)
+
+    @function_tool(failure_error_function=_tool_error)
+    async def explore_coauthors(author_id: str, specialty: str, institution: str, geography: str,
+                                from_year: int | None, to_year: int | None) -> dict:
+        """Filter a person's recorded coauthors by their shared papers: specialty, printed institution (name fragment or initials), geography of the institution printed on the shared paper (country/alias/ISO code, US state or Canadian province, city, continent; not current residence) and inclusive years. Empty author_id uses the signed-in person. Report geography_unresolved_people when nonzero."""
+        return await call(services.explore_coauthors, author_id, specialty, institution, geography, from_year, to_year, executor=_network_executor)
+
+    @function_tool(failure_error_function=_tool_error)
     async def get_connection(from_author_id: str, to_author_id: str) -> dict:
         """Find the shortest recorded coauthorship path between two catalog people."""
         return await call(services.get_connection, from_author_id, to_author_id)
@@ -629,7 +674,7 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
             selected.append({"author_id": person["author_id"], "name": person["name"],
                              "affiliation": person.get("affiliation", ""),
                              "papers": [{"evidence_id": p["evidence_id"], "title": p["title"]} for p in person["papers"]]})
-    tools = [resolve_person, read_person_evidence, search_people, find_similar_work, assemble_team, read_context]
+    tools = [resolve_person, read_person_evidence, search_people, find_similar_work, find_paper_audience, explore_coauthors, assemble_team, read_context]
     if services.path is not None:
         tools.append(get_connection)
     if services.openalex or services.library is not None:

@@ -225,6 +225,43 @@ class ResearchTools:
         self._remember({k: v for k, v in person.items() if k != "papers"})
         return person
 
+    def _publication_results(self, result, question):
+        people = []
+        for candidate in result.get('people',[]):
+            person = self._person(candidate['author_id'], limit=0)
+            if not person or person['author_id'] == str(self.self_id): continue
+            papers = [self._remember_paper(person['author_id'],library_paper(p))
+                      for p in candidate.get('matched_papers',[])]
+            papers = [_with_excerpt(p) for p in papers if p]
+            if not papers: continue
+            people.append({**person,'papers':papers,'matched_paper_evidence_id':papers[0]['evidence_id'],
+                           'shared_paper_count':candidate.get('shared_paper_count'),
+                           'location_evidence':candidate.get('location_evidence',[])})
+        self.result_people = people
+        self.result_query = question
+        self.candidates_reviewed = len(people)
+        return {**result,'people':people}
+
+    def find_paper_audience(self, identifier: str, title: str, abstract: str) -> dict:
+        self._charge('find_paper_audience')
+        if self.library is None: return {'status':'unavailable','people':[]}
+        from paper_discovery import audience
+        from paper_vectors import load_paper_index
+        result = audience(self.library,load_paper_index(),identifier,title,abstract,[self.self_id])
+        return self._publication_results(result, 'potential audience for ' + (result.get('source_paper') or {}).get('title',title))
+
+    def explore_coauthors(self, author_id: str, specialty: str, institution: str, geography: str,
+                          from_year: int | None, to_year: int | None) -> dict:
+        self._charge('explore_coauthors')
+        focal = str(author_id or self.self_id)
+        if self.library is not None and hasattr(self.library,'canonical_author'):
+            focal = self.library.canonical_author(focal)
+        if not focal.isdigit(): return {'status':'needs_person','people':[]}
+        if self.library is None: return {'status':'unavailable','people':[]}
+        from paper_discovery import explore
+        result = explore(self.library,focal,specialty,institution,geography,from_year,to_year)
+        return self._publication_results(result,'recorded coauthors matching the publication filters')
+
     def resolve_person(self, name: str) -> dict:
         self._charge("resolve_person")
         name = name.strip()[:200]

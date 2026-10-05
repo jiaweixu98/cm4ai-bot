@@ -43,7 +43,7 @@ from data_loader import (
 )
 import attachments
 from paper_library import title_key
-from research_tools import library_paper
+from research_tools import library_paper, ResearchTools
 from retriever import Retriever
 from session_store import (
     create_chat_session,
@@ -2453,6 +2453,36 @@ async def report_error(req: ErrorReportRequest):
 
 
 # ---------- health ----------
+class PaperAudienceRequest(BaseModel):
+    identifier: str = Field(default='', max_length=500)
+    title: str = Field(default='', max_length=1000)
+    abstract: str = Field(default='', max_length=12000)
+
+
+@app.post('/api/paper-audience')
+async def paper_audience(req: PaperAudienceRequest):
+    tools = ResearchTools(_find_people_by_name,_get_author_details,lambda *_: [],library=load_paper_library())
+    return await asyncio.to_thread(tools.find_paper_audience,req.identifier,req.title,req.abstract)
+
+
+@app.get('/api/author/{aid}/explore-coauthors')
+async def explore_coauthors(aid: str, specialty: str = '', institution: str = '', geography: str = '',
+                            from_year: int | None = None, to_year: int | None = None):
+    library = load_paper_library()
+    if library is not None: aid = library.canonical_author(aid)
+    if not aid.isdigit() or aid not in load_author_nodes():
+        raise HTTPException(status_code=404,detail='Author not found')
+    if any(len(x)>200 for x in (specialty,institution,geography)):
+        raise HTTPException(status_code=400,detail='Filter is too long')
+    if any(y is not None and not 1800 <= y <= 2100 for y in (from_year,to_year)):
+        raise HTTPException(status_code=400,detail='Invalid publication year')
+    tools = ResearchTools(_find_people_by_name,_get_author_details,lambda *_: [],library=load_paper_library())
+    try:
+        return await asyncio.to_thread(tools.explore_coauthors,aid,specialty,institution,geography,from_year,to_year)
+    except ValueError as exc:
+        raise HTTPException(status_code=400,detail=str(exc))
+
+
 @app.get("/api/health")
 async def health():
     from data_loader import LOCAL_DATA_DIR
