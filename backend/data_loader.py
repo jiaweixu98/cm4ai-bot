@@ -108,14 +108,16 @@ def _load_knowledge_graph_raw() -> dict:
 def load_knowledge_graph_nx() -> nx.Graph:
     global _knowledge_graph_nx
     if _knowledge_graph_nx is not None:
-        return _knowledge_graph_nx
+        from publication_corrections import sync_graph
+        return sync_graph(_knowledge_graph_nx,load_paper_library())
     graph = _load_knowledge_graph_raw()
     g = nx.Graph()
     for node, neighbors in graph.items():
         for nb in neighbors:
             g.add_edge(node, nb)
     _knowledge_graph_nx = g
-    return _knowledge_graph_nx
+    from publication_corrections import sync_graph
+    return sync_graph(_knowledge_graph_nx,load_paper_library())
 
 
 # ---------- embeddings / FAISS ----------
@@ -166,6 +168,8 @@ def _extract_ids_and_embs(loaded, possible_ids_files: list[str]):
 def load_embeddings_and_index():
     global _author_ids, _faiss_index
     if _faiss_index is not None and _author_ids is not None:
+        from publication_corrections import sync_index
+        sync_index(_author_ids,_faiss_index,load_paper_library(),LOCAL_DATA_DIR)
         return _author_ids, _faiss_index
 
     import faiss
@@ -181,6 +185,8 @@ def load_embeddings_and_index():
         _faiss_index = faiss.read_index(local_index)
         with open(local_ids, "rb") as f:
             _author_ids = pickle.load(f)
+        from publication_corrections import sync_index
+        sync_index(_author_ids,_faiss_index,load_paper_library(),LOCAL_DATA_DIR)
         return _author_ids, _faiss_index
 
     # 1) Build from local embeddings
@@ -222,6 +228,8 @@ def load_core_index():
     """Consortium-member-only index, when the snapshot ships one."""
     global _core_ids, _core_index
     if _core_index is not None and _core_ids is not None:
+        from publication_corrections import sync_index
+        sync_index(_core_ids,_core_index,load_paper_library(),LOCAL_DATA_DIR)
         return _core_ids, _core_index
     ids_path = os.path.join(LOCAL_DATA_DIR, "core_ids.pkl")
     index_path = os.path.join(LOCAL_DATA_DIR, "faiss_core_index.bin")
@@ -232,6 +240,8 @@ def load_core_index():
     _core_index = faiss.read_index(index_path)
     with open(ids_path, "rb") as f:
         _core_ids = pickle.load(f)
+    from publication_corrections import sync_index
+    sync_index(_core_ids,_core_index,load_paper_library(),LOCAL_DATA_DIR)
     return _core_ids, _core_index
 
 

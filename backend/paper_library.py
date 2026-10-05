@@ -9,8 +9,14 @@ import math
 import os
 import re
 import sqlite3
+import logging
 import threading
+import time
+import urllib.parse
+from tkg_publications import decisions_path
 from collections import OrderedDict
+
+logger = logging.getLogger(__name__)
 
 PAPERS_DB = "papers.sqlite"
 
@@ -50,9 +56,17 @@ def work_key(value) -> str:
 
 
 class PaperLibrary:
+    _decisions_warned = False
+
     def __init__(self, path: str):
         self.path = path
         self._local = threading.local()
+        manifest = os.path.join(os.path.dirname(path), 'snapshot_manifest.json')
+        import json
+        self.snapshot_version = ''
+        if os.path.isfile(manifest):
+            with open(manifest, encoding='utf-8') as handle:
+                self.snapshot_version = json.load(handle).get('snapshot_version', '')
 
     @classmethod
     def open(cls, data_dir: str) -> "PaperLibrary | None":
@@ -64,8 +78,61 @@ class PaperLibrary:
         if conn is None:
             conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
             conn.row_factory = sqlite3.Row
+            conn.execute('CREATE TEMP VIEW visible_paper_authors AS SELECT * FROM main.paper_authors')
             self._local.conn = conn
+        # A Graph review may create the decision store after this process starts.
+        if (self.snapshot_version and not getattr(self._local, 'attached_decisions', False)
+                and time.monotonic() >= getattr(self._local, 'decisions_retry_at', 0)):
+            path = decisions_path()
+            if os.path.isfile(path):
+                self._attach_decisions(conn, path)
         return conn
+
+    def _attach_decisions(self, conn: sqlite3.Connection, path: str) -> None:
+        """Hide links that people marked "not my papers". Read-only; a missing, locked or
+        differently shaped decision store is logged once and treated as no decisions."""
+        attached = False
+        version = self.snapshot_version.replace("'", "''")
+        try:
+            conn.execute('ATTACH DATABASE ? AS corrections', ('file:' + urllib.parse.quote(path) + '?mode=ro',))
+            attached = True
+            conn.execute('SELECT snapshot_version, author_id, work_id FROM corrections.excluded_links LIMIT 1').fetchall()
+            conn.execute('DROP VIEW visible_paper_authors')
+            conn.execute(f'''CREATE TEMP VIEW visible_paper_authors AS SELECT pa.* FROM main.paper_authors pa
+                WHERE NOT EXISTS (SELECT 1 FROM corrections.excluded_links x
+                WHERE x.snapshot_version='{version}' AND x.author_id=pa.author_id AND x.work_id=pa.work_id)''')
+            self._local.attached_decisions = True
+        except sqlite3.Error as exc:
+            if attached:
+                try:
+                    conn.execute('DETACH DATABASE corrections')
+                except sqlite3.Error:
+                    pass
+            self._local.decisions_retry_at = time.monotonic() + 60
+            if not PaperLibrary._decisions_warned:
+                PaperLibrary._decisions_warned = True
+                logger.warning('Publication decisions unavailable (%s); showing all catalog links', exc)
+
+    def owns(self, author_id, work_id) -> bool:
+        return self._db().execute('SELECT 1 FROM visible_paper_authors WHERE author_id=? AND work_id=?',
+                                  (int(author_id), work_key(work_id))).fetchone() is not None
+
+    def visible_work_ids(self, author_id) -> set[str]:
+        """The work ids this person is shown on, in one query (corrections applied)."""
+        return {r[0] for r in self._db().execute('SELECT work_id FROM visible_paper_authors WHERE author_id=?',
+                                                 (int(author_id),))}
+
+    def canonical_author(self, author_id) -> str:
+        if not str(author_id).isdigit(): return str(author_id)
+        if not hasattr(self, '_aliases'):
+            try: self._aliases = {int(a):str(b) for a,b in self._db().execute('SELECT old_id,author_id FROM author_aliases')}
+            except sqlite3.OperationalError: self._aliases = {}
+        return self._aliases.get(int(author_id),str(author_id))
+
+    def author_works(self, author_id) -> list[dict]:
+        return [dict(r) for r in self._db().execute('''SELECT p.*
+            FROM visible_paper_authors pa JOIN papers p USING(work_id) WHERE pa.author_id=?
+            ORDER BY p.year DESC,p.cited_by DESC,p.work_id''', (int(author_id),))]
 
     def _one(self, where: str, value) -> dict | None:
         row = self._db().execute(f"SELECT rowid, * FROM papers WHERE {where} = ? LIMIT 1", (value,)).fetchone()
@@ -131,8 +198,60 @@ class PaperLibrary:
 
     def author_rowids(self, author_id) -> list[int]:
         return [r[0] for r in self._db().execute(
-            "SELECT p.rowid FROM paper_authors pa JOIN papers p ON p.work_id = pa.work_id WHERE pa.author_id = ?",
+            "SELECT p.rowid FROM visible_paper_authors pa JOIN papers p ON p.work_id = pa.work_id WHERE pa.author_id = ?",
             (int(author_id),)).fetchall()]
+
+    def shared_years(self, author_id: int) -> dict[int, int]:
+        """Latest shared publication year with each catalog coauthor on a joint paper."""
+        if not str(author_id).isdigit():
+            return {}
+        rows = self._db().execute(
+            """
+            SELECT pa2.author_id AS author_id, MAX(p.year) AS latest_year
+            FROM visible_paper_authors pa1
+            JOIN visible_paper_authors pa2
+              ON pa2.work_id = pa1.work_id AND pa2.author_id != pa1.author_id
+            JOIN papers p ON p.work_id = pa1.work_id
+            WHERE pa1.author_id = ?
+            GROUP BY pa2.author_id
+            """,
+            (int(author_id),),
+        ).fetchall()
+        return {
+            int(row["author_id"]): int(row["latest_year"])
+            for row in rows
+            if row["latest_year"] is not None
+        }
+
+    def titles(self, author_id: int, limit: int = 24) -> list[dict]:
+        """This author's catalog papers, newest first. Duplicate titles are dropped."""
+        if not str(author_id).isdigit():
+            return []
+        cap = max(1, min(int(limit), 24))
+        rows = self._db().execute(
+            """
+            SELECT p.title AS title, p.year AS year
+            FROM visible_paper_authors pa
+            JOIN papers p ON p.work_id = pa.work_id
+            WHERE pa.author_id = ?
+            ORDER BY p.year DESC, p.title
+            LIMIT ?
+            """,
+            (int(author_id), cap * 3),
+        ).fetchall()
+        found = []
+        seen = set()
+        for row in rows:
+            title = str(row["title"] or "").strip()
+            key = title.casefold()
+            if not title or key in seen:
+                continue
+            seen.add(key)
+            year_text = str(row["year"] or "")
+            found.append({"title": title, "year": int(year_text) if year_text.isdigit() else None})
+            if len(found) >= cap:
+                break
+        return found
 
     def term_weight(self, term: str) -> float:
         """Inverse document frequency of a term over the library, so rare, specific
@@ -202,14 +321,14 @@ class PaperLibrary:
             chunk = top[start:start + 500]
             marks = ",".join("?" * len(chunk))
             for rowid, author_id in db.execute(
-                    f"SELECT p.rowid, pa.author_id FROM papers p JOIN paper_authors pa ON pa.work_id = p.work_id "
+                    f"SELECT p.rowid, pa.author_id FROM papers p JOIN visible_paper_authors pa ON pa.work_id = p.work_id "
                     f"WHERE p.rowid IN ({marks})", [r for r, _ in chunk]):
                 by_person.setdefault(int(author_id), []).append(scores[rowid])
         return {aid: sum(sorted(values, reverse=True)[:per_person]) for aid, values in by_person.items()}
 
     def authors(self, work_id) -> list[tuple[int, int | None]]:
         rows = self._db().execute(
-            "SELECT author_id, position FROM paper_authors WHERE work_id = ? ORDER BY position IS NULL, position",
+            "SELECT author_id, position FROM visible_paper_authors WHERE work_id = ? ORDER BY position IS NULL, position",
             (work_key(work_id),)).fetchall()
         return [(int(r["author_id"]), r["position"]) for r in rows]
 

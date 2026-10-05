@@ -747,6 +747,8 @@ def _get_user_name(user_id: str) -> str:
 
 
 def _get_author_details(author_id: str) -> dict:
+    library = load_paper_library()
+    if library is not None: author_id = library.canonical_author(author_id)
     nodes = load_author_nodes()
     info = nodes.get(author_id, {})
     features = info.get("features", {})
@@ -754,11 +756,17 @@ def _get_author_details(author_id: str) -> dict:
         catalog_author = _get_catalog_author(author_id)
         if catalog_author:
             return _build_catalog_author_details(catalog_author)
+    library = load_paper_library()
+    visible_papers = features.get("Top Cited or Most Recent Papers", [])
+    if library is not None and author_id.isdigit():
+        from research_tools import library_paper
+        visible_papers = [library_paper(p) for p in library.author_works(author_id)[:24]]
     return {
         "name": features.get("FullName", info.get("title", "Unknown")),
         "affiliation": features.get("Affiliation", "Unknown"),
-        "papers": features.get("Top Cited or Most Recent Papers", []),
-        "recent_year": features.get("RecentYear") or "",
+        "papers": visible_papers,
+        "recent_year": max((p.get('PubYear') or 0 for p in visible_papers),default=0) if library is not None else features.get("RecentYear") or "",
+        "is_bridge2ai_member": bool(features.get('Bridge2AISeedAuthor')),
         "orcid": features.get("ORCID") or "",
         "openalex_id": features.get("OpenAlexId") or "",
         "topics": features.get("topics") or [],
@@ -1469,6 +1477,8 @@ async def find_people(name: str = "", limit: int = 8):
 
 @app.get("/api/author/{aid}")
 async def get_author(aid: str):
+    library = load_paper_library()
+    if library is not None: aid = library.canonical_author(aid)
     nodes = load_author_nodes()
     if aid not in nodes and not _get_catalog_author(aid):
         raise HTTPException(status_code=404, detail="Author not found")

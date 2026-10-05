@@ -131,8 +131,36 @@ class ResearchTools:
         known = self.people.get(person["author_id"], {})
         self.people[person["author_id"]] = {**known, **{k: v for k, v in person.items() if v not in (None, "")}}
 
+    def _remember_paper(self, author_id: str, paper) -> dict | None:
+        """Store one catalog paper as citable evidence and return that record."""
+        title = paper_title(paper)
+        if not title:
+            return None
+        eid = "paper:" + hashlib.sha256(f"{author_id}:{title}".encode()).hexdigest()[:20]
+        record = self.evidence.get(eid) or {"evidence_id": eid, "author_id": author_id, "title": title,
+                                            "source": "local_catalog", "text_level": "title"}
+        if isinstance(paper, dict):
+            for target, keys in {"year": ("PubYear", "year"), "url": ("url", "URL")}.items():
+                value = next((paper[k] for k in keys if paper.get(k)), None)
+                if value and target not in record:
+                    record[target] = str(value)
+            doi = str(paper.get("DOI") or paper.get("doi") or "").strip()
+            pmid = str(paper.get("PMID") or paper.get("pmid") or "").strip()
+            if doi and not doi.lower().startswith("http"):
+                doi = f"https://doi.org/{doi.removeprefix('doi:')}"
+            if "url" not in record and (doi or pmid.isdigit()):
+                record["url"] = doi or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            if paper.get("OpenAlexWork") and "work_id" not in record:
+                record["work_id"] = str(paper["OpenAlexWork"])
+            if paper.get("Abstract") and not record.get("abstract"):
+                record.update(abstract=_clip_abstract(paper["Abstract"]), text_level="abstract")
+        self.evidence[eid] = record
+        return record
+
     def _person(self, author_id: str, question: str = "", limit: int = 10) -> dict | None:
         author_id = str(author_id).strip()
+        if self.library is not None and hasattr(self.library,'canonical_author'):
+            author_id = self.library.canonical_author(author_id)
         if not author_id.isdigit() or len(author_id) > 20:
             return None
         raw = self.details(author_id)
@@ -140,6 +168,8 @@ class ResearchTools:
             return None
         terms = set(re.findall(r"\w+", question.casefold()))
         papers = [p for p in raw.get("papers", []) if paper_title(p)]
+        if self.library is not None and hasattr(self.library, 'author_works'):
+            papers = [library_paper(p) for p in self.library.author_works(author_id)[:24]]
         # A lexical ordering of the available titles, not a scientific fit score.
         papers = sorted(papers, key=lambda p: -len(terms & set(re.findall(r"\w+", paper_title(p).casefold()))))
         if self.library is not None and question.strip() and limit:
@@ -150,29 +180,12 @@ class ResearchTools:
             if len(records) >= limit:
                 break
             title = paper_title(paper)
-            if title.casefold() in seen:
+            if not title or title.casefold() in seen:
                 continue
             seen.add(title.casefold())
-            eid = "paper:" + hashlib.sha256(f"{author_id}:{title}".encode()).hexdigest()[:20]
-            record = self.evidence.get(eid) or {"evidence_id": eid, "author_id": author_id, "title": title,
-                                                "source": "local_catalog", "text_level": "title"}
-            if isinstance(paper, dict):
-                for target, keys in {"year": ("PubYear", "year"), "url": ("url", "URL")}.items():
-                    value = next((paper[k] for k in keys if paper.get(k)), None)
-                    if value and target not in record:
-                        record[target] = str(value)
-                doi = str(paper.get("DOI") or paper.get("doi") or "").strip()
-                pmid = str(paper.get("PMID") or paper.get("pmid") or "").strip()
-                if doi and not doi.lower().startswith("http"):
-                    doi = f"https://doi.org/{doi.removeprefix('doi:')}"
-                if "url" not in record and (doi or pmid.isdigit()):
-                    record["url"] = doi or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-                if paper.get("OpenAlexWork") and "work_id" not in record:
-                    record["work_id"] = str(paper["OpenAlexWork"])
-                if paper.get("Abstract") and not record.get("abstract"):
-                    record.update(abstract=_clip_abstract(paper["Abstract"]), text_level="abstract")
-            self.evidence[eid] = record
-            records.append(record)
+            record = self._remember_paper(author_id, paper)
+            if record:
+                records.append(record)
         affiliation = raw.get("affiliation", "") if raw.get("affiliation") not in {None, "Unknown"} else ""
         profile_eid = f"profile:{author_id}"
         self.evidence[profile_eid] = {"evidence_id": profile_eid, "author_id": author_id,
@@ -183,6 +196,7 @@ class ResearchTools:
                  for y in [str(p.get("PubYear") or p.get("year") or "")] if y.isdigit()]
         latest = str(raw.get("recent_year") or "") or (str(max(years)) if years else "")
         person = {"author_id": author_id, "name": raw["name"], "affiliation": affiliation,
+                  "is_bridge2ai_member": bool(raw.get('is_bridge2ai_member')),
                   "profile_evidence_id": profile_eid, "latest_year": latest,
                   "papers": [_with_excerpt(r) for r in records],
                   "orcid": raw.get("orcid") or "",
