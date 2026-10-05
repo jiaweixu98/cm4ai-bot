@@ -24,7 +24,7 @@ export default function FocalAuthorBar({
   return (
     <header className="focal-bar">
       {showSidebarToggle && (
-        <button className="icon-btn" type="button" onClick={onToggleSidebar} aria-label="Open sidebar">
+        <button className="icon-btn sidebar-toggle" type="button" onClick={onToggleSidebar} aria-label="Open sidebar">
           <IconSidebar />
         </button>
       )}

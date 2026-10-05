@@ -376,6 +376,7 @@ def save_chat_session(
                         ELSE matrix_chat_sessions.last_message_at
                     END
                 WHERE matrix_chat_sessions.owner_orcid = EXCLUDED.owner_orcid
+                  AND jsonb_array_length(EXCLUDED.messages) >= jsonb_array_length(matrix_chat_sessions.messages)
                 RETURNING
                     id,
                     owner_orcid,
@@ -406,5 +407,10 @@ def save_chat_session(
         conn.commit()
 
     if not row:
+        # An unload flush may overtake an earlier autosave. Histories only append;
+        # an older browser must never erase a question or reply already committed.
+        current = get_chat_session(session_id, owner_orcid)
+        if current:
+            return current
         raise PermissionError("Session does not belong to the authenticated user")
     return _serialize_session_row(row, include_full=True)

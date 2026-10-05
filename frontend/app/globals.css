@@ -310,6 +310,12 @@ select:focus-visible,
   border-radius: 10px;
 }
 
+.icon-btn.sidebar-toggle {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+}
+
 .ghost-btn:disabled,
 .session-new-btn:disabled {
   opacity: 0.5;
@@ -3489,6 +3495,58 @@ body,
   border: 1px solid var(--matrix-border);
   border-radius: 12px;
   background: var(--matrix-bg-elevated);
+}
+
+.context-disclosure {
+  display: block;
+}
+
+.context-summary {
+  color: var(--matrix-text);
+  font-size: 0.82rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.context-summary small {
+  display: block;
+  margin: 4px 0 0 16px;
+  color: var(--matrix-text-3);
+  font-size: 0.72rem;
+  font-weight: 450;
+  overflow-wrap: anywhere;
+}
+
+.context-section-label {
+  margin: 0 0 4px;
+  color: var(--matrix-text-2);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.context-people {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.context-requirements {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: var(--matrix-text-3);
+  font-size: 0.73rem;
+  line-height: 1.45;
+}
+
+.context-disclosure .you-edit-body {
+  overflow-wrap: anywhere;
+}
+
+.session-status-error .you-more {
+  display: block;
+  margin-top: 6px;
 }
 
 .you-name {

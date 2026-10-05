@@ -1993,10 +1993,18 @@ class ChatRequest(BaseModel):
     chat_session_id: str | None = None
 
 
+class SavedChatMessageItem(ChatMessageItem):
+    id: str | None = None
+    at: int | float | str | None = None
+    stopped: bool = False
+    hasResults: bool = False
+    citations: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+
+
 class ChatSessionUpsertRequest(BaseModel):
     aid: str
     focal_author_name: str | None = None
-    messages: list[ChatMessageItem] = []
+    messages: list[SavedChatMessageItem] = Field(default_factory=list)
     state: dict[str, Any] = {}
 
 

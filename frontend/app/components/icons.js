@@ -41,7 +41,7 @@ export function IconHistory() {
 }
 
 export function IconSidebar() {
-  return <SidebarSimple {...iconProps} />;
+  return <SidebarSimple {...iconProps} size={22} />;
 }
 
 export function IconCopy() {

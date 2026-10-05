@@ -10,7 +10,7 @@ function withMatrixAuth(headers = {}, authToken) {
 }
 
 export async function fetchAuthor(aid) {
-  const res = await fetch(`${API_BASE}/api/author/${aid}`);
+  const res = await fetch(`/api/author/${encodeURIComponent(aid)}`);
   if (!res.ok) throw new Error("Author not found");
   return res.json();
 }
@@ -282,7 +282,7 @@ export async function listChatSessions({ aid, intent, authToken }) {
   const params = new URLSearchParams();
   if (aid !== undefined && aid !== null && String(aid).trim()) params.set("aid", String(aid));
   if (intent) params.set("intent", String(intent));
-  const res = await fetch(`${API_BASE}/api/chat-sessions?${params.toString()}`, {
+  const res = await fetch(`/api/chat-sessions?${params.toString()}`, {
     headers: withMatrixAuth({}, authToken),
   });
   if (!res.ok) throw new Error("Session list request failed");
@@ -290,7 +290,7 @@ export async function listChatSessions({ aid, intent, authToken }) {
 }
 
 export async function getChatSession({ sessionId, authToken }) {
-  const res = await fetch(`${API_BASE}/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
+  const res = await fetch(`/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
     headers: withMatrixAuth({}, authToken),
   });
   if (!res.ok) throw new Error("Session fetch failed");
@@ -298,8 +298,9 @@ export async function getChatSession({ sessionId, authToken }) {
 }
 
 export async function createChatSession({ aid, focalAuthorName, messages, state, authToken }) {
-  const res = await fetch(`${API_BASE}/api/chat-sessions`, {
+  const res = await fetch("/api/chat-sessions", {
     method: "POST",
+    signal: AbortSignal.timeout(8000),
     headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
     body: JSON.stringify({
       aid,
@@ -313,16 +314,20 @@ export async function createChatSession({ aid, focalAuthorName, messages, state,
 }
 
 export async function saveChatSession({ sessionId, aid, focalAuthorName, messages, state, authToken }) {
-  const res = await fetch(`${API_BASE}/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
+  const body = JSON.stringify({
+    aid,
+    focal_author_name: focalAuthorName || "",
+    messages: messages || [],
+    state: state || {},
+  });
+  const res = await fetch(`/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
     method: "PUT",
     signal: AbortSignal.timeout(8000),
+    // Small saves can finish after an iframe closes. Larger histories are flushed
+    // before in-app navigation rather than exceeding fetch's keepalive budget.
+    keepalive: new TextEncoder().encode(body).byteLength <= 60_000,
     headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
-    body: JSON.stringify({
-      aid,
-      focal_author_name: focalAuthorName || "",
-      messages: messages || [],
-      state: state || {},
-    }),
+    body,
   });
   if (!res.ok) throw new Error("Session save failed");
   return res.json();

@@ -32,6 +32,7 @@ export default function HistorySidebar({
   onToggle,
   onNewSession,
   onSelectSession,
+  onRetry,
   you,
 }) {
   const groups = groupSessions(sessions);
@@ -43,7 +44,7 @@ export default function HistorySidebar({
     <aside className={className} aria-label="Chat history">
       <div className="history-rail-head">
         <button
-          className="icon-btn"
+          className="icon-btn sidebar-toggle"
           type="button"
           onClick={onToggle}
           aria-expanded={expanded}
@@ -72,7 +73,12 @@ export default function HistorySidebar({
       {expanded && <YouCard {...you} />}
       {expanded && (
         <div className="history-sessions">
-          {sessionStatus.error && <div className="session-status session-status-error">{sessionStatus.error}</div>}
+          {sessionStatus.error && (
+            <div className="session-status session-status-error">
+              {sessionStatus.error}
+              <button type="button" className="you-more" disabled={sessionStatus.saving || sessionStatus.loading} onClick={onRetry}>Try again</button>
+            </div>
+          )}
           {!signedIn ? (
             <div className="session-empty">Sign in on the graph to keep chats.</div>
           ) : sessions.length === 0 ? (

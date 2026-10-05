@@ -117,6 +117,10 @@ export default function Home() {
   const sessionHydratingRef = useRef(false);
   const sessionBootstrappedRef = useRef(false);
   const sessionSaveTimerRef = useRef(null);
+  const sessionCreateRef = useRef(null);
+  const sessionWriteQueueRef = useRef(Promise.resolve());
+  const sessionSnapshotRef = useRef(null);
+  const lastSaveMessagesRef = useRef(null);
   const currentSessionIdRef = useRef(null);
   const savedFingerprintRef = useRef("");
   const baselineSessionRef = useRef(null);
@@ -223,6 +227,8 @@ export default function Home() {
     [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed, contextChoices]
   );
 
+  sessionSnapshotRef.current = { aid, focalName, matrixUserToken, messages, state: buildSessionStateSnapshot() };
+
   const applySessionSnapshot = useCallback((session) => {
     const snapshot = session?.state || {};
     const restoredMessages = (Array.isArray(session?.messages) ? session.messages : []).map(normalizeMessage);
@@ -280,8 +286,8 @@ export default function Home() {
     );
     const restoredChoices = snapshot.contextChoices && typeof snapshot.contextChoices === "object" ? snapshot.contextChoices : {};
     setContextChoices({
-      samePlace: Boolean(restoredChoices.samePlace),
-      recentYears: [5, 10].includes(Number(restoredChoices.recentYears)) ? Number(restoredChoices.recentYears) : 0,
+      samePlace: false,
+      recentYears: 0,
       paperScope: ["profile", "papers", "chosen"].includes(restoredChoices.paperScope) ? restoredChoices.paperScope : "profile",
       paperTitles: Array.isArray(restoredChoices.paperTitles) ? restoredChoices.paperTitles.map(String).slice(0, 8) : [],
     });
@@ -320,7 +326,10 @@ export default function Home() {
       const seekerNameParam = String(params.get("seeker_name") || "").trim();
       const storedToken =
         typeof window !== "undefined" ? window.sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || "" : "";
-      const resolvedToken = tokenFromUrl || storedToken;
+      const authHandoff = params.get("auth_handoff") === "1";
+      params.delete("auth_handoff");
+      const resolvedToken = tokenFromUrl || (authHandoff ? "" : storedToken);
+      if (authHandoff && !tokenFromUrl) window.sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
       const isEmbedded = params.get("embedded") === "1" || inBridgeIframe();
 
       if (tokenFromUrl && typeof window !== "undefined") {
@@ -329,7 +338,7 @@ export default function Home() {
         const nextSearch = params.toString();
         const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
         window.history.replaceState({}, "", nextUrl);
-      } else if (freshConversation || graphHandoff) {
+      } else if (freshConversation || graphHandoff || authHandoff) {
         const nextSearch = params.toString();
         const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
         window.history.replaceState({}, "", nextUrl);
@@ -481,7 +490,7 @@ export default function Home() {
       }
     };
     window.addEventListener("message", onMessage);
-    postToBridge({ type: BRIDGE_MSG.REQUEST_SAVED });
+    postToBridge({ type: BRIDGE_MSG.REQUEST_SAVED, supportsSaveBeforeClose: true });
     return () => window.removeEventListener("message", onMessage);
   }, [inIframe]);
 
@@ -518,58 +527,72 @@ export default function Home() {
     ]);
   }, []);
 
-  const ensureCurrentSession = useCallback(async () => {
-    if (!matrixUserToken) return null;
+  const ensureCurrentSession = useCallback(async (initialMessages) => {
+    const snapshot = sessionSnapshotRef.current;
+    if (!snapshot.matrixUserToken) return null;
     if (currentSessionIdRef.current) return currentSessionIdRef.current;
-
-    const sessionPayload = await createChatSession({
-      aid,
-      focalAuthorName: focalName || "",
-      messages: Array.isArray(messages) ? messages : [],
-      state: buildSessionStateSnapshot(),
-      authToken: matrixUserToken,
-    });
-    const created = sessionPayload.session;
-    savedFingerprintRef.current = sessionFingerprint(messages, buildSessionStateSnapshot());
-    currentSessionIdRef.current = created.id;
-    setCurrentSessionId(created.id);
-    upsertSessionSummary(created);
-    return created.id;
-  }, [aid, focalName, buildSessionStateSnapshot, matrixUserToken, messages, upsertSessionSummary]);
-
-  const persistSessionNow = useCallback(async () => {
-    if (!matrixUserToken) return null;
-    if (!hasUserMessage(messages)) return currentSessionIdRef.current;
-    const state = buildSessionStateSnapshot();
-    const fingerprint = sessionFingerprint(messages, state);
-    if (fingerprint === savedFingerprintRef.current) return currentSessionIdRef.current;
-    try {
-      const sessionId = await ensureCurrentSession();
-      if (!sessionId) return null;
-      const payload = await saveChatSession({
-        sessionId,
-        aid,
-        focalAuthorName: focalName || "",
-        messages,
-        state,
-        authToken: matrixUserToken,
-      });
-      savedFingerprintRef.current = fingerprint;
-      upsertSessionSummary(payload.session);
-      return sessionId;
-    } catch (error) {
-      console.error("Failed to persist chat session:", error);
-      return currentSessionIdRef.current;
+    if (!sessionCreateRef.current) {
+      const initial = initialMessages || snapshot.messages;
+      sessionCreateRef.current = createChatSession({
+        aid: snapshot.aid,
+        focalAuthorName: snapshot.focalName || "",
+        messages: initial,
+        state: snapshot.state,
+        authToken: snapshot.matrixUserToken,
+      }).then(({ session }) => {
+        savedFingerprintRef.current = sessionFingerprint(initial, snapshot.state);
+        currentSessionIdRef.current = session.id;
+        setCurrentSessionId(session.id);
+        upsertSessionSummary(session);
+        return session.id;
+      }).finally(() => { sessionCreateRef.current = null; });
     }
-  }, [
-    aid,
-    focalName,
-    buildSessionStateSnapshot,
-    ensureCurrentSession,
-    matrixUserToken,
-    messages,
-    upsertSessionSummary,
-  ]);
+    return sessionCreateRef.current;
+  }, [upsertSessionSummary]);
+
+  const persistSessionNow = useCallback(({ flush = false } = {}) => {
+    const snapshot = sessionSnapshotRef.current;
+    if (!snapshot.matrixUserToken || !hasUserMessage(snapshot.messages)) return Promise.resolve(currentSessionIdRef.current);
+    const targetId = currentSessionIdRef.current;
+    const fingerprint = sessionFingerprint(snapshot.messages, snapshot.state);
+    const write = async () => {
+      if (targetId === currentSessionIdRef.current && targetId && fingerprint === savedFingerprintRef.current) return targetId;
+      setSessionStatus((prev) => ({ ...prev, saving: true, error: "" }));
+      const sessionId = targetId || await ensureCurrentSession(snapshot.messages);
+      const { session } = await saveChatSession({
+        sessionId,
+        aid: snapshot.aid,
+        focalAuthorName: snapshot.focalName || "",
+        messages: snapshot.messages,
+        state: snapshot.state,
+        authToken: snapshot.matrixUserToken,
+      });
+      if (currentSessionIdRef.current === sessionId) savedFingerprintRef.current = fingerprint;
+      upsertSessionSummary(session);
+      setSessionStatus((prev) => ({ ...prev, saving: false, error: "" }));
+      return sessionId;
+    };
+    // Save requests stay in order; an older reply cannot overwrite a newer one.
+    const pending = (flush ? write() : sessionWriteQueueRef.current.catch(() => {}).then(write)).catch((error) => {
+      console.error("Failed to persist chat session:", error);
+      setSessionStatus((prev) => ({ ...prev, saving: false, error: "Could not save this chat." }));
+      throw error;
+    });
+    sessionWriteQueueRef.current = pending;
+    return pending;
+  }, [ensureCurrentSession, upsertSessionSummary]);
+
+  const retrySession = useCallback(async () => {
+    try {
+      setSessionStatus((prev) => ({ ...prev, loading: true, error: "" }));
+      await persistSessionNow();
+      const payload = await listChatSessions({ authToken: matrixUserToken });
+      setSessions(Array.isArray(payload.sessions) ? payload.sessions : []);
+      setSessionStatus({ loading: false, saving: false, error: "" });
+    } catch {
+      setSessionStatus({ loading: false, saving: false, error: "Could not save or load chats. Try again." });
+    }
+  }, [matrixUserToken, persistSessionNow]);
 
   const handleStop = useCallback(() => {
     chatAbortRef.current?.abort();
@@ -590,13 +613,16 @@ export default function Home() {
     resetWorkflowState();
   }, [resetWorkflowState]);
 
-  const handleNewSession = useCallback(() => {
+  const handleNewSession = useCallback(async () => {
     if (phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
       setPendingConfirm({ type: "new" });
       return;
     }
-    startNewSession();
-  }, [phase, startNewSession]);
+    try {
+      await persistSessionNow();
+      startNewSession();
+    } catch { /* Keep the unsaved conversation open for retry. */ }
+  }, [persistSessionNow, phase, startNewSession]);
 
   const navigateToSession = useCallback((targetIntent, sessionId) => {
     const params = new URLSearchParams(window.location.search);
@@ -619,7 +645,10 @@ export default function Home() {
           setPendingConfirm({ type: "switch", sessionId, sessionIntent: selectedIntent });
           return;
         }
-        navigateToSession(selectedIntent, sessionId);
+        try {
+          await persistSessionNow();
+          navigateToSession(selectedIntent, sessionId);
+        } catch { /* Keep the current chat open for retry. */ }
         return;
       }
       if (phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
@@ -627,6 +656,7 @@ export default function Home() {
         return;
       }
       try {
+        await persistSessionNow();
         setSessionStatus((prev) => ({ ...prev, loading: true, error: "" }));
         const payload = await getChatSession({ sessionId, authToken: matrixUserToken });
         applySessionSnapshot(payload.session);
@@ -640,7 +670,7 @@ export default function Home() {
         }));
       }
     },
-    [applySessionSnapshot, intent, matrixUserToken, navigateToSession, phase, sessions]
+    [applySessionSnapshot, intent, matrixUserToken, navigateToSession, persistSessionNow, phase, sessions]
   );
 
   const confirmPending = useCallback(async () => {
@@ -648,6 +678,7 @@ export default function Home() {
     setPendingConfirm(null);
     if (!pending) return;
     handleStop();
+    try { await persistSessionNow(); } catch { return; }
     if (pending.type === "new") {
       startNewSession();
       return;
@@ -671,11 +702,11 @@ export default function Home() {
         }));
       }
     }
-  }, [applySessionSnapshot, handleStop, intent, matrixUserToken, navigateToSession, pendingConfirm, startNewSession]);
+  }, [applySessionSnapshot, handleStop, intent, matrixUserToken, navigateToSession, pendingConfirm, persistSessionNow, startNewSession]);
 
   useEffect(() => {
     if (!sessionBootstrappedRef.current) return;
-    if (!matrixUserToken || !currentSessionId) return;
+    if (!matrixUserToken) return;
     const state = buildSessionStateSnapshot();
     const fingerprint = sessionFingerprint(messages, state);
     if (baselineSessionRef.current === currentSessionId) {
@@ -687,30 +718,11 @@ export default function Home() {
     if (sessionHydratingRef.current || !hasUserMessage(messages) || fingerprint === savedFingerprintRef.current) return;
 
     if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
-
-    sessionSaveTimerRef.current = window.setTimeout(async () => {
-      try {
-        setSessionStatus((prev) => ({ ...prev, saving: true, error: "" }));
-        const payload = await saveChatSession({
-          sessionId: currentSessionId,
-          aid,
-          focalAuthorName: focalName || "",
-          messages,
-          state,
-          authToken: matrixUserToken,
-        });
-        savedFingerprintRef.current = fingerprint;
-        upsertSessionSummary(payload.session);
-        setSessionStatus((prev) => ({ ...prev, saving: false, error: "" }));
-      } catch (error) {
-        console.error("Failed to save chat session:", error);
-        setSessionStatus((prev) => ({
-          ...prev,
-          saving: false,
-          error: "Could not save this chat.",
-        }));
-      }
-    }, 800);
+    const messagesChanged = lastSaveMessagesRef.current !== messages;
+    lastSaveMessagesRef.current = messages;
+    sessionSaveTimerRef.current = window.setTimeout(() => {
+      void persistSessionNow().catch(() => {});
+    }, messagesChanged ? 0 : 600);
 
     return () => {
       if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
@@ -722,16 +734,22 @@ export default function Home() {
     currentSessionId,
     matrixUserToken,
     messages,
-    upsertSessionSummary,
+    persistSessionNow,
   ]);
 
   useEffect(() => {
     const flush = () => {
       if (!matrixUserToken || !currentSessionIdRef.current) return;
-      void persistSessionNow();
+      // Start the keepalive fetch synchronously while the frame is still alive.
+      void persistSessionNow({ flush: true }).catch(() => {});
     };
+    const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
     window.addEventListener("pagehide", flush);
-    return () => window.removeEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [matrixUserToken, persistSessionNow]);
 
   const shortlistForChat = useCallback((activeIntent = intent) => {
@@ -909,12 +927,12 @@ export default function Home() {
       return;
     }
     try {
-      await ensureCurrentSession();
+      await ensureCurrentSession([...messages, normalizeMessage({ role: "user", content: text, at: Date.now() }, messages.length)]);
     } catch (sessionError) {
       console.error("Failed to create chat session:", sessionError);
       setSessionStatus((prev) => ({
         ...prev,
-        error: "Chats are not being saved in this tab.",
+        error: "Could not save this chat. Try again.",
       }));
     }
     setInputValue("");
@@ -1170,12 +1188,13 @@ export default function Home() {
     setAttachedPapers((prev) => prev.filter((paper) => paper.id !== id));
   }, []);
 
-  const openProfile = async (authorId) => {    setProfileNotice("");
-    await persistSessionNow();
-    postToBridge({ type: BRIDGE_MSG.OPEN_PERSON, authorId: Number(authorId) });
-    if (!inIframe) {
-      setProfileNotice("Open this from the graph to view the profile.");
-    }
+  const openProfile = async (authorId) => {
+    setProfileNotice("");
+    try {
+      await persistSessionNow();
+      postToBridge({ type: BRIDGE_MSG.OPEN_PERSON, authorId: Number(authorId) });
+      if (!inIframe) setProfileNotice("Open this from the graph to view the profile.");
+    } catch { /* Keep the current chat open for retry. */ }
   };
 
   const savePerson = (candidate, ranked) => {
@@ -1197,9 +1216,22 @@ export default function Home() {
   };
 
   const returnToGraph = useCallback(async () => {
-    await persistSessionNow();
-    postToBridge({ type: BRIDGE_MSG.RETURN_TO_GRAPH });
+    try {
+      await persistSessionNow();
+      postToBridge({ type: BRIDGE_MSG.RETURN_TO_GRAPH });
+    } catch {
+      postToBridge({ type: BRIDGE_MSG.CLOSE_FAILED });
+    }
   }, [persistSessionNow]);
+
+  useEffect(() => {
+    if (!inIframe) return undefined;
+    const onClose = (event) => {
+      if (event.source === window.parent && isBridgeOrigin(event.origin) && event.data?.type === BRIDGE_MSG.REQUEST_CLOSE) void returnToGraph();
+    };
+    window.addEventListener("message", onClose);
+    return () => window.removeEventListener("message", onClose);
+  }, [inIframe, returnToGraph]);
 
   const unsavePerson = (authorId) => {
     postToBridge({ type: BRIDGE_MSG.UNSAVE_PERSON, authorId: Number(authorId) });
@@ -1328,6 +1360,7 @@ export default function Home() {
           overlay={narrowLayout && railOpen}
           onToggle={() => persistRail(!railOpen)}
           onNewSession={handleNewSession}
+          onRetry={retrySession}
           you={{
             signedIn: Boolean(matrixUserToken),
             linked,
@@ -1337,6 +1370,9 @@ export default function Home() {
             choices: contextChoices,
             onChoices: setContextChoices,
             onOpenProfile: openProfile,
+            people: contextPeople,
+            workingContext,
+            attachments: attachedPapers,
           }}
           onSelectSession={(sessionId) => {
             if (narrowLayout) persistRail(false);

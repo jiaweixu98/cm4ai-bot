@@ -4,13 +4,8 @@ import { fetchAuthorDetails } from "../lib/api";
 const PAPER_PREVIEW = 3;
 const SCOPE_OPTIONS = [
   { id: "profile", label: "Recent" },
-  { id: "papers", label: "All" },
+  { id: "papers", label: "Papers only" },
   { id: "chosen", label: "Pick" },
-];
-const YEAR_OPTIONS = [
-  { id: 0, label: "Any time" },
-  { id: 5, label: "5 years" },
-  { id: 10, label: "10 years" },
 ];
 
 function shownAffiliation(value) {
@@ -46,8 +41,8 @@ function recentPapers(papers) {
 
 function sentSummary(details, papers, scope, selectedTitles) {
   const parts = [];
-  const topics = uniqueCount(details?.topics);
-  const paperCount = scope === "chosen" ? selectedTitles.length : scope === "papers" ? papers.length : recentPapers(papers).slice(0, 8).length;
+  const topics = scope === "papers" ? 0 : Math.min(uniqueCount(details?.topics), 6);
+  const paperCount = Math.min(8, scope === "chosen" ? selectedTitles.length : scope === "papers" ? papers.length : recentPapers(papers).length);
   if (paperCount) parts.push(`${paperCount} ${scope === "profile" ? "recent " : scope === "chosen" ? "picked " : ""}${paperCount === 1 ? "paper" : "papers"}`);
   if (topics) parts.push(`${topics} ${topics === 1 ? "topic" : "topics"}`);
   return parts.length ? `Sent with questions: ${parts.join(" · ")}` : "";
@@ -80,7 +75,7 @@ function PaperChoices({ papers, scope, selectedTitles, onToggle }) {
   );
 }
 
-export default function YouCard({ signedIn, linked, aid, authorInfo, seekerName, choices, onChoices, onOpenProfile }) {
+export default function YouCard({ signedIn, linked, aid, authorInfo, seekerName, choices, onChoices, onOpenProfile, people = [], workingContext = {}, attachments = [] }) {
   // The record carries the aid it was loaded for, so a previous person never renders.
   const [record, setRecord] = useState(null);
   const [failedAid, setFailedAid] = useState(null);
@@ -102,19 +97,19 @@ export default function YouCard({ signedIn, linked, aid, authorInfo, seekerName,
     };
   }, [aid, linked]);
 
-  if (!linked) {
-    return signedIn ? null : <p className="you-hint">Sign in to personalize.</p>;
-  }
-
   const fresh = record && String(record.aid) === String(aid) ? record : null;
   const failed = failedAid !== null && String(failedAid) === String(aid) && !fresh;
   const details = fresh?.details || null;
   const papers = paperEntries(details?.papers);
   const authorMatches = authorInfo && (authorInfo.author_id === undefined || String(authorInfo.author_id) === String(aid));
   const info = authorMatches ? authorInfo : null;
-  const name = (details?.name && details.name !== "Unknown" ? details.name : info?.name) || seekerName || "";
-  const affiliation = shownAffiliation(details?.affiliation) || shownAffiliation(info?.affiliation);
+  const name = (linked && ((details?.name && details.name !== "Unknown" ? details.name : info?.name))) || seekerName || "";
+  const affiliation = linked ? shownAffiliation(details?.affiliation) || shownAffiliation(info?.affiliation) : "";
   const summary = fresh ? sentSummary(details, papers, choices.paperScope, choices.paperTitles) : "";
+  const topics = [...new Set((Array.isArray(details?.topics) ? details.topics : []).map(String).filter(Boolean))].slice(0, 6);
+  const terms = [...new Set((Array.isArray(details?.mesh) ? details.mesh : []).map(String).filter(Boolean))].slice(0, 8);
+  const requirements = Array.isArray(workingContext.requirements) ? workingContext.requirements.filter(Boolean) : [];
+  const overview = [linked ? "Your profile" : "", people.length ? `${people.length} ${people.length === 1 ? "person" : "people"}` : "", attachments.length ? `${attachments.length} ${attachments.length === 1 ? "file" : "files"}` : ""].filter(Boolean).join(" · ");
 
   function setScope(paperScope) {
     if (paperScope === "chosen" && choices.paperTitles.length === 0) {
@@ -132,33 +127,39 @@ export default function YouCard({ signedIn, linked, aid, authorInfo, seekerName,
   }
 
   return (
-    <section className="you-card" aria-label="You">
-      {name && <button type="button" className="you-name" onClick={() => onOpenProfile(aid)}>{name}</button>}
-      {affiliation && <p className="you-affiliation">{affiliation}</p>}
-      {failed ? <p className="you-note">Profile could not be loaded.</p> : !fresh ? (
-        <div className="you-loading" aria-label="Loading profile"><span /><span /></div>
-      ) : summary && <p className="you-summary">{summary}</p>}
-      <details className="you-edit">
-        <summary>Edit</summary>
-        <div className="you-edit-body">
+    <details className="you-card context-disclosure" aria-label="Chat context">
+      <summary className="context-summary">
+        <span>Context</span>
+        {overview && <small>{overview}</small>}
+      </summary>
+      <div className="you-edit-body">
+        {name && (
+          <div>
+            <h2 className="context-section-label">You</h2>
+            {linked ? <button type="button" className="you-name" onClick={() => onOpenProfile(aid)}>{name}</button> : <p className="you-name">{name}</p>}
+            {affiliation && <p className="you-affiliation">{affiliation}</p>}
+          </div>
+        )}
+        {linked && (failed ? <p className="you-note">Profile could not be loaded.</p> : !fresh ? (
+          <div className="you-loading" aria-label="Loading profile"><span /><span /></div>
+        ) : summary && <p className="you-summary">{summary}</p>)}
           {fresh && (
             <>
+              <h2 className="context-section-label">Papers</h2>
               <div className="you-seg" role="group" aria-label="Papers sent with your question">
                 {SCOPE_OPTIONS.map((option) => <button key={option.id} type="button" className={choices.paperScope === option.id ? "is-active" : ""} aria-pressed={choices.paperScope === option.id} onClick={() => setScope(option.id)}>{option.label}</button>)}
               </div>
               <PaperChoices key={choices.paperScope} papers={papers} scope={choices.paperScope} selectedTitles={choices.paperTitles} onToggle={togglePaper} />
+              {choices.paperScope !== "papers" && topics.length > 0 && <div><h2 className="context-section-label">Topics</h2><p className="you-note">{topics.join(" · ")}</p></div>}
+              {choices.paperScope !== "papers" && terms.length > 0 && <div><h2 className="context-section-label">Research terms</h2><p className="you-note">{terms.join(" · ")}</p></div>}
             </>
           )}
-          <label className={`you-switch-row ${!affiliation ? "is-disabled" : ""}`}>
-            <span>Same institution</span>
-            <input type="checkbox" checked={choices.samePlace} disabled={!affiliation} onChange={(event) => onChoices({ ...choices, samePlace: event.target.checked })} />
-            <span className="you-switch" aria-hidden="true" />
-          </label>
-          <div className="you-seg" role="group" aria-label="Recommendation time range">
-            {YEAR_OPTIONS.map((option) => <button key={option.id} type="button" className={choices.recentYears === option.id ? "is-active" : ""} aria-pressed={choices.recentYears === option.id} onClick={() => onChoices({ ...choices, recentYears: option.id })}>{option.label}</button>)}
-          </div>
-        </div>
-      </details>
-    </section>
+        {people.length > 0 && <div><h2 className="context-section-label">People in this chat</h2><ul className="context-people">{people.map((person) => <li key={person.authorId}><button type="button" className="you-name" onClick={() => onOpenProfile(person.authorId)}>{person.name}</button>{shownAffiliation(person.affiliation) && <p className="you-affiliation">{shownAffiliation(person.affiliation)}</p>}</li>)}</ul></div>}
+        {(workingContext.goal || requirements.length > 0) && <div><h2 className="context-section-label">Current focus</h2>{workingContext.goal && <p className="you-note">{workingContext.goal}</p>}{requirements.length > 0 && <ul className="context-requirements">{requirements.map((item, index) => <li key={index}>{item}</li>)}</ul>}</div>}
+        {attachments.length > 0 && <div><h2 className="context-section-label">For the next question</h2><ul className="context-requirements">{attachments.map((file) => <li key={file.id}>{file.title || file.filename}</li>)}</ul></div>}
+        {!linked && people.length === 0 && !workingContext.goal && requirements.length === 0 && attachments.length === 0 && <p className="you-note">Add people or a document in the message box, or describe your research in chat.</p>}
+        {!signedIn && !linked && <p className="you-note">Sign in on the graph to use your profile.</p>}
+      </div>
+    </details>
   );
 }

@@ -69,6 +69,20 @@ def session_row():
 
 
 class SessionStoreQueryTests(unittest.TestCase):
+    def test_stale_save_returns_current_history_without_truncating_it(self):
+        connection = FakeConnection([])
+        current = session_row()
+        with patch.object(session_store, "ensure_session_store"), patch.object(
+            session_store, "get_db_conn", return_value=fake_connection(connection)
+        ), patch.object(session_store, "get_chat_session", return_value=current) as lookup:
+            saved = session_store.save_chat_session(
+                session_id=current["id"], owner_orcid="0000-0001", owner_name="Researcher",
+                focal_author_id="42", focal_author_name="Researcher", messages=[], state={},
+            )
+        self.assertIn("jsonb_array_length(EXCLUDED.messages) >= jsonb_array_length(matrix_chat_sessions.messages)", connection.cursor_instance.query)
+        lookup.assert_called_once_with(current["id"], "0000-0001")
+        self.assertEqual(saved["messages"], current["messages"])
+
     def test_owner_wide_history_omits_empty_chats_and_defaults_to_100(self):
         connection = FakeConnection([session_row()])
         with patch.object(session_store, "ensure_session_store"), patch.object(
