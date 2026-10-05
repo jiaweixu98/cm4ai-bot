@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 PAPERS_DB = "papers.sqlite"
 
+
+class PublicationDecisionsUnavailable(RuntimeError):
+    """A configured correction store cannot be read safely."""
+
 _SEARCH_STOP = set(
     "a an and or of for in on to the with from by at as into via is are was were be been what which who how "
     "why when where does do did can could should would about any some this that these those there their "
@@ -81,22 +85,31 @@ class PaperLibrary:
             conn.execute('CREATE TEMP VIEW visible_paper_authors AS SELECT * FROM main.paper_authors')
             self._local.conn = conn
         # A Graph review may create the decision store after this process starts.
-        if (self.snapshot_version and not getattr(self._local, 'attached_decisions', False)
-                and time.monotonic() >= getattr(self._local, 'decisions_retry_at', 0)):
-            path = decisions_path()
-            if os.path.isfile(path):
-                self._attach_decisions(conn, path)
+        if self.snapshot_version and not getattr(self._local, 'attached_decisions', False):
+            required = bool(os.environ.get('PROFILE_DECISIONS_DB', '').strip())
+            if time.monotonic() >= getattr(self._local, 'decisions_retry_at', 0):
+                path = decisions_path()
+                if os.path.isfile(path):
+                    self._attach_decisions(conn, path)
+                elif required:
+                    self._local.decisions_retry_at = time.monotonic() + 60
+            # An explicit shared path is a requirement, including during the retry window.
+            # Never return the uncorrected view while rejected links cannot be checked.
+            if required and not getattr(self._local, 'attached_decisions', False):
+                raise PublicationDecisionsUnavailable('Publication corrections are temporarily unavailable')
         return conn
 
     def _attach_decisions(self, conn: sqlite3.Connection, path: str) -> None:
-        """Hide links that people marked "not my papers". Read-only; a missing, locked or
-        differently shaped decision store is logged once and treated as no decisions."""
+        """Attach live corrections read-only. An explicit store must pass all readers' schema
+        checks; the caller withholds catalog access on failure and retries later."""
         attached = False
         version = self.snapshot_version.replace("'", "''")
         try:
             conn.execute('ATTACH DATABASE ? AS corrections', ('file:' + urllib.parse.quote(path) + '?mode=ro',))
             attached = True
             conn.execute('SELECT snapshot_version, author_id, work_id FROM corrections.excluded_links LIMIT 1').fetchall()
+            conn.execute('SELECT author_id FROM corrections.decisions LIMIT 1').fetchall()
+            conn.execute('SELECT revision FROM corrections.decision_events LIMIT 1').fetchall()
             conn.execute('DROP VIEW visible_paper_authors')
             conn.execute(f'''CREATE TEMP VIEW visible_paper_authors AS SELECT pa.* FROM main.paper_authors pa
                 WHERE NOT EXISTS (SELECT 1 FROM corrections.excluded_links x
@@ -111,7 +124,7 @@ class PaperLibrary:
             self._local.decisions_retry_at = time.monotonic() + 60
             if not PaperLibrary._decisions_warned:
                 PaperLibrary._decisions_warned = True
-                logger.warning('Publication decisions unavailable (%s); showing all catalog links', exc)
+                logger.warning('Publication decisions unavailable (%s); configured stores withhold catalog access', exc)
 
     def owns(self, author_id, work_id) -> bool:
         return self._db().execute('SELECT 1 FROM visible_paper_authors WHERE author_id=? AND work_id=?',

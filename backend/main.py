@@ -27,6 +27,7 @@ import networkx as nx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -43,7 +44,7 @@ from data_loader import (
     load_publication_counts,
 )
 import attachments
-from paper_library import title_key
+from paper_library import title_key, PublicationDecisionsUnavailable
 from research_tools import library_paper, ResearchTools
 from retriever import Retriever
 from session_store import (
@@ -186,6 +187,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CM4AI Bot API", lifespan=lifespan)
+
+
+@app.exception_handler(PublicationDecisionsUnavailable)
+async def unavailable_publication_decisions(_request: Request, _error: PublicationDecisionsUnavailable):
+    return JSONResponse(status_code=503, content={"detail": "Publication corrections are temporarily unavailable"})
+
 # In production, restrict to your Vercel domain; "*" kept for dev convenience
 _ALLOWED_ORIGINS = [
     "http://localhost:3000",

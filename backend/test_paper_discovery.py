@@ -30,6 +30,9 @@ class DiscoveryTests(unittest.TestCase):
         db.commit(); db.close()
         (self.path / 'snapshot_manifest.json').write_text(json.dumps({'snapshot_version':'test-v1'}))
         self.state = self.path / 'decisions.sqlite'
+        with sqlite3.connect(self.state) as state:
+            state.executescript('''CREATE TABLE excluded_links(snapshot_version TEXT,author_id INTEGER,work_id TEXT);
+                CREATE TABLE decisions(author_id INTEGER); CREATE TABLE decision_events(revision INTEGER PRIMARY KEY);''')
         self.env = patch.dict(os.environ, {'PROFILE_DECISIONS_DB':str(self.state)})
         self.env.start()
         self.library = PaperLibrary.open(str(self.path))

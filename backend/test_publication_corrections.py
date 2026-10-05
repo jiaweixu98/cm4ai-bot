@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from paper_library import PaperLibrary
+from paper_library import PaperLibrary, PublicationDecisionsUnavailable
 
 
 class CorrectionTests(unittest.TestCase):
@@ -28,6 +28,10 @@ class CorrectionTests(unittest.TestCase):
         db.commit(); db.close()
         (self.path / 'snapshot_manifest.json').write_text(json.dumps({'snapshot_version':'test-v1'}))
         self.state = self.path / 'decisions.sqlite'
+        with sqlite3.connect(self.state) as state:
+            state.executescript('''CREATE TABLE excluded_links(snapshot_version TEXT,author_id INTEGER,work_id TEXT);
+                CREATE TABLE decisions(author_id INTEGER);
+                CREATE TABLE decision_events(revision INTEGER PRIMARY KEY);''')
         self.env = patch.dict(os.environ, {'PROFILE_DECISIONS_DB':str(self.state)})
         self.env.start()
         self.library = PaperLibrary.open(str(self.path))
@@ -36,11 +40,15 @@ class CorrectionTests(unittest.TestCase):
         self.env.stop(); self.directory.cleanup()
 
     def test_decisions_created_after_startup_are_live_and_author_specific(self):
-        self.assertTrue(self.library.owns(2,'W1001'))
-        db=sqlite3.connect(self.state)
-        db.execute('CREATE TABLE excluded_links(snapshot_version TEXT,author_id INTEGER,work_id TEXT)')
-        db.execute("INSERT INTO excluded_links VALUES('test-v1',2,'W1001')")
-        db.commit(); db.close()
+        # Without an explicit required store, legacy development may attach Graph's store later.
+        self.state.unlink()
+        with patch.dict(os.environ, {'PROFILE_DECISIONS_DB':''}), patch('paper_library.decisions_path',return_value=str(self.state)):
+            self.assertTrue(self.library.owns(2,'W1001'))
+            with sqlite3.connect(self.state) as db:
+                db.executescript('''CREATE TABLE excluded_links(snapshot_version TEXT,author_id INTEGER,work_id TEXT);
+                    CREATE TABLE decisions(author_id INTEGER); CREATE TABLE decision_events(revision INTEGER PRIMARY KEY);
+                    INSERT INTO excluded_links VALUES('test-v1',2,'W1001');''')
+            self.assertFalse(self.library.owns(2,'W1001'))
         self.assertFalse(self.library.owns(2,'W1001'))
         self.assertTrue(self.library.owns(1,'W1001'))
         self.assertEqual(self.library.visible_work_ids(2),set())
@@ -49,17 +57,39 @@ class CorrectionTests(unittest.TestCase):
 
 
     def test_decision_store_is_attached_read_only(self):
-        db=sqlite3.connect(self.state)
-        db.execute('CREATE TABLE excluded_links(snapshot_version TEXT,author_id INTEGER,work_id TEXT)'); db.commit(); db.close()
         self.assertTrue(self.library.owns(2,'W1001'))
         with self.assertRaises(sqlite3.OperationalError):
             self.library._db().execute("INSERT INTO corrections.excluded_links VALUES('test-v1',2,'W1001')")
 
-    def test_decision_store_with_another_schema_is_ignored_not_fatal(self):
+    def test_configured_store_with_another_schema_withholds_links_and_recovers(self):
+        self.state.unlink()
         db=sqlite3.connect(self.state); db.execute('CREATE TABLE something_else(x)'); db.commit(); db.close()
-        self.assertTrue(self.library.owns(2,'W1001'))
-        self.assertEqual(self.library.shared_years(1),{2:2025,4:2020})
-        self.assertEqual(self.library.visible_work_ids(2),{'W1001'})
+        for lookup in (lambda:self.library.owns(2,'W1001'),lambda:self.library.shared_years(1),lambda:self.library.visible_work_ids(2)):
+            with self.assertRaises(PublicationDecisionsUnavailable): lookup()
+        with sqlite3.connect(self.state) as db:
+            db.executescript('''CREATE TABLE excluded_links(snapshot_version TEXT,author_id INTEGER,work_id TEXT);
+                CREATE TABLE decisions(author_id INTEGER); CREATE TABLE decision_events(revision INTEGER PRIMARY KEY);
+                INSERT INTO excluded_links VALUES('test-v1',2,'W1001');''')
+        self.library._local.decisions_retry_at=0
+        self.assertFalse(self.library.owns(2,'W1001'))
+
+    def test_missing_configured_store_withholds_links_during_retry(self):
+        self.state.unlink()
+        for _ in range(2):
+            with self.assertRaises(PublicationDecisionsUnavailable): self.library.owns(2,'W1001')
+        self.assertFalse(self.state.exists(),'Read-only access must not create an empty correction store')
+
+    def test_incomplete_correction_schema_is_not_attached(self):
+        with sqlite3.connect(self.state) as db: db.execute('DROP TABLE decision_events')
+        with self.assertRaises(PublicationDecisionsUnavailable): self.library.owns(2,'W1001')
+
+    def test_optional_legacy_store_with_another_schema_can_degrade(self):
+        self.state.unlink()
+        db=sqlite3.connect(self.state); db.execute('CREATE TABLE something_else(x)'); db.commit(); db.close()
+        with patch.dict(os.environ, {'PROFILE_DECISIONS_DB':''}), patch('paper_library.decisions_path',return_value=str(self.state)):
+            self.assertTrue(self.library.owns(2,'W1001'))
+            self.assertEqual(self.library.shared_years(1),{2:2025,4:2020})
+            self.assertEqual(self.library.visible_work_ids(2),{'W1001'})
 
 
     def test_vectors_and_paths_refresh_and_undo_without_touching_source(self):
@@ -73,10 +103,7 @@ class CorrectionTests(unittest.TestCase):
         original=np.asarray([[0.8,0.6],[1,0]],dtype=np.float32)
         index=faiss.IndexFlatL2(2); index.add(original)
         db=sqlite3.connect(self.state)
-        db.executescript('''CREATE TABLE excluded_links(snapshot_version TEXT,author_id INTEGER,work_id TEXT);
-            CREATE TABLE decision_events(revision INTEGER PRIMARY KEY);
-            CREATE TABLE decisions(author_id INTEGER);
-            INSERT INTO excluded_links VALUES('test-v1',1,'W1001');
+        db.executescript('''INSERT INTO excluded_links VALUES('test-v1',1,'W1001');
             INSERT INTO decision_events VALUES(1); INSERT INTO decisions VALUES(1);''')
         db.commit(); db.close()
         graph=nx.Graph([('1','2'),('1','4')])
