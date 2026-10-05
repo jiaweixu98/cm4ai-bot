@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
+import datetime
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 
 import research_skills
-from research_tools import ResearchTools
+from research_tools import ResearchTools, paper_title
 
 # Share the existing backend index. Serialize its CPU work rather than creating
 # a new encoder/index for every agent, or blocking FastAPI's event loop.
@@ -183,10 +184,14 @@ search and summarize the literature. Adapt to what the user actually asks.
 - analyze_niche measures concept intersections in OpenAlex (counts, trend, top works,
   nearby catalog researchers).
 - Scope defaults to all; use bridge2ai only when asked. Exclude people only on request.
-- signed_in_researcher (when present) is the user: their affiliation and papers. Use it
-  to tailor results (build on their strengths, fill their gaps, skip their own team's
-  expertise, exclude them from recommendations) without restating it back to them.
-  It is never the person assessed unless the user asks about themselves.
+- signed_in_researcher (when present) is the user: their affiliation, topics, and the
+  papers included for this chat. Use it to tailor results (build on their strengths,
+  fill their gaps, skip their own team's expertise, exclude them from recommendations)
+  without restating it back to them. It is never the person assessed unless the user
+  asks about themselves.
+- When recommendation_scope is present, search_people and assemble_team already limit
+  results to that place or to catalog work since from_year. Recommend only people
+  those tools return.
 - When user_publications_on_record is false (guests, students, early-career or
   industry researchers, people whose papers are not indexed), their background is only
   what they say in this conversation or attach. Treat that as fully valid context. If a
@@ -550,7 +555,82 @@ def _fallback_answer(message: str) -> ResearchAnswer:
                           result_update="keep", task_goal="", task_requirements=[], suggested_followups=[])
 
 
-def _build_input(req, profile: dict | None = None, selected: list | None = None) -> list[dict]:
+def _paper_year(value) -> int:
+    match = re.search(r"\d{4}", str(value or ""))
+    return int(match.group()) if match else 0
+
+
+def _catalog_rows(raw: dict, titles: list[dict]) -> list[dict]:
+    rows = []
+    seen = set()
+    for item in titles or []:
+        title = str(item.get("title") or "").strip()
+        key = title.casefold()
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        year = item.get("year")
+        rows.append({"title": title, "year": str(year) if year else ""})
+    for paper in (raw or {}).get("papers") or []:
+        title = paper_title(paper)
+        key = title.casefold()
+        if not title or title == "Untitled" or key in seen:
+            continue
+        seen.add(key)
+        year = ""
+        if isinstance(paper, dict):
+            year = str(paper.get("PubYear") or paper.get("year") or "")
+        rows.append({"title": title, "year": year})
+    return rows
+
+
+def _signed_in_profile(person: dict, raw: dict, choices, titles: list[dict]) -> dict:
+    """The profile the user chose to send: topics and MeSH, a few papers, or a picked set."""
+    profile = {
+        "author_id": person["author_id"],
+        "name": person["name"],
+        "affiliation": person.get("affiliation", ""),
+    }
+    scope = getattr(choices, "paper_scope", None) or "profile"
+    if scope != "papers":
+        topics = [str(term).strip() for term in (person.get("research_topics") or []) if str(term).strip()]
+        mesh = [str(term).strip() for term in (person.get("mesh") or []) if str(term).strip()]
+        if topics:
+            profile["topics"] = topics[:6]
+        if mesh:
+            profile["mesh"] = mesh[:8]
+    evidence = {str(paper.get("title") or "").casefold(): paper for paper in person.get("papers") or []}
+    rows = _catalog_rows(raw, titles)
+    if scope == "chosen":
+        wanted = []
+        for value in getattr(choices, "paper_titles", None) or []:
+            title = " ".join(str(value).split())[:300]
+            if title and title.casefold() not in {item.casefold() for item in wanted}:
+                wanted.append(title)
+        by_title = {row["title"].casefold(): row for row in rows}
+        picked = [by_title.get(title.casefold()) or {"title": title, "year": ""} for title in wanted]
+    elif scope == "papers":
+        picked = rows[:8]
+    else:
+        floor = datetime.date.today().year - 5
+        recent = [row for row in rows if _paper_year(row.get("year")) >= floor]
+        picked = (recent or rows)[:8]
+    papers = []
+    for row in picked[:8]:
+        known = evidence.get(row["title"].casefold()) or {}
+        item = {"title": row["title"]}
+        year = str(known.get("year") or row.get("year") or "")
+        if _paper_year(year):
+            item["year"] = str(_paper_year(year))
+        if known.get("evidence_id"):
+            item["evidence_id"] = known["evidence_id"]
+        papers.append(item)
+    profile["papers"] = papers
+    return profile
+
+
+def _build_input(req, profile: dict | None = None, selected: list | None = None,
+                 recommendation_scope: dict | None = None) -> list[dict]:
     # Compatibility bridge: replay bounded visible messages, but never treat
     # browser-supplied result text as evidence. Durable server runs follow later.
     history = [{"role": m.role, "content": m.content[:4000]}
@@ -566,9 +646,11 @@ def _build_input(req, profile: dict | None = None, selected: list | None = None)
                "has_selected_people": bool(req.context_person_ids),
                "displayed_shortlist": [{"author_id": str(p.get("author_id", "")), "name": str(p.get("name", ""))[:120]}
                                        for p in req.search_results[:8]]}
-    current["user_publications_on_record"] = bool(profile and profile.get("papers"))
+    current["user_publications_on_record"] = bool(profile and (profile.get("papers") or profile.get("topics")))
     if profile:
         current["signed_in_researcher"] = profile
+    if recommendation_scope:
+        current["recommendation_scope"] = recommendation_scope
     if selected:
         current["people_added_to_chat"] = selected
     history.append({"role": "user", "content": json.dumps(current, ensure_ascii=False)})
@@ -660,14 +742,43 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
         return await call(services.analyze_niche, concepts, from_year, executor=_network_executor)
 
     profile = None
+    choices = getattr(req, "context_choices", None)
     if req.aid not in {"", "unlinked", "0"}:
         person = await call(services._person, req.aid, req.user_input[:2000], 8)
         if person:
             services.self_id = person["author_id"]
-            profile = {"author_id": person["author_id"], "name": person["name"],
-                       "affiliation": person.get("affiliation", ""),
-                       "papers": [{"evidence_id": p["evidence_id"], "title": p["title"], "year": p.get("year", "")}
-                                  for p in person["papers"]]}
+            raw = await call(services.details, person["author_id"]) or {}
+            titles = []
+            if services.library is not None and str(person["author_id"]).isdigit():
+                titles = await call(services.library.titles, int(person["author_id"]), 24)
+            if choices:
+                profile = _signed_in_profile(person, raw if isinstance(raw, dict) else {}, choices, titles)
+            else:
+                profile = {"author_id": person["author_id"], "name": person["name"],
+                           "affiliation": person.get("affiliation", ""),
+                           "papers": [{"evidence_id": p["evidence_id"], "title": p["title"], "year": p.get("year", "")}
+                                      for p in person["papers"]]}
+    place = ""
+    from_year = None
+    if choices and getattr(choices, "same_place", False):
+        place = str((profile or {}).get("affiliation") or "").strip()
+        if place.casefold() in {"unknown", "affiliation unavailable"}:
+            place = ""
+    recent_years = int(getattr(choices, "recent_years", 0) or 0) if choices else 0
+    if not recent_years and choices and getattr(choices, "recent_work", False):
+        recent_years = 5
+    if recent_years in {5, 10}:
+        from_year = datetime.date.today().year - recent_years
+    services.place = place
+    services.from_year = from_year
+    search_limit = getattr(services, "search_limit", None)
+    if isinstance(search_limit, dict) and (place or from_year):
+        search_limit["value"] = 40
+    recommendation_scope = {}
+    if place:
+        recommendation_scope["same_place"] = place
+    if from_year:
+        recommendation_scope["from_year"] = from_year
     selected = []
     for pid in list(dict.fromkeys(str(p) for p in req.context_person_ids))[:8]:
         if pid != services.self_id and (person := await call(services._person, pid, req.user_input[:2000], 3)):
@@ -710,7 +821,7 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
                           tools=tools, output_type=ResearchAnswer,
                           model_settings=ModelSettings(parallel_tool_calls=True, reasoning=reasoning,
                                                        max_tokens=8000, store=False))
-            result = Runner.run_streamed(agent, _build_input(req, profile, selected), max_turns=MAX_TURNS,
+            result = Runner.run_streamed(agent, _build_input(req, profile, selected, recommendation_scope or None), max_turns=MAX_TURNS,
                                          error_handlers=handlers,
                                          run_config=RunConfig(tracing_disabled=True, trace_include_sensitive_data=False))
             pending = 0

@@ -1788,6 +1788,18 @@ class AgentWorkingContext(BaseModel):
     requirements: list[str] = Field(default_factory=list, max_length=8)
 
 
+class ContextChoices(BaseModel):
+    """What the context panel sends into this chat, and how recommendations are limited."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    same_place: bool = False
+    recent_work: bool = False
+    recent_years: Literal[0, 5, 10] = 0
+    paper_scope: Literal["profile", "papers", "chosen"] = "profile"
+    paper_titles: list[str] = Field(default_factory=list, max_length=8)
+
+
 class ChatRequest(BaseModel):
     aid: str = "unlinked"
     user_input: str
@@ -1803,6 +1815,7 @@ class ChatRequest(BaseModel):
     attached_context: list[str] = Field(default_factory=list, max_length=5)
     pending_research_plan: ResearchPlan | None = None
     working_context: AgentWorkingContext = Field(default_factory=AgentWorkingContext)
+    context_choices: ContextChoices | None = None
 
 
 class ChatSessionUpsertRequest(BaseModel):
@@ -1855,7 +1868,10 @@ async def chat(req: ChatRequest, request: Request):
         if not req.user_input.strip() or len(req.user_input) > 4000:
             raise HTTPException(400, "Provide a message of 1–4000 characters")
 
+        search_limit = {"value": 8}
+
         def agent_search(query, scope, excluded):
+            limit = search_limit["value"]
             nodes = load_author_nodes()
             if scope == "bridge2ai":
                 encoded = _model_encode(query)
@@ -1869,11 +1885,11 @@ async def chat(req: ChatRequest, request: Request):
                         key=lambda item: -item[1],
                     )
                     return [_serialize_search_candidate(author_id, score, nodes)
-                            for author_id, score in ranked[:8]]
-                _, rows = _preview_similar_authors(encoded, 8 + len(excluded), True)
+                            for author_id, score in ranked[:limit]]
+                _, rows = _preview_similar_authors(encoded, limit + len(excluded), True)
                 return [dict(row, retrieval_score=row["score"]) for row in rows
-                        if row["author_id"] not in excluded][:8]
-            rows = _retrieve_candidates(query, "unlinked", 8, network_weighting=False,
+                        if row["author_id"] not in excluded][:limit]
+            rows = _retrieve_candidates(query, "unlinked", limit, network_weighting=False,
                                         exclude_collaborators=False, exclude_author_ids=excluded)
             return [_serialize_search_candidate(aid, score, nodes) for aid, score in rows]
 
@@ -1882,6 +1898,7 @@ async def chat(req: ChatRequest, request: Request):
                                  path=_get_shortest_path, similar=similar_work_people,
                                  openalex=openalex_enabled(),
                                  library=load_paper_library())
+        services.search_limit = search_limit
         agent_model = [agent_model, _CHAT_FALLBACK_MODEL]
 
         if "text/event-stream" in request.headers.get("accept", ""):
@@ -2058,7 +2075,7 @@ async def attachment_text(req: AttachmentTextRequest):
 
 
 @app.get("/api/chat-sessions")
-async def list_sessions(aid: str, request: Request, intent: str | None = None):
+async def list_sessions(request: Request, aid: str | None = None, intent: str | None = None):
     identity = _require_matrix_session_identity(request)
     sessions = list_chat_sessions(identity["orcid"], aid, intent)
     return {"sessions": sessions}

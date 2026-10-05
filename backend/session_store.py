@@ -185,60 +185,45 @@ def _serialize_session_row(row: dict[str, Any], include_full: bool = False) -> d
 
 def list_chat_sessions(
     owner_orcid: str,
-    focal_author_id: str,
+    focal_author_id: str | None = None,
     intent: str | None = None,
-    limit: int = 20,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     ensure_session_store()
     intent_key = str(intent or "").strip().lower()
+    focal_key = str(focal_author_id or "").strip()
+    conditions = ["owner_orcid = %s", "jsonb_array_length(messages) > 0"]
+    params: list[Any] = [owner_orcid]
+    if focal_key:
+        conditions.append("focal_author_id = %s")
+        params.append(focal_key)
+    if intent_key:
+        conditions.append("COALESCE(state->>'intent', '') = %s")
+        params.append(intent_key)
+    params.append(max(1, min(limit, 100)))
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            if intent_key:
-                cur.execute(
-                    """
-                    SELECT
-                        id,
-                        owner_orcid,
-                        owner_name,
-                        focal_author_id,
-                        focal_author_name,
-                        title,
-                        COALESCE(state->>'intent', '') AS intent,
-                        last_message_preview,
-                        created_at,
-                        updated_at,
-                        last_message_at
-                    FROM matrix_chat_sessions
-                    WHERE owner_orcid = %s
-                      AND focal_author_id = %s
-                      AND COALESCE(state->>'intent', '') = %s
-                    ORDER BY last_message_at DESC, created_at DESC
-                    LIMIT %s
-                    """,
-                    (owner_orcid, str(focal_author_id), intent_key, max(1, min(limit, 100))),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT
-                        id,
-                        owner_orcid,
-                        owner_name,
-                        focal_author_id,
-                        focal_author_name,
-                        title,
-                        COALESCE(state->>'intent', '') AS intent,
-                        last_message_preview,
-                        created_at,
-                        updated_at,
-                        last_message_at
-                    FROM matrix_chat_sessions
-                    WHERE owner_orcid = %s AND focal_author_id = %s
-                    ORDER BY last_message_at DESC, created_at DESC
-                    LIMIT %s
-                    """,
-                    (owner_orcid, str(focal_author_id), max(1, min(limit, 100))),
-                )
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    owner_orcid,
+                    owner_name,
+                    focal_author_id,
+                    focal_author_name,
+                    title,
+                    COALESCE(state->>'intent', '') AS intent,
+                    last_message_preview,
+                    created_at,
+                    updated_at,
+                    last_message_at
+                FROM matrix_chat_sessions
+                WHERE {' AND '.join(conditions)}
+                ORDER BY last_message_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
             rows = cur.fetchall()
     return [_serialize_session_row(row) for row in rows]
 
@@ -373,8 +358,14 @@ def save_chat_session(
                     last_message_preview = EXCLUDED.last_message_preview,
                     messages = EXCLUDED.messages,
                     state = EXCLUDED.state,
-                    updated_at = NOW(),
-                    last_message_at = NOW()
+                    updated_at = CASE
+                        WHEN matrix_chat_sessions.messages IS DISTINCT FROM EXCLUDED.messages THEN NOW()
+                        ELSE matrix_chat_sessions.updated_at
+                    END,
+                    last_message_at = CASE
+                        WHEN matrix_chat_sessions.messages IS DISTINCT FROM EXCLUDED.messages THEN NOW()
+                        ELSE matrix_chat_sessions.last_message_at
+                    END
                 WHERE matrix_chat_sessions.owner_orcid = EXCLUDED.owner_orcid
                 RETURNING
                     id,

@@ -15,6 +15,14 @@ export async function fetchAuthor(aid) {
   return res.json();
 }
 
+export async function fetchAuthorDetails(aid, signal) {
+  // Same-origin so Next can proxy to the backend. A cross-origin API base is not
+  // reachable from every browser that can open this app.
+  const res = await fetch(`/api/author/${encodeURIComponent(aid)}/details`, { signal });
+  if (!res.ok) throw new Error("Author details unavailable");
+  return res.json();
+}
+
 export async function searchPeopleByName(name, signal) {
   const query = String(name || "").trim();
   if (query.length < 2) return [];
@@ -190,6 +198,7 @@ export async function chatMessage({
   intent,
   pendingResearchPlan = null,
   contextMode = null,
+  contextChoices = null,
   workingContext = {},
   onStatus,
   signal,
@@ -213,6 +222,7 @@ export async function chatMessage({
       search_phase: searchPhase || null,
       intent: intent || null,
       context_mode: contextMode || null,
+      context_choices: contextChoices && typeof contextChoices === "object" ? contextChoices : null,
       working_context: workingContext && typeof workingContext === "object" ? workingContext : {},
       pending_research_plan: pendingResearchPlan && typeof pendingResearchPlan === "object"
         ? pendingResearchPlan
@@ -262,7 +272,8 @@ async function readChatStream(body, onStatus) {
 }
 
 export async function listChatSessions({ aid, intent, authToken }) {
-  const params = new URLSearchParams({ aid: String(aid || "unlinked") });
+  const params = new URLSearchParams();
+  if (aid !== undefined && aid !== null && String(aid).trim()) params.set("aid", String(aid));
   if (intent) params.set("intent", String(intent));
   const res = await fetch(`${API_BASE}/api/chat-sessions?${params.toString()}`, {
     headers: withMatrixAuth({}, authToken),

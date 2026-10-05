@@ -103,6 +103,30 @@ def openalex_enabled() -> bool:
     return os.environ.get("MATRIX_OPENALEX", "on").strip().lower() not in {"off", "0", "false", "no"}
 
 
+def _catalog_year(raw: dict) -> int:
+    latest = 0
+    recent = str((raw or {}).get("recent_year") or "")
+    match = re.search(r"\d{4}", recent)
+    if match:
+        latest = int(match.group())
+    for paper in (raw or {}).get("papers") or []:
+        if not isinstance(paper, dict):
+            continue
+        year_match = re.search(r"\d{4}", str(paper.get("PubYear") or paper.get("year") or ""))
+        if year_match:
+            latest = max(latest, int(year_match.group()))
+    return latest
+
+
+def _recommendation_scope(place: str, from_year: int | None) -> dict:
+    scope = {}
+    if place:
+        scope["same_place"] = place
+    if from_year:
+        scope["from_year"] = from_year
+    return scope
+
+
 @dataclass
 class ResearchTools:
     lookup: Callable
@@ -121,6 +145,8 @@ class ResearchTools:
     openalex_requests: int = 0
     self_id: str = ""
     candidates_reviewed: int = 0
+    place: str = ""
+    from_year: int | None = None
     _niche_reviewed: set = field(default_factory=set)
 
     def topic_coverage(self, author_id: str, topics: list[str]) -> dict:
@@ -280,17 +306,36 @@ class ResearchTools:
         # Existing retrieval scores are not comparable across independently phrased
         # facets. Fuse ranks instead and use the stable catalog ID for ties.
         fused: dict[str, dict] = {}
+        window = 40 if self.place or self.from_year else 16
         for facet in facets:
-            for rank, row in enumerate(self.search(facet, scope, exclude_ids[:25])[:16], start=1):
+            rank = 0
+            for row in self.search(facet, scope, exclude_ids[:25])[:window]:
                 author_id = str(row.get("author_id", ""))
                 if not author_id or author_id in exclude_ids or author_id == self.self_id:
                     continue
+                if not self._in_recommendation_scope(row):
+                    continue
+                rank += 1
                 item = fused.setdefault(author_id, {"row": row, "rrf_score": 0.0,
                                                      "facet_ranks": {}, "matched_requirements": []})
                 item["rrf_score"] += 1.0 / (RRF_K + rank)
                 item["facet_ranks"][facet] = rank
                 item["matched_requirements"].append(facet)
         return sorted(fused.values(), key=lambda item: (-item["rrf_score"], str(item["row"]["author_id"])))
+
+    def _in_recommendation_scope(self, row: dict) -> bool:
+        if not self.place and not self.from_year:
+            return True
+        author_id = str(row.get("author_id") or "")
+        raw = self.details(author_id) if author_id else {}
+        raw = raw if isinstance(raw, dict) else {}
+        if self.place:
+            affiliation = str(raw.get("affiliation") or row.get("affiliation") or "")
+            if self.place.casefold() not in affiliation.casefold():
+                return False
+        if self.from_year and _catalog_year(raw) < self.from_year:
+            return False
+        return True
 
     def search_people(self, question: str, requirements: list[str], scope: str,
                       exclude_ids: list[str]) -> dict:
@@ -325,8 +370,12 @@ class ResearchTools:
             person["title_coverage"] = self.topic_coverage(person["author_id"], facets)
         self.candidates_reviewed = len(ranked)
         self.result_people, self.result_query = people, question or "; ".join(facets)
-        return {"status": "ok" if people else "empty", "question": question,
-                "requirements": facets, "scope": scope, "ranking": "rrf-v1", "people": people}
+        payload = {"status": "ok" if people else "empty", "question": question,
+                   "requirements": facets, "scope": scope, "ranking": "rrf-v1", "people": people}
+        scope_applied = _recommendation_scope(self.place, self.from_year)
+        if scope_applied:
+            payload["recommendation_scope"] = scope_applied
+        return payload
 
     def _pin_matched_paper(self, author_id: str, row: dict) -> dict | None:
         """The similar-work paper, with its abstract, as this person's cited evidence."""
@@ -827,8 +876,12 @@ class ResearchTools:
                              "author_id": aid, "alternates": alternates})
         self.candidates_reviewed = len({str(i["row"]["author_id"]) for items in fused.values() for i in items})
         self.result_people, self.result_query = members, goal.strip()[:200] or "; ".join(cleaned)
-        return {"status": "ok" if members else "empty", "goal": goal[:500], "ranking": "greedy-role-order-v1",
-                "members_in_role_order": members, "coverage": coverage}
+        payload = {"status": "ok" if members else "empty", "goal": goal[:500], "ranking": "greedy-role-order-v1",
+                   "members_in_role_order": members, "coverage": coverage}
+        scope_applied = _recommendation_scope(self.place, self.from_year)
+        if scope_applied:
+            payload["recommendation_scope"] = scope_applied
+        return payload
 
     # ---------- Niche analysis ----------
 

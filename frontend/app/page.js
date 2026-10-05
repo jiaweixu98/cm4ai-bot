@@ -25,10 +25,10 @@ import {
   RESULT_LIMIT,
   followUpPrompts,
   normalizeMessage,
-  relativeTime,
 } from "./lib/matrixUi";
 import { MAX_ATTACHED_FILES, readAttachedFiles } from "./lib/attachedPapers";
 import FocalAuthorBar from "./components/FocalAuthorBar";
+import HistorySidebar from "./components/HistorySidebar";
 import ChatPane from "./components/ChatPane";
 import ResultsWorkspace from "./components/ResultsWorkspace";
 import ConfirmPopover from "./components/ConfirmPopover";
@@ -44,6 +44,21 @@ const PHASE = {
 };
 
 const SESSION_TOKEN_STORAGE_KEY = "matrix_user_token";
+const RAIL_STORAGE_KEY = "matrix_history_rail";
+
+function sessionFingerprint(messages, state) {
+  const source = JSON.stringify({ messages: Array.isArray(messages) ? messages : [], state: state || {} });
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function hasUserMessage(messages) {
+  return (Array.isArray(messages) ? messages : []).some((message) => message?.role === "user" && String(message?.content || "").trim());
+}
 
 export default function Home() {
   const [aid, setAid] = useState(UNLINKED_AID);
@@ -62,7 +77,14 @@ export default function Home() {
   const [graphHandoffPersonId, setGraphHandoffPersonId] = useState(null);
   const [attachedPapers, setAttachedPapers] = useState([]);
   const [profileNotice, setProfileNotice] = useState("");
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [railOpen, setRailOpen] = useState(true);
+  const [narrowLayout, setNarrowLayout] = useState(false);
+  const [contextChoices, setContextChoices] = useState({
+    samePlace: false,
+    recentYears: 0,
+    paperScope: "profile",
+    paperTitles: [],
+  });
   const [queuedFollowUp, setQueuedFollowUp] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState(null);
 
@@ -96,6 +118,8 @@ export default function Home() {
   const sessionBootstrappedRef = useRef(false);
   const sessionSaveTimerRef = useRef(null);
   const currentSessionIdRef = useRef(null);
+  const savedFingerprintRef = useRef("");
+  const baselineSessionRef = useRef(null);
   const chatAbortRef = useRef(null);
   const searchAbortRef = useRef(null);
   const rerankAbortRef = useRef(null);
@@ -112,7 +136,38 @@ export default function Home() {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
 
+  const persistRail = useCallback((open) => {
+    setRailOpen(open);
+    try {
+      sessionStorage.setItem(RAIL_STORAGE_KEY, open ? "open" : "closed");
+    } catch {
+      // Session storage can be unavailable in a private frame.
+    }
+  }, []);
+
+  useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 720px)");
+    const apply = () => {
+      setNarrowLayout(narrow.matches);
+    };
+    apply();
+    let stored = "";
+    try {
+      stored = sessionStorage.getItem(RAIL_STORAGE_KEY) || "";
+    } catch {
+      stored = "";
+    }
+    if (stored === "open" || stored === "closed") setRailOpen(stored === "open");
+    else setRailOpen(!narrow.matches);
+    narrow.addEventListener("change", apply);
+    return () => {
+      narrow.removeEventListener("change", apply);
+    };
+  }, []);
+
   const resetWorkflowState = useCallback(() => {
+    savedFingerprintRef.current = "";
+    baselineSessionRef.current = null;
     setContextPersonIds([]);
     setAttachedPapers([]);
     setGraphHandoffPersonId(null);
@@ -163,8 +218,9 @@ export default function Home() {
       workingContext,
       shortlistKind,
       candidatesReviewed,
+      contextChoices,
     }),
-    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed]
+    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed, contextChoices]
   );
 
   const applySessionSnapshot = useCallback((session) => {
@@ -172,6 +228,7 @@ export default function Home() {
     const restoredMessages = (Array.isArray(session?.messages) ? session.messages : []).map(normalizeMessage);
 
     sessionHydratingRef.current = true;
+    baselineSessionRef.current = session?.id || null;
     currentSessionIdRef.current = session?.id || null;
     setCurrentSessionId(session?.id || null);
     const restoredContextIds = Array.isArray(snapshot.contextPersonIds)
@@ -221,6 +278,13 @@ export default function Home() {
     setExpandedCards(
       snapshot.expandedCards && typeof snapshot.expandedCards === "object" ? snapshot.expandedCards : {}
     );
+    const restoredChoices = snapshot.contextChoices && typeof snapshot.contextChoices === "object" ? snapshot.contextChoices : {};
+    setContextChoices({
+      samePlace: Boolean(restoredChoices.samePlace),
+      recentYears: [5, 10].includes(Number(restoredChoices.recentYears)) ? Number(restoredChoices.recentYears) : 0,
+      paperScope: ["profile", "papers", "chosen"].includes(restoredChoices.paperScope) ? restoredChoices.paperScope : "profile",
+      paperTitles: Array.isArray(restoredChoices.paperTitles) ? restoredChoices.paperTitles.map(String).slice(0, 8) : [],
+    });
     if (snapshot.searchIntent === "mentor" || snapshot.searchIntent === "collaborator") {
       setSearchIntent(snapshot.searchIntent);
     }
@@ -274,6 +338,7 @@ export default function Home() {
       setIntent(nextIntent);
       setSearchIntent(nextIntent);
       setAid(aidParam);
+      setAuthorInfo(null);
       setSeekerName(seekerNameParam);
       setEmbedded(isEmbedded);
       setMatrixUserToken(resolvedToken);
@@ -337,18 +402,10 @@ export default function Home() {
       }
 
       try {
-        const [mentorPayload, collaboratorPayload] = await Promise.all([
-          listChatSessions({ aid: aidParam, intent: "mentor", authToken: resolvedToken }),
-          listChatSessions({ aid: aidParam, intent: "collaborator", authToken: resolvedToken }),
-        ]);
+        const historyPayload = await listChatSessions({ authToken: resolvedToken });
         if (cancelled) return;
-        const tagSessions = (items, fallbackIntent) => (Array.isArray(items) ? items : []).map((item) => (
-          item?.intent === "mentor" || item?.intent === "collaborator" ? item : { ...item, intent: fallbackIntent }
-        ));
-        const mergedSessions = [
-          ...tagSessions(mentorPayload.sessions, "mentor"),
-          ...tagSessions(collaboratorPayload.sessions, "collaborator"),
-        ].sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
+        const mergedSessions = (Array.isArray(historyPayload.sessions) ? historyPayload.sessions : [])
+          .sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
         setSessions(mergedSessions);
         let effectiveIntent = nextIntent;
         const requestedSessionId = graphHandoff ? "" : params.get("session") || "";
@@ -473,6 +530,7 @@ export default function Home() {
       authToken: matrixUserToken,
     });
     const created = sessionPayload.session;
+    savedFingerprintRef.current = sessionFingerprint(messages, buildSessionStateSnapshot());
     currentSessionIdRef.current = created.id;
     setCurrentSessionId(created.id);
     upsertSessionSummary(created);
@@ -481,6 +539,10 @@ export default function Home() {
 
   const persistSessionNow = useCallback(async () => {
     if (!matrixUserToken) return null;
+    if (!hasUserMessage(messages)) return currentSessionIdRef.current;
+    const state = buildSessionStateSnapshot();
+    const fingerprint = sessionFingerprint(messages, state);
+    if (fingerprint === savedFingerprintRef.current) return currentSessionIdRef.current;
     try {
       const sessionId = await ensureCurrentSession();
       if (!sessionId) return null;
@@ -489,9 +551,10 @@ export default function Home() {
         aid,
         focalAuthorName: focalName || "",
         messages,
-        state: buildSessionStateSnapshot(),
+        state,
         authToken: matrixUserToken,
       });
+      savedFingerprintRef.current = fingerprint;
       upsertSessionSummary(payload.session);
       return sessionId;
     } catch (error) {
@@ -520,9 +583,10 @@ export default function Home() {
   }, [addMessage, candidates.length]);
 
   const startNewSession = useCallback(() => {
+    savedFingerprintRef.current = "";
+    baselineSessionRef.current = null;
     currentSessionIdRef.current = null;
     setCurrentSessionId(null);
-    setHistoryOpen(false);
     resetWorkflowState();
   }, [resetWorkflowState]);
 
@@ -563,7 +627,6 @@ export default function Home() {
         return;
       }
       try {
-        setHistoryOpen(false);
         setSessionStatus((prev) => ({ ...prev, loading: true, error: "" }));
         const payload = await getChatSession({ sessionId, authToken: matrixUserToken });
         applySessionSnapshot(payload.session);
@@ -611,8 +674,17 @@ export default function Home() {
   }, [applySessionSnapshot, handleStop, intent, matrixUserToken, navigateToSession, pendingConfirm, startNewSession]);
 
   useEffect(() => {
-    if (!sessionBootstrappedRef.current || sessionHydratingRef.current) return;
+    if (!sessionBootstrappedRef.current) return;
     if (!matrixUserToken || !currentSessionId) return;
+    const state = buildSessionStateSnapshot();
+    const fingerprint = sessionFingerprint(messages, state);
+    if (baselineSessionRef.current === currentSessionId) {
+      savedFingerprintRef.current = fingerprint;
+      baselineSessionRef.current = null;
+      sessionHydratingRef.current = false;
+      return;
+    }
+    if (sessionHydratingRef.current || !hasUserMessage(messages) || fingerprint === savedFingerprintRef.current) return;
 
     if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
 
@@ -624,9 +696,10 @@ export default function Home() {
           aid,
           focalAuthorName: focalName || "",
           messages,
-          state: buildSessionStateSnapshot(),
+          state,
           authToken: matrixUserToken,
         });
+        savedFingerprintRef.current = fingerprint;
         upsertSessionSummary(payload.session);
         setSessionStatus((prev) => ({ ...prev, saving: false, error: "" }));
       } catch (error) {
@@ -825,7 +898,9 @@ export default function Home() {
     const text = String(presetText ?? inputValue).trim();
     if (!text) return;
     let activeIntent = requestedIntent || inferPersonaIntent(text, intent);
-    if (activeIntent !== intent) setIntent(activeIntent);
+    if (activeIntent !== intent) {
+      setIntent(activeIntent);
+    }
     if (phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
       setQueuedFollowUp(text);
       setInputValue("");
@@ -862,6 +937,12 @@ export default function Home() {
         searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
         intent: activeIntent,
+        contextChoices: {
+          same_place: contextChoices.samePlace,
+          recent_years: contextChoices.recentYears,
+          paper_scope: contextChoices.paperScope,
+          paper_titles: contextChoices.paperScope === "chosen" ? contextChoices.paperTitles.slice(0, 8) : [],
+        },
         workingContext,
         pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
         onStatus: (label) => {
@@ -1111,8 +1192,8 @@ export default function Home() {
     setProfileNotice("Saved. Use Add people in the composer when you want them in this chat.");
   };
 
-  const returnToGraph = useCallback(() => {
-    void persistSessionNow();
+  const returnToGraph = useCallback(async () => {
+    await persistSessionNow();
     postToBridge({ type: BRIDGE_MSG.RETURN_TO_GRAPH });
   }, [persistSessionNow]);
 
@@ -1155,7 +1236,7 @@ export default function Home() {
           top_candidate_id: orderedCandidates[0]?.author_id || null,
         },
       });
-      setReportStatus("Thanks! Your feedback has been recorded.");
+        setReportStatus("Thanks! Your feedback has been recorded.");
       setReportFeedback("");
       setTimeout(() => {
         setReportModalOpen(false);
@@ -1171,43 +1252,21 @@ export default function Home() {
   useEffect(() => {
     const onKey = (event) => {
       if (event.key !== "Escape") return;
-      setHistoryOpen(false);
+      setRailOpen((open) => {
+        if (!narrowLayout || !open) return open;
+        try {
+          sessionStorage.setItem(RAIL_STORAGE_KEY, "closed");
+        } catch {
+          // Ignore storage failures; the rail still closes.
+        }
+        return false;
+      });
       setPendingConfirm(null);
       setReportModalOpen((open) => (reportSubmitting ? open : false));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [reportSubmitting]);
-
-  const historyMenu = (
-    <div className="history-menu" role="menu">
-      {sessionStatus.error && <div className="session-status session-status-error">{sessionStatus.error}</div>}
-      {!matrixUserToken ? (
-        <div className="session-empty">Sign in on the graph to keep chats.</div>
-      ) : sessions.length === 0 ? (
-        <div className="session-empty">No previous chats yet.</div>
-      ) : (
-        sessions.map((session) => (
-          <button
-            key={session.id}
-            className={`session-chip ${session.id === currentSessionId ? "active" : ""}`}
-            onClick={() => {
-              setHistoryOpen(false);
-              handleSelectSession(session.id);
-            }}
-            type="button"
-            role="menuitem"
-          >
-            <span className="session-chip-title">{session.title || "Untitled session"}</span>
-            <span className="session-chip-meta">
-              <span>{session.intent === "mentor" ? "Mentor" : "Collaborators"}</span>
-              <span>{relativeTime(session.last_message_at)}</span>
-            </span>
-          </button>
-        ))
-      )}
-    </div>
-  );
+  }, [narrowLayout, reportSubmitting]);
 
   if (!uiReady) {
     return (
@@ -1249,21 +1308,52 @@ export default function Home() {
     />
   ) : null;
 
+  const showRail = railOpen || !narrowLayout;
+
   return (
     <div className={shellClass}>
+      {showRail && (
+        <HistorySidebar
+          sessions={sessions}
+          currentIntent={intent}
+          currentSessionId={currentSessionId}
+          sessionStatus={sessionStatus}
+          signedIn={Boolean(matrixUserToken)}
+          isLoading={isLoading}
+          expanded={railOpen}
+          overlay={narrowLayout && railOpen}
+          onToggle={() => persistRail(!railOpen)}
+          onNewSession={handleNewSession}
+          you={{
+            signedIn: Boolean(matrixUserToken),
+            linked,
+            aid,
+            authorInfo,
+            seekerName,
+            choices: contextChoices,
+            onChoices: setContextChoices,
+            onOpenProfile: openProfile,
+          }}
+          onSelectSession={(sessionId) => {
+            if (narrowLayout) persistRail(false);
+            handleSelectSession(sessionId);
+          }}
+        />
+      )}
+      {narrowLayout && railOpen && (
+        <button type="button" className="rail-scrim" aria-label="Close sidebar" onClick={() => persistRail(false)} />
+      )}
+
+      <div className="matrix-stage">
       <FocalAuthorBar
-        intent={intent}
         authorInfo={authorInfo}
         seekerName={seekerName}
         profileContextEnabled={linked}
         sessionStatus={sessionStatus}
         matrixUserToken={matrixUserToken}
-        historyOpen={historyOpen}
-        historyMenu={historyMenu}
-        isLoading={isLoading}
+        showSidebarToggle={narrowLayout && !railOpen}
         onOpenFocal={() => openProfile(aid)}
-        onNewSession={handleNewSession}
-        onToggleHistory={() => setHistoryOpen((open) => !open)}
+        onToggleSidebar={() => persistRail(true)}
         onReturnToGraph={inIframe ? returnToGraph : undefined}
       />
 
@@ -1311,6 +1401,7 @@ export default function Home() {
           citations={orderedCandidates.flatMap((candidate) => rerankedMap[candidate.author_id]?.papers || candidate.papers || []).slice(0, 8)}
         />
 
+      </div>
       </div>
 
       <ConfirmPopover
