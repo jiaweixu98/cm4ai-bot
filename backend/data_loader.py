@@ -312,6 +312,11 @@ def load_all():
     logger.info("[4/5] FAISS index…")
     load_embeddings_and_index()
     load_core_index()
+    try:
+        from paper_vectors import load_paper_index
+        load_paper_index()
+    except Exception as exc:
+        logger.warning("Paper vectors warmup failed: %s", exc)
     logger.info("[5/5] SPECTER model…")
     load_specter_model()
     _resources_loaded = True

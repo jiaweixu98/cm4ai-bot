@@ -67,6 +67,25 @@ def _clip_abstract(text) -> str:
     return text if len(text) <= ABSTRACT_CHARS else text[:ABSTRACT_CHARS].rsplit(" ", 1)[0] + " …"
 
 
+def _papers_for_question(library, author_id, question: str, limit: int = 2) -> list[dict]:
+    """Papers of this person closest to the question. Vector closeness when the
+    paper index is loaded, otherwise the keyword overlap lookup."""
+    try:
+        from paper_vectors import load_paper_index
+
+        index = load_paper_index()
+    except Exception:
+        index = None
+    if index is not None:
+        try:
+            matched = index.matching_papers(author_id, question, library, limit)
+        except Exception:
+            matched = []
+        if matched:
+            return matched
+    return library.matched_papers(author_id, question, limit)
+
+
 def library_paper(row: dict) -> dict:
     """A papers.sqlite row in the catalog's paper shape, abstract included."""
     return {"Title": row["title"], "PubYear": row.get("year"), "Venue": row.get("venue") or "",
@@ -173,7 +192,7 @@ class ResearchTools:
         # A lexical ordering of the available titles, not a scientific fit score.
         papers = sorted(papers, key=lambda p: -len(terms & set(re.findall(r"\w+", paper_title(p).casefold()))))
         if self.library is not None and question.strip() and limit:
-            papers = [library_paper(row) for row in self.library.matched_papers(author_id, question, 2)] + papers
+            papers = [library_paper(row) for row in _papers_for_question(self.library, author_id, question)] + papers
         records = []
         seen = set()
         for paper in papers:

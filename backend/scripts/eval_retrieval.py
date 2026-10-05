@@ -71,6 +71,18 @@ def vector_ranking(vec, scope, core, pub_counts):
     return [int(a) for a, _ in sorted(scored, key=lambda x: -x[1])[:DEPTH]]
 
 
+def paper_ranking(index, vec, scope, core, pub_counts, per_person):
+    scores = index.author_similarity(vec, per_person=per_person)
+    ranked = []
+    for aid, similarity in scores.items():
+        if scope == "core" and aid not in core:
+            continue
+        pub_weight = 0.05 if int(pub_counts.get(str(aid), 0)) == 1 else 1.0
+        ranked.append((aid, similarity * pub_weight))
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return [aid for aid, _ in ranked[:DEPTH]]
+
+
 def keyword_ranking(library, query, scope, core, exclude=None):
     scores = library.people_scores(query, exclude_rowids=exclude)
     ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
@@ -138,7 +150,7 @@ def expertise_queries(export, core):
     return queries
 
 
-def run(name, queries, library, core, pub_counts, scopes):
+def run(name, queries, library, core, pub_counts, scopes, paper_index=None):
     log(f"{name}: encoding {len(queries)} queries")
     vectors = encode([q["query"] for q in queries])
     report = {}
@@ -149,11 +161,17 @@ def run(name, queries, library, core, pub_counts, scopes):
             exclude = {q["rowid"]} if "rowid" in q else None
             vec_rank = vector_ranking(vec, scope, core, pub_counts)
             kw_rank = keyword_ranking(library, q["query"], scope, core, exclude)
-            results.append({"ranks": {
+            ranks = {
                 "current_vector": first_hit(vec_rank, targets),
                 "keyword": first_hit(kw_rank, targets),
                 "hybrid": first_hit(fuse(vec_rank, kw_rank), targets),
-            }})
+            }
+            if paper_index is not None:
+                one = paper_ranking(paper_index, vec, scope, core, pub_counts, 1)
+                two = paper_ranking(paper_index, vec, scope, core, pub_counts, 2)
+                ranks["paper_closest"] = first_hit(one, targets)
+                ranks["paper_top2"] = first_hit(two, targets)
+            results.append({"ranks": ranks})
         report[scope] = {"queries": len(results), **metrics(results)}
         log(f"{name}/{scope}: {json.dumps(report[scope])}")
     return report
@@ -165,6 +183,8 @@ def main():
     ap.add_argument("--papers", type=int, default=300)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--threads", type=int, default=2)
+    ap.add_argument("--sets", default="held_out,expertise",
+                    help="Comma-separated: held_out, expertise. Paper ranking is judged on expertise.")
     ap.add_argument("--out", default="/tmp/eval_retrieval.json")
     args = ap.parse_args()
 
@@ -179,13 +199,21 @@ def main():
     pub_counts = load_publication_counts()
     load_embeddings_and_index()
     load_specter_model()
+    from paper_vectors import load_paper_index
 
-    report = {
-        "snapshot": LOCAL_DATA_DIR,
-        "held_out": run("held_out", held_out_queries(library, core, args.papers, args.seed),
-                        library, core, pub_counts, ["core", "all"]),
-        "expertise": run("expertise", expertise_queries(args.export, core), library, core, pub_counts, ["core"]),
-    }
+    paper_index = load_paper_index()
+    if paper_index is None:
+        log("paper index unavailable; paper ranking columns will be absent")
+    sets = {name.strip() for name in args.sets.split(",") if name.strip()}
+    report = {"snapshot": LOCAL_DATA_DIR}
+    if "held_out" in sets:
+        report["held_out"] = run(
+            "held_out", held_out_queries(library, core, args.papers, args.seed),
+            library, core, pub_counts, ["core", "all"], paper_index)
+    if "expertise" in sets:
+        report["expertise"] = run(
+            "expertise", expertise_queries(args.export, core),
+            library, core, pub_counts, ["core"], paper_index)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     print(json.dumps(report, indent=2))

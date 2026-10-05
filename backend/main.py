@@ -977,6 +977,19 @@ def _get_shortest_path(a: str, b: str) -> list[dict]:
 
 
 # ---------- retrieval ----------
+def _paper_people_scores(query_embedding) -> dict[str, float] | None:
+    """Author similarities from the closest papers, or None to keep author-vector order."""
+    from paper_vectors import PAPER_RANK_PER_PERSON, RANK_BY_PAPER, load_paper_index
+
+    if not RANK_BY_PAPER:
+        return None
+    index = load_paper_index()
+    if index is None:
+        return None
+    return {str(author_id): score
+            for author_id, score in index.author_similarity(query_embedding, PAPER_RANK_PER_PERSON).items()}
+
+
 def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50,
                          network_weighting: bool = True,
                          exclude_collaborators: bool = True,
@@ -993,14 +1006,17 @@ def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50,
         raise HTTPException(status_code=500, detail="Search index not available")
     retriever = Retriever(author_ids, faiss_index)
     q_emb, _ = _query_with_team_context(query_text, team_member_ids, author_ids, faiss_index)
-    results = retriever.search(q_emb, 5000)
-
-    nearest_by_id: dict[str, float] = {}
-    for key, distance in results:
-        base_id = str(key).split("_")[0]
-        distance = float(distance)
-        if base_id not in nearest_by_id or distance < nearest_by_id[base_id]:
-            nearest_by_id[base_id] = distance
+    paper_scores = _paper_people_scores(q_emb)
+    similarities: dict[str, float] = {}
+    if paper_scores is None:
+        for key, distance in retriever.search(q_emb, 5000):
+            base_id = str(key).split("_")[0]
+            distance = float(distance)
+            similarity = 1.0 / (1.0 + max(distance, 0.0))
+            if base_id not in similarities or similarity > similarities[base_id]:
+                similarities[base_id] = similarity
+    else:
+        similarities = paper_scores
 
     pub_counts = load_publication_counts()
     linked = _is_linked_author_id(user_id)
@@ -1020,10 +1036,9 @@ def _retrieve_candidates(query_text: str, user_id: str, top_k: int = 50,
     exclude.update(str(author_id) for author_id in (exclude_author_ids or []) if str(author_id).strip())
 
     weighted = []
-    for aid, distance in nearest_by_id.items():
+    for aid, similarity in similarities.items():
         if aid in exclude:
             continue
-        similarity = 1.0 / (1.0 + max(distance, 0.0))
         pub_weight = 0.05 if int(pub_counts.get(aid, 0)) == 1 else 1.0
         if network_weighting and linked:
             hops = hop_info.get(aid, 7)
@@ -1843,8 +1858,19 @@ async def chat(req: ChatRequest, request: Request):
         def agent_search(query, scope, excluded):
             nodes = load_author_nodes()
             if scope == "bridge2ai":
-                # Retain the established index for this first agent slice.
-                _, rows = _preview_similar_authors(_model_encode(query), 8 + len(excluded), True)
+                encoded = _model_encode(query)
+                paper_scores = _paper_people_scores(encoded)
+                core_ids, _core_index = load_core_index()
+                core = {str(author_id) for author_id in core_ids}
+                if paper_scores is not None and core:
+                    ranked = sorted(
+                        ((author_id, score) for author_id, score in paper_scores.items()
+                         if author_id in core and author_id not in excluded),
+                        key=lambda item: -item[1],
+                    )
+                    return [_serialize_search_candidate(author_id, score, nodes)
+                            for author_id, score in ranked[:8]]
+                _, rows = _preview_similar_authors(encoded, 8 + len(excluded), True)
                 return [dict(row, retrieval_score=row["score"]) for row in rows
                         if row["author_id"] not in excluded][:8]
             rows = _retrieve_candidates(query, "unlinked", 8, network_weighting=False,
@@ -2084,13 +2110,15 @@ MATCHED_PAPER_PEOPLE = 25
 
 
 def _attach_matched_papers(results: list[dict], query: str) -> list[dict]:
-    """Lead each person's papers with their own papers whose title and abstract match
-    the query, so the card and its note rest on the work that fits the request."""
+    """Lead each person's papers with their own papers closest to the query, so the
+    card and its note rest on the work that fits the request."""
     library = load_paper_library()
-    if library is None or not library.query_terms(query):
+    if library is None or not str(query or "").strip():
         return results
+    from research_tools import _papers_for_question
+
     for row in results[:MATCHED_PAPER_PEOPLE]:
-        matched = [library_paper(p) for p in library.matched_papers(row["author_id"], query, 2)]
+        matched = [library_paper(p) for p in _papers_for_question(library, row["author_id"], query)]
         if not matched:
             continue
         keys = {title_key(p["Title"]) for p in matched}
