@@ -94,7 +94,7 @@ Copy `frontend/.env.local.example` to `frontend/.env.local`.
 
 Most important settings:
 
-- `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000`
+- `MATRIX_BACKEND_URL=http://127.0.0.1:8000` (server-side proxy; browser requests stay on the frontend origin)
 - `BRIDGE_REPORT_API_URL=http://127.0.0.1:5173/api/report-error`
 
 ## Bridge handoff behavior

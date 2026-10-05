@@ -1,8 +1,5 @@
-// Same-origin by default so the browser talks to Next on :3100, which proxies
-// chat/rerank to the already-loaded SPECTER. Set NEXT_PUBLIC_API_URL only when
-// you really want a cross-origin backend.
-const rawApiBase = process.env.NEXT_PUBLIC_API_URL;
-const API_BASE = (rawApiBase !== undefined ? rawApiBase : "").replace(/\/$/, "");
+// Next proxies application APIs to MATRIX_BACKEND_URL. Browsers never need the
+// private backend address, including for people lookup and error reports.
 
 function withMatrixAuth(headers = {}, authToken) {
   if (!authToken) return headers;
@@ -27,14 +24,14 @@ export async function searchPeopleByName(name, signal) {
   const query = String(name || "").trim();
   if (query.length < 2) return [];
   const params = new URLSearchParams({ name: query, limit: "8" });
-  const res = await fetch(`${API_BASE}/api/people?${params.toString()}`, { signal });
+  const res = await fetch(`/api/people?${params.toString()}`, { signal });
   if (!res.ok) throw new Error("People search is unavailable");
   const payload = await res.json();
   return Array.isArray(payload?.people) ? payload.people : [];
 }
 
 export async function generateQuery({ aid, userInput, currentQuery, pastQueries, priorInputs }) {
-  const res = await fetch(`${API_BASE}/api/generate-query`, {
+  const res = await fetch("/api/generate-query", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -50,7 +47,7 @@ export async function generateQuery({ aid, userInput, currentQuery, pastQueries,
 }
 
 export async function checkConfirmation({ userText, currentQuery, priorInputs }) {
-  const res = await fetch(`${API_BASE}/api/check-confirmation`, {
+  const res = await fetch("/api/check-confirmation", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -122,7 +119,7 @@ export async function explainCandidates({
 }
 
 export function rerankCandidates({ aid, query, candidates }, onBatch, onComplete, onError, signal) {
-  const url = `${API_BASE}/api/rerank`;
+  const url = "/api/rerank";
   fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -334,7 +331,7 @@ export async function saveChatSession({ sessionId, aid, focalAuthorName, message
 }
 
 export async function fetchGraphPath(aid, collaboratorId) {
-  const res = await fetch(`${API_BASE}/api/graph-path/${aid}/${collaboratorId}`);
+  const res = await fetch(`/api/graph-path/${aid}/${collaboratorId}`);
   if (!res.ok) throw new Error("Graph path fetch failed");
   return res.json();
 }
@@ -358,23 +355,12 @@ export async function submitErrorReport({
     user_agent: userAgent || null,
   };
 
-  // Primary: backend API (same base as chat/search/rerank)
-  const primaryRes = await fetch(`${API_BASE}/api/report-error`, {
+  // Next forwards this request to the configured Graph report endpoint.
+  const response = await fetch("/api/report-error", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (primaryRes.ok) return primaryRes.json();
-
-  // Fallback: Next.js local API route in the frontend app
-  const fallbackRes = await fetch(`/api/report-error`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (fallbackRes.ok) return fallbackRes.json();
-
-  throw new Error(
-    `Error report submission failed (backend ${primaryRes.status}, fallback ${fallbackRes.status})`
-  );
+  if (response.ok) return response.json();
+  throw new Error(`Error report submission failed (${response.status})`);
 }

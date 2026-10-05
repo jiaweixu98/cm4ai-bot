@@ -90,6 +90,12 @@ try {
   assert.ok(bounds.width >= 44 && bounds.height >= 44, 'Collapse has a usable target');
   assert.equal(await toggle.locator('svg').getAttribute('width'), '22');
 
+  await page.getByRole('button', {name: 'Add people to this chat', exact: true}).click();
+  await page.getByPlaceholder('Search by name').fill('Jake Chen');
+  await page.locator('.people-picker-option').filter({hasText: /jake y\. chen/i}).getByRole('button', {name: 'Add', exact: true}).click();
+  await rail.getByText('People in this chat', {exact: true}).waitFor();
+  await rail.getByRole('button', {name: /jake y\. chen/i}).waitFor();
+
   const question = 'Keep this clinical data quality conversation';
   await send(page, question);
   await page.getByRole('button', {name: 'New chat', exact: true}).click();
