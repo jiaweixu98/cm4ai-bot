@@ -122,10 +122,19 @@ def validate_matrix_user_token(token: str) -> dict[str, str] | None:
     if not orcid:
         return None
 
-    return {
+    identity = {
         "orcid": orcid,
         "name": name,
+        "account_id": "",
+        "session_ref": "",
     }
+    account_id = str(payload.get("acct") or "").strip()
+    session_ref = str(payload.get("sref") or "").strip()
+    if account_id:
+        identity["account_id"] = account_id
+    if session_ref:
+        identity["session_ref"] = session_ref
+    return identity
 
 
 def _truncate(value: str, max_len: int) -> str:

@@ -216,6 +216,14 @@ def main():
     assert guest.find_similar_work("")["reason"] == "no_focal_person"
     missing = ResearchTools(lambda *_: [], details, search, self_id="2")
     assert missing.find_similar_work("")["status"] == "empty" and "reason" not in missing.find_similar_work("2")
+    traced = ResearchTools(lambda *_: [], details, search, self_id="2")
+    outcome = traced.search_people("alpha", [], "all", [])
+    traced.record_decision(traced.search_people, ("alpha", ["beta"], "all", []), outcome)
+    traced.record_decision(traced.find_paper_audience, ("", "T", "x" * 900), None, error="ValueError")
+    first, second = traced.trace
+    assert first["name"] == "search_people" and first["args"]["question"] == "alpha"
+    assert first["result_count"] == len(outcome["people"]) and first["method"] == outcome["ranking"]
+    assert second["args"]["abstract"] == {"chars": 900} and second["method"] == "error:ValueError"
     print("research contract smoke: ok")
 
 

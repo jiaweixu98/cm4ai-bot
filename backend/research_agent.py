@@ -660,7 +660,16 @@ def _build_input(req, profile: dict | None = None, selected: list | None = None,
 async def stream_research_turn(req, services: ResearchTools, model: str) -> AsyncIterator[tuple[str, object]]:
     """Yield ("status", label) events, then exactly one ("result", payload)."""
     async def call(fn, *args, executor=_research_executor):
-        return await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+        traced = getattr(fn, "__self__", None) is services and not fn.__name__.startswith("_")
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+        except Exception as exc:
+            if traced:
+                services.record_decision(fn, args, error=type(exc).__name__)
+            raise
+        if traced:
+            services.record_decision(fn, args, result)
+        return result
 
     @function_tool(failure_error_function=_tool_error)
     async def resolve_person(name: str) -> dict:

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -145,6 +146,7 @@ class ResearchTools:
     openalex_requests: int = 0
     self_id: str = ""
     candidates_reviewed: int = 0
+    trace: list = field(default_factory=list)
     place: str = ""
     from_year: int | None = None
     _niche_reviewed: set = field(default_factory=set)
@@ -172,6 +174,35 @@ class ResearchTools:
         if len(self.calls) >= self.max_calls:
             raise ValueError("Research tool budget reached. Answer using the evidence already read.")
         self.calls.append(name)
+
+    def record_decision(self, fn, args: tuple, result=None, error: str = "") -> None:
+        """One compact entry of what a tool was asked and returned, for the usage log."""
+        try:
+            names = list(inspect.signature(fn).parameters)
+        except (TypeError, ValueError):
+            names = []
+        compact = {}
+        for index, value in enumerate(args):
+            key = names[index] if index < len(names) else f"arg{index}"
+            if isinstance(value, str):
+                # Free text a user supplied (an abstract) is recorded by size, not content.
+                compact[key] = {"chars": len(value)} if len(value) > 300 else value
+            elif isinstance(value, (list, tuple)):
+                compact[key] = [str(v)[:120] for v in value[:8]]
+            elif isinstance(value, (int, float, bool)) or value is None:
+                compact[key] = value
+            else:
+                compact[key] = str(value)[:120]
+        count, method = None, ""
+        if isinstance(result, dict):
+            for key in ("people", "members_in_role_order", "papers", "works", "path", "results", "candidates"):
+                if isinstance(result.get(key), list):
+                    count = len(result[key])
+                    break
+            method = str(result.get("method") or result.get("ranking") or result.get("status") or "")[:80]
+        if error:
+            method = f"error:{error}"[:80]
+        self.trace.append({"name": fn.__name__, "args": compact, "result_count": count, "method": method})
 
     def _remember(self, person: dict):
         known = self.people.get(person["author_id"], {})

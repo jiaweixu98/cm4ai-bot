@@ -834,6 +834,7 @@ export default function Home() {
         outsideNetwork: activeIntent === "collaborator",
         teamMemberIds: activeIntent === "collaborator" ? contextPersonIds : [],
         researchPlan,
+        authToken: matrixUserToken,
         signal: searchController.signal,
       });
       if (searchController.signal.aborted) return;
@@ -884,6 +885,7 @@ export default function Home() {
     linked,
     runRerank,
     contextPersonIds,
+    matrixUserToken,
   ]);
 
   const handleConfirmSearchPlan = useCallback(() => {
@@ -944,6 +946,8 @@ export default function Home() {
           paper_titles: contextChoices.paperScope === "chosen" ? contextChoices.paperTitles.slice(0, 8) : [],
         },
         workingContext,
+        chatSessionId: currentSessionIdRef.current,
+        authToken: matrixUserToken,
         pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
         onStatus: (label) => {
           if (!chatController.signal.aborted) setAgentStatus(label);

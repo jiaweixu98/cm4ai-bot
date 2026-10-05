@@ -105,6 +105,26 @@ class SessionStoreQueryTests(unittest.TestCase):
         self.assertTrue(connection.committed)
         self.assertEqual(saved["last_message_at"], "last-message")
 
+    def test_tokens_without_account_still_validate(self):
+        secret = "test-matrix-secret"
+        previous = os.environ.get("BRIDGE_INTERNAL_API_TOKEN")
+        os.environ["BRIDGE_INTERNAL_API_TOKEN"] = secret
+        try:
+            payload = {"v": 1, "orcid": "0000-0001", "name": "Researcher", "exp": int(time.time()) + 60}
+            encoded = session_store._to_base64url(json.dumps(payload).encode("utf-8"))
+            signature = session_store._to_base64url(
+                hmac.new(secret.encode("utf-8"), encoded.encode("utf-8"), hashlib.sha256).digest()
+            )
+            identity = session_store.validate_matrix_user_token(f"{encoded}.{signature}")
+        finally:
+            if previous is None:
+                os.environ.pop("BRIDGE_INTERNAL_API_TOKEN", None)
+            else:
+                os.environ["BRIDGE_INTERNAL_API_TOKEN"] = previous
+        self.assertEqual(identity["orcid"], "0000-0001")
+        self.assertEqual(identity["account_id"], "")
+        self.assertEqual(identity["session_ref"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

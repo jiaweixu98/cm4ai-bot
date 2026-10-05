@@ -47,6 +47,8 @@ async function proxyJson(path, body, headers = {}) {
 export async function POST(request) {
   try {
     const body = await request.json();
+    const token = request.headers.get("x-matrix-user-token");
+    const authHeaders = token ? { "x-matrix-user-token": token } : {};
     const query = String(body.query || "").trim();
     const aid = String(body.aid || "unlinked");
     const topK = Math.max(1, Math.min(10, Number(body.top_k) || 8));
@@ -74,6 +76,7 @@ export async function POST(request) {
           team_member_ids: teamMemberIds,
           research_plan: researchPlan,
         },
+        authHeaders,
       );
       if (!ok) {
         return Response.json({ error: "Mentor search is unavailable" }, { status: status || 502 });
@@ -86,7 +89,7 @@ export async function POST(request) {
         top_k: topK,
         team_member_ids: teamMemberIds,
         research_plan: researchPlan,
-      });
+      }, authHeaders);
       if (!ok) {
         return Response.json({ error: "Collaborator search is unavailable" }, { status: status || 502 });
       }

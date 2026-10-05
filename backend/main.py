@@ -4,6 +4,7 @@ Replicates the full Streamlit chat flow as REST + SSE endpoints.
 """
 
 import os
+import uuid
 import asyncio
 import torch  # IMPORT FIRST to prevent macOS segfaults with faiss/asyncio
 import re
@@ -52,6 +53,7 @@ from session_store import (
     save_chat_session,
     validate_matrix_user_token,
 )
+from usage_log import flush as flush_usage_log, log_event
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -180,6 +182,7 @@ async def lifespan(app: FastAPI):
         logger.warning("Encoder warmup failed: %s", e)
     logger.info("✅ Startup complete in %.1fs.", time.time() - t0)
     yield
+    flush_usage_log(2)
 
 
 app = FastAPI(title="CM4AI Bot API", lifespan=lifespan)
@@ -628,6 +631,170 @@ def _require_matrix_session_identity(request: Request) -> dict[str, str]:
     if not identity:
         raise HTTPException(status_code=401, detail="Matrix session auth is missing or invalid")
     return identity
+
+
+def _optional_matrix_identity(request: Request) -> dict[str, str] | None:
+    token = request.headers.get("x-matrix-user-token", "").strip()
+    if not token:
+        return None
+    return validate_matrix_user_token(token)
+
+
+def _usage_people(rows: Any, limit: int = 8) -> list[dict[str, str]]:
+    people = []
+    if not isinstance(rows, list):
+        return people
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        people.append({
+            "id": str(row.get("author_id") or row.get("authorId") or "")[:40],
+            "name": str(row.get("name") or "")[:200],
+        })
+    return people
+
+
+def _usage_cards(rows: Any, limit: int = 8) -> list[dict]:
+    """People the answer showed, with the why-line and the papers behind it."""
+    cards = []
+    if not isinstance(rows, list):
+        return cards
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        papers = row.get("papers") if isinstance(row.get("papers"), list) else []
+        cards.append({
+            "id": str(row.get("author_id") or row.get("authorId") or "")[:40],
+            "name": str(row.get("name") or "")[:200],
+            "affiliation": str(row.get("affiliation") or "")[:200],
+            "why": str(row.get("why") or "")[:300],
+            "papers": [
+                {"title": str(paper.get("title") or "")[:180], "year": str(paper.get("year") or "")[:8]}
+                for paper in papers[:3] if isinstance(paper, dict)
+            ],
+        })
+    return cards
+
+
+def _chat_context_summary(req) -> dict:
+    """What the user gave the assistant besides the question. Attached text is never stored."""
+    context_people = [str(pid)[:40] for pid in (req.context_person_ids or [])[:10]]
+    history = req.conversation_history or []
+    return {
+        "mode": req.context_mode or "",
+        "people": [{"id": pid, "name": (_get_user_name(pid) or "")[:200]} for pid in context_people],
+        "attachedCount": len(req.attached_context or []),
+        "attachedChars": [len(text or "") for text in (req.attached_context or [])[:5]],
+        "priorMessages": len(history),
+        "goal": str(req.working_context.goal or "")[:300] if req.working_context else "",
+        "choices": ({
+            "paper_scope": req.context_choices.paper_scope,
+            "same_place": req.context_choices.same_place,
+            "recent_years": req.context_choices.recent_years,
+            "paper_titles": [str(t)[:180] for t in req.context_choices.paper_titles[:8]],
+        } if getattr(req, "context_choices", None) else None),
+    }
+
+
+def _snapshot_version() -> str:
+    library = load_paper_library()
+    return str(getattr(library, "snapshot_version", "") or "")[:80]
+
+
+def _decision_trace(trace: list | None, limit: int = 20) -> list[dict]:
+    """What the tools were asked and returned: {name, args, result_count, method}."""
+    rows = []
+    for item in (trace or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        args = json.dumps(item.get("args") or {}, default=str)
+        rows.append({
+            "name": str(item.get("name") or "")[:80],
+            "args": item.get("args") if len(args) <= 600 else {"clipped": args[:600]},
+            "result_count": item.get("result_count"),
+            "method": str(item.get("method") or "")[:80],
+        })
+    return rows
+
+
+def _chat_response_summary(result: dict | None, req=None, trace: list | None = None) -> dict:
+    summary: dict = {}
+    if req is not None:
+        try:
+            summary["context"] = _chat_context_summary(req)
+        except Exception as exc:
+            logger.warning("usage context summary failed: %s", type(exc).__name__)
+    if not isinstance(result, dict):
+        summary.update({"tools": _decision_trace(trace), "snapshot_version": _snapshot_version()})
+        return summary
+    people = result.get("shortlist") or result.get("candidates") or result.get("people") or []
+    plan = result.get("research_plan") if isinstance(result.get("research_plan"), dict) else {}
+    fields = plan.get("fields") if isinstance(plan.get("fields"), dict) else {}
+    citations = result.get("citations") if isinstance(result.get("citations"), list) else []
+    working = result.get("working_context") if isinstance(result.get("working_context"), dict) else {}
+    followups = result.get("suggested_followups") if isinstance(result.get("suggested_followups"), list) else []
+    summary.update({
+        "action": result.get("action"),
+        "intent": result.get("intent"),
+        "query": str(result.get("query") or plan.get("retrieval_query") or result.get("shortlist_title") or "")[:500],
+        "resultCount": len(people) if isinstance(people, list) else 0,
+        "people": _usage_cards(people),
+        "citations": [
+            {"title": str(c.get("title") or "")[:180], "year": str(c.get("year") or "")[:8],
+             "url": str(c.get("url") or "")[:200]}
+            for c in citations[:12] if isinstance(c, dict)
+        ],
+        "topics": fields.get("topic") if isinstance(fields.get("topic"), list) else [],
+        "tools": _decision_trace(trace),
+        "snapshot_version": _snapshot_version(),
+        "goal": str(working.get("goal") or "")[:300],
+        "followups": [str(item)[:160] for item in followups[:3]],
+    })
+    return summary
+
+
+def _log_matrix_chat(identity: dict | None, req, result: dict | None, started: float, status: str,
+                     trace: list | None = None) -> None:
+    if not identity or not identity.get("account_id"):
+        return
+    reply = ""
+    if isinstance(result, dict):
+        reply = str(result.get("reply") or result.get("justification") or "")
+    log_event(
+        account_id=identity.get("account_id"),
+        session_ref=identity.get("session_ref") or None,
+        event_type="matrix_chat_turn",
+        source="matrix",
+        status=status,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        query_text=req.user_input,
+        response_text=reply,
+        response_summary=_chat_response_summary(result, req, trace),
+        chat_session_id=req.chat_session_id,
+        turn_id=str(uuid.uuid4()),
+        metadata={"intent": req.intent or ""},
+    )
+
+
+def _log_matrix_search(request: Request, req, payload: dict | None, started: float, status: str) -> None:
+    identity = _optional_matrix_identity(request)
+    if not identity or not identity.get("account_id"):
+        return
+    candidates = payload.get("candidates") if isinstance(payload, dict) else []
+    log_event(
+        account_id=identity.get("account_id"),
+        session_ref=identity.get("session_ref") or None,
+        event_type="matrix_search",
+        source="matrix",
+        status=status,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        query_text=req.query,
+        response_summary={
+            "resultCount": len(candidates) if isinstance(candidates, list) else 0,
+            "people": _usage_people(candidates),
+            "bridge2aiOnly": bool(req.bridge2ai_only),
+        },
+    )
 
 
 def _get_bridge_direct_collaborators(author_id: str) -> list[str]:
@@ -1816,6 +1983,7 @@ class ChatRequest(BaseModel):
     pending_research_plan: ResearchPlan | None = None
     working_context: AgentWorkingContext = Field(default_factory=AgentWorkingContext)
     context_choices: ContextChoices | None = None
+    chat_session_id: str | None = None
 
 
 class ChatSessionUpsertRequest(BaseModel):
@@ -1861,11 +2029,14 @@ def _resolve_chat_intent(user_text: str, fallback: str | None) -> str:
 async def chat(req: ChatRequest, request: Request):
     """Research chat. The agent runtime is the default; MATRIX_CHAT_RUNTIME=classic
     restores the older search/confirm/chat classifier."""
+    identity = _optional_matrix_identity(request)
+    started = time.perf_counter()
     if os.environ.get("MATRIX_CHAT_RUNTIME", "agents") != "classic":
         from research_agent import run_research_turn, stream_research_turn
         from research_tools import ResearchTools, openalex_enabled
 
         if not req.user_input.strip() or len(req.user_input) > 4000:
+            _log_matrix_chat(identity, req, None, started, "error")
             raise HTTPException(400, "Provide a message of 1–4000 characters")
 
         search_limit = {"value": 8}
@@ -1907,11 +2078,15 @@ async def chat(req: ChatRequest, request: Request):
                     async with llm_request_slot("research-agent"):
                         async for kind, value in stream_research_turn(req, services, agent_model):
                             yield {"event": kind, "data": json.dumps(value if kind == "result" else {"label": value})}
+                            if kind == "result":
+                                _log_matrix_chat(identity, req, value if isinstance(value, dict) else None, started, "ok", services.trace)
                 except HTTPException as exc:
+                    _log_matrix_chat(identity, req, None, started, "error", services.trace)
                     yield {"event": "error", "data": json.dumps({"error": str(exc.detail)})}
                 except Exception as exc:
                     # Do not log private prompts, tool payloads or provider response bodies.
                     logger.warning("Research agent failed: %s", type(exc).__name__)
+                    _log_matrix_chat(identity, req, None, started, "error", services.trace)
                     yield {"event": "error", "data": json.dumps({"error": "Research request could not finish. Please retry."})}
 
             return EventSourceResponse(agent_events(), ping=10)
@@ -1924,12 +2099,16 @@ async def chat(req: ChatRequest, request: Request):
                         task.cancel()
                         raise HTTPException(499, "Chat request was cancelled")
                     await asyncio.wait({task}, timeout=0.2)
-                return await task
+                result = await task
+                _log_matrix_chat(identity, req, result if isinstance(result, dict) else None, started, "ok", services.trace)
+                return result
             except HTTPException:
+                _log_matrix_chat(identity, req, None, started, "error", services.trace)
                 raise
             except Exception as exc:
                 # Do not log private prompts, tool payloads or provider response bodies.
                 logger.warning("Research agent failed: %s", type(exc).__name__)
+                _log_matrix_chat(identity, req, None, started, "error", services.trace)
                 raise HTTPException(502, "Research request could not finish. Please retry.") from None
             finally:
                 if not task.done():
@@ -1976,12 +2155,14 @@ async def chat(req: ChatRequest, request: Request):
                 prior_plan=pending_plan,
             )
             if plan.status == "needs_clarification":
-                return {
+                answered = {
                     "action": "clarify",
                     "reply": plan.clarification_question,
                     "research_plan": plan.model_dump(),
                     "intent": resolved_intent,
                 }
+                _log_matrix_chat(identity, req, answered, started, "ok")
+                return answered
             result = {
                 "action": "search",
                 "query": plan.retrieval_query,
@@ -2037,16 +2218,20 @@ async def chat(req: ChatRequest, request: Request):
                     fallback_query=result.get("query") or req.user_input,
                 )
                 if plan.status == "needs_clarification":
-                    return {
+                    answered = {
                         "action": "clarify",
                         "reply": plan.clarification_question,
                         "research_plan": plan.model_dump(),
                         "intent": resolved_intent,
                     }
+                    _log_matrix_chat(identity, req, answered, started, "ok")
+                    return answered
                 result["query"] = plan.retrieval_query
                 result["research_plan"] = plan.model_dump()
 
-        return {**result, "intent": resolved_intent}
+        answered = {**result, "intent": resolved_intent}
+        _log_matrix_chat(identity, req, answered, started, "ok")
+        return answered
 
 
 class AttachmentTextRequest(BaseModel):
@@ -2169,7 +2354,8 @@ class SearchRequest(BaseModel):
 
 
 @app.post("/api/search")
-async def search(req: SearchRequest):
+async def search(req: SearchRequest, request: Request):
+    started = time.perf_counter()
     nodes = load_author_nodes()
     query = _plan_retrieval_query(req.research_plan.fields, req.query) if req.research_plan else req.query
     if req.bridge2ai_only:
@@ -2190,7 +2376,9 @@ async def search(req: SearchRequest):
             for item in nearest
             if str(item["author_id"]) not in excluded
         ]
-        return {"candidates": _attach_matched_papers(results, query), "total": len(results)}
+        payload = {"candidates": _attach_matched_papers(results, query), "total": len(results)}
+        _log_matrix_search(request, req, payload, started, "ok")
+        return payload
 
     linked = _is_linked_author_id(req.aid)
     candidates = _retrieve_candidates(
@@ -2203,17 +2391,20 @@ async def search(req: SearchRequest):
         team_member_ids=req.team_member_ids,
     )
     results = [_serialize_search_candidate(author_id, score, nodes) for author_id, score in candidates]
-    return {"candidates": _attach_matched_papers(results, query), "total": len(results)}
+    payload = {"candidates": _attach_matched_papers(results, query), "total": len(results)}
+    _log_matrix_search(request, req, payload, started, "ok")
+    return payload
 
 
 @app.post("/api/search-outside-network")
-async def search_outside_network(req: SearchRequest):
+async def search_outside_network(req: SearchRequest, request: Request):
     """Collaborator search for team-building rather than for the atlas.
 
     Same retrieval and the same exclusion of existing collaborators as
     /api/search when the caller is linked, but graph proximity does not weight
     the ranking.
     """
+    started = time.perf_counter()
     nodes = load_author_nodes()
     linked = _is_linked_author_id(req.aid)
     query = _plan_retrieval_query(req.research_plan.fields, req.query) if req.research_plan else req.query
@@ -2227,7 +2418,9 @@ async def search_outside_network(req: SearchRequest):
         team_member_ids=req.team_member_ids,
     )
     results = [_serialize_search_candidate(author_id, score, nodes) for author_id, score in candidates]
-    return {"candidates": _attach_matched_papers(results, query), "total": len(results)}
+    payload = {"candidates": _attach_matched_papers(results, query), "total": len(results)}
+    _log_matrix_search(request, req, payload, started, "ok")
+    return payload
 
 
 class RerankRequest(BaseModel):

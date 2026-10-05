@@ -71,12 +71,13 @@ export async function searchCandidates({
   outsideNetwork = false,
   teamMemberIds = [],
   researchPlan = null,
+  authToken,
   signal,
 }) {
   // Same-origin Next route talks to the already-loaded MATRIX backend.
   const res = await fetch("/api/search-people", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
     signal,
     body: JSON.stringify({
       aid: aid || "unlinked",
@@ -200,16 +201,22 @@ export async function chatMessage({
   contextMode = null,
   contextChoices = null,
   workingContext = {},
+  chatSessionId = null,
+  authToken,
   onStatus,
   signal,
 }) {
   const res = await fetch("/api/chat-lite", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream, application/json" },
+    headers: withMatrixAuth(
+      { "Content-Type": "application/json", Accept: "text/event-stream, application/json" },
+      authToken,
+    ),
     signal,
     body: JSON.stringify({
       aid: aid || "unlinked",
       user_input: userInput,
+      chat_session_id: chatSessionId || null,
       context_person_ids: contextPersonIds.map(String),
       attached_context: Array.isArray(attachedContext)
         ? attachedContext.map((text) => String(text || "").trim().slice(0, 6000)).filter(Boolean).slice(0, 5)
