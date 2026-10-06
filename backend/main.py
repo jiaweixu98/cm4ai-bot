@@ -54,7 +54,7 @@ from session_store import (
     save_chat_session,
     validate_matrix_user_token,
 )
-from usage_log import flush as flush_usage_log, log_event
+from usage_log import chat_response_text, flush as flush_usage_log, log_event
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -764,9 +764,6 @@ def _log_matrix_chat(identity: dict | None, req, result: dict | None, started: f
                      trace: list | None = None) -> None:
     if not identity or not identity.get("account_id"):
         return
-    reply = ""
-    if isinstance(result, dict):
-        reply = str(result.get("reply") or result.get("justification") or "")
     log_event(
         account_id=identity.get("account_id"),
         session_ref=identity.get("session_ref") or None,
@@ -775,7 +772,7 @@ def _log_matrix_chat(identity: dict | None, req, result: dict | None, started: f
         status=status,
         duration_ms=int((time.perf_counter() - started) * 1000),
         query_text=req.user_input,
-        response_text=reply,
+        response_text=chat_response_text(result),
         response_summary=_chat_response_summary(result, req, trace),
         chat_session_id=req.chat_session_id,
         turn_id=str(uuid.uuid4()),

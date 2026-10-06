@@ -168,6 +168,9 @@ search and summarize the literature. Adapt to what the user actually asks.
 - For a named person: resolve_person, then read_person_evidence for the actual question.
   If ambiguous, ask which person and show the returned affiliations. Never guess.
 - For "the second person" or earlier results, call read_context; it keeps display order.
+- For a supporting publication already shown in a card, read_context returns that
+  specific paper from the catalog. Read its abstract to explain methods or findings.
+  Keep the displayed cards; do not repeat discovery unless a new search is requested.
 - read_abstracts gives abstracts for catalog papers; use it when titles are not enough
   to judge methods, settings or findings.
 - search_literature searches the catalog's own papers (titles and abstracts) first and
@@ -746,7 +749,8 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
     async def read_context() -> dict:
         """Read profile, selected people and the displayed shortlist (in order) from catalog records."""
         return await call(services.read_context, req.aid, req.context_person_ids,
-                          [str(p.get("author_id", "")) for p in req.search_results[:8]])
+                          [str(p.get("author_id", "")) for p in req.search_results[:8]],
+                          req.search_results[:8])
 
     @function_tool(failure_error_function=_tool_error)
     async def read_abstracts(evidence_ids: list[str]) -> dict:

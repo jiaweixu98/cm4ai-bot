@@ -45,6 +45,25 @@ class UsageLogTests(unittest.TestCase):
             usage_log.log_event(event_type="matrix_chat_turn", query_text="hello")
         put.assert_not_called()
 
+    def test_full_response_includes_complete_card_explanation_and_publications(self):
+        why = 'Supported explanation. ' * 40
+        title = 'A long publication title ' * 12
+        result = {'reply': 'Related published work.', 'shortlist': [{
+            'name': 'Researcher', 'affiliation': 'Institute', 'why': why,
+            'papers': [{'title': title, 'year': '2025', 'url': 'https://doi.org/10.1/example'}],
+        }], 'citations': [{'title': 'Additional source', 'url': 'https://openalex.org/W1001'}]}
+        text = usage_log.chat_response_text(result)
+        for expected in (result['reply'], 'Researcher · Institute', why.strip(), title.strip(),
+                         'https://doi.org/10.1/example', 'Additional source', 'https://openalex.org/W1001'):
+            self.assertIn(expected, text)
+        row = usage_log._row({'account_id': ACCOUNT, 'response_text': text})
+        self.assertEqual(row[13], text)
+
+    def test_full_response_preserves_plain_answers(self):
+        self.assertEqual(usage_log.chat_response_text({'reply': 'The answer.'}), 'The answer.')
+        self.assertEqual(usage_log.chat_response_text({'justification': 'Earlier format.'}), 'Earlier format.')
+        self.assertEqual(usage_log.chat_response_text(None), '')
+
     def test_full_queue_drops_without_raising(self):
         before = usage_log.dropped_count()
         with patch.object(usage_log._QUEUE, "put_nowait", side_effect=queue.Full):

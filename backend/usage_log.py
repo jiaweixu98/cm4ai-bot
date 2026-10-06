@@ -63,6 +63,37 @@ def _clip(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
 
+def chat_response_text(result: dict | None) -> str:
+    """Keep the published answer and card explanations in the full-response log."""
+    if not isinstance(result, dict):
+        return ""
+    sections = [str(result.get("reply") or result.get("justification") or "").strip()]
+    sources = set()
+
+    def publication(paper: dict) -> str:
+        title = str(paper.get("title") or "").strip()
+        url = str(paper.get("url") or "").strip()
+        sources.add((title, url))
+        year = str(paper.get("year") or "").strip()
+        return " ".join(part for part in (title, f"({year})" if year else "", url) if part)
+
+    for card in (result.get("shortlist") or [])[:8]:
+        if not isinstance(card, dict):
+            continue
+        lines = [" · ".join(str(card.get(key) or "").strip()
+                            for key in ("name", "affiliation", "role") if card.get(key)),
+                 str(card.get("why") or "").strip()]
+        for paper in (card.get("papers") or [])[:3]:
+            if isinstance(paper, dict):
+                lines.append(publication(paper))
+        sections.append("\n".join(line for line in lines if line))
+    for citation in result.get("citations") or []:
+        if isinstance(citation, dict) and (str(citation.get("title") or "").strip(),
+                                          str(citation.get("url") or "").strip()) not in sources:
+            sections.append(publication(citation))
+    return "\n\n".join(section for section in sections if section)
+
+
 def _uuid(value: Any) -> str | None:
     text = str(value or "").strip()
     return text if _UUID.match(text) else None

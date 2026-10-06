@@ -29,6 +29,11 @@ const {chromium} = require('playwright');
     const text=await page.locator('body').innerText();
     assert.ok(/PAGER|gene.signature|gene.set|pathway/i.test(text),'Scientific paper evidence must be displayed');
     assert.ok(!/Considered \d+ matching researchers/.test(text),'No redundant candidate-pool metric');
+    const followup=await send('What did the supporting publication shown in the first card actually do? Explain that specific study’s methods briefly, using its abstract.');
+    assert.equal(followup.result_update,'keep','A paper follow-up must retain the displayed cards');
+    assert.ok(followup.citations?.some(citation=>citation.title===audience.shortlist[0].papers[0].title),
+      'The explanation must cite the publication shown in the first card');
+    assert.equal(await page.locator('.collab-card').count(),audience.shortlist.length);
     const unrelated=await send('Find an audience in the local researcher catalog for a paper about translating Sumerian cuneiform tax records and reconstructing Bronze Age irrigation management in Mesopotamia. Only recommend people with directly relevant publications; if none exist, give no people.');
     assert.equal(unrelated.shortlist?.length||0,0,'No forced audience from unrelated nearest papers');
     assert.equal(await page.locator('.collab-card').count(),0,'An empty search clears earlier cards');
@@ -36,6 +41,6 @@ const {chromium} = require('playwright');
     assert.equal(empty.shortlist?.length||0,0);
     assert.match(empty.reply,/no|not|none/i);
     assert.deepEqual(errors,[]);
-    console.log('PASS: live Promote shows supporting publications, unrelated papers give no cards, empty Explore answers normally, and no page errors.');
+    console.log('PASS: live Promote shows supporting publications, a follow-up keeps cards and cites the displayed paper, unrelated papers give no cards, empty Explore answers normally, and no page errors.');
   } finally {await browser.close();}
 })().catch(error=>{console.error(error.message);process.exitCode=1});

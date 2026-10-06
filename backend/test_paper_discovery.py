@@ -210,5 +210,37 @@ class DiscoveryTests(unittest.TestCase):
             db.execute("INSERT INTO papers SELECT 'W1004',title,abstract,year,venue,doi,doi_key,pmid,cited_by,primary_topic,primary_field,title_key FROM papers WHERE work_id='W1001'")
         self.assertIsNone(self.library.by_title('Clinical phenotyping with health records'))
 
+    def test_context_reads_displayed_paper_instead_of_newest_papers(self):
+        with sqlite3.connect(self.path / 'papers.sqlite') as db:
+            for index in range(3):
+                work = f'W20{index}'
+                db.execute("INSERT INTO papers(work_id,title,abstract,year) VALUES(?,?,?,2026)",
+                           (work, f'New unrelated study {index}', 'unrelated methods'))
+                db.execute("INSERT INTO paper_authors VALUES(?,2,1,'unknown')", (work,))
+        tools = self._tools()
+        result = tools.read_context('', [], ['2'], [{'author_id': '2', 'papers': [{
+            'title': 'Clinical phenotyping with health records', 'year': '2025',
+            'abstract': 'An invented browser abstract',
+        }]}])
+        papers = result['displayed_people_in_order'][0]['papers']
+        self.assertEqual([paper['title'] for paper in papers], ['Clinical phenotyping with health records'])
+        abstract = tools.read_abstracts([papers[0]['evidence_id']])['abstracts'][papers[0]['evidence_id']]
+        self.assertEqual(abstract['abstract'], 'clinical phenotyping electronic records')
+        self.assertIsNone(tools.result_people)  # Reading prior cards must not replace them.
+
+    def test_context_does_not_trust_supplied_paper_authorship(self):
+        result = self._tools().read_context('', [], ['3'], [{'author_id': '3', 'papers': [{
+            'work_id': 'W1001', 'title': 'Clinical phenotyping with health records',
+        }]}])
+        self.assertEqual(result['displayed_people_in_order'][0]['papers'], [])
+
+    def test_context_withholds_displayed_paper_after_live_correction(self):
+        with sqlite3.connect(self.state) as db:
+            db.execute("INSERT INTO excluded_links VALUES('test-v1',2,'W1001')")
+        result = self._tools().read_context('', [], ['2'], [{'author_id': '2', 'papers': [{
+            'work_id': 'W1001', 'title': 'Clinical phenotyping with health records',
+        }]}])
+        self.assertEqual(result['displayed_people_in_order'][0]['papers'], [])
+
 
 if __name__ == '__main__': unittest.main()

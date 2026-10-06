@@ -495,12 +495,42 @@ class ResearchTools:
         return {"status": "connected" if path else "no_recorded_path", "evidence_id": eid,
                 "coauthor_hops": max(len(path) - 1, 0), "path": path}
 
-    def read_context(self, profile_id: str, selected_ids: list[str], displayed_ids: list[str]) -> dict:
+    def read_context(self, profile_id: str, selected_ids: list[str], displayed_ids: list[str],
+                     displayed_results: list[dict] | None = None) -> dict:
         self._charge("read_context")
         def read(ids):
             return [p for aid in ids[:8] if (p := self._person(aid, limit=3))]
+        displayed = []
+        previous = {str(row.get('author_id', '')): row for row in (displayed_results or [])[:8]}
+        for author_id in displayed_ids[:8]:
+            supplied = previous.get(str(author_id))
+            if self.library is None or supplied is None:
+                person = self._person(author_id, limit=3)
+            else:
+                person = self._person(author_id, limit=0)
+                if person:
+                    papers = []
+                    for paper in (supplied.get('papers') or [])[:3]:
+                        if isinstance(paper, str):
+                            paper = {'title': paper}
+                        if not isinstance(paper, dict):
+                            continue
+                        row = self._library_row({
+                            'work_id': paper.get('work_id') or paper.get('OpenAlexWork'),
+                            'url': paper.get('url') or paper.get('DOI') or paper.get('doi'),
+                            'title': paper_title(paper), 'year': paper.get('year') or paper.get('PubYear'),
+                        })
+                        # Saved/browser records identify a paper, but cannot supply its
+                        # authorship or abstract. Live corrections still apply here.
+                        if row and self.library.owns(person['author_id'], row['work_id']):
+                            record = self._remember_paper(person['author_id'], library_paper(row))
+                            if record and record not in papers:
+                                papers.append(record)
+                    person = {**person, 'papers': [_with_excerpt(p) for p in papers]}
+            if person:
+                displayed.append(person)
         return {"profile_context": self._person(profile_id, limit=3),
-                "selected_people": read(selected_ids), "displayed_people_in_order": read(displayed_ids)}
+                "selected_people": read(selected_ids), "displayed_people_in_order": displayed}
 
     # ---------- OpenAlex (approved external source) ----------
 
