@@ -1802,9 +1802,10 @@ def _why_system_prompt(intent: str, has_team: bool, has_profile: bool) -> str:
         return shared + (
             " Task: recommend this researcher as a complement to the reader and the CURRENT_TEAM, not as a replacement. "
             "First notice methods, data types, populations, and settings already evidenced in CURRENT_TEAM titles. "
-            "Then name one concrete thing this researcher adds that those team titles do not already show. "
+            "Then describe one evidenced method or setting this researcher could contribute to the stated need. "
+            "Relate it to the team's documented work when supported; do not infer that the team lacks a skill from absent titles. "
             "If the work overlaps, say how the angle still helps the requested capability. "
-            "Good: This researcher adds federated training across hospital sites, which the current team's NLP and phenotyping papers do not show, so you gain a way to share phenotypes without pooling records. "
+            "Good: This researcher studied federated training across hospital sites. That method could connect the team's documented NLP and phenotyping work to cross-site evaluation without pooling records. "
             "Bad: Their work on Toward cross-platform electronic health record-driven phenotyping is listed as a complement to Alex and Jordan. "
             "Bad: Your papers complement the team."
         )

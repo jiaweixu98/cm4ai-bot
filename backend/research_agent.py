@@ -148,9 +148,14 @@ search and summarize the literature. Adapt to what the user actually asks.
   Ask for the paper when missing. Keep the deterministic order and cite each person's
   returned matching publications. These are potential audiences based on related work,
   not confirmed readers, willing collaborators or contacts. Do not send messages.
+  The tool returns retrieval candidates, not proof of a relevant audience. Return an
+  empty shortlist when their publications do not support the paper's topic; never fill
+  the list just because nearest publications were returned.
 - For exploring a person's coauthors with specialty, institution, geography or a date
   range, resolve the person then use explore_coauthors. Dates and specialties apply to
-  shared publications, not a person's overall career. Geography is the institution printed
+  shared publications, not a person's overall career. Apply the requested filters through
+  the tool even when no matches are expected; do not infer catalog contents from dates.
+  Geography is the institution printed
   on the shared paper (placed through its ROR id), never where someone lives now; say so
   when you report it. Accepted geography: a country name or alias (USA, U.S., United States,
   UK, Great Britain), an ISO code (US, DEU), a US state or Canadian province name (California,
@@ -230,6 +235,8 @@ search and summarize the literature. Adapt to what the user actually asks.
 - A citation says "this statement comes from that record". Cite statements of what a
   paper or person's work covers and numbers. Your own synthesis, fit reasoning and
   recommendations are uncited: put them in general blocks without person_ids.
+- Search summaries, including no matches and filter coverage, describe tool output.
+  Put them in general blocks without person_ids or publication citations.
 - Answer with what the tools returned. Do not narrate tool failures, service limits,
   what you could not verify, or what a paper is "not evidence" of; leave it unsaid.
 
@@ -246,7 +253,11 @@ answered normally with tools as needed.
   names what their cited papers actually do for this request (the method, data,
   population or finding, from the abstract when one is present), what this person brings
   that the others on the list do not, and what the user would go to them for (learn X,
-  collaborate on Y, read Z). Use title_coverage to tell whether their work covers every
+  collaborate on Y, read Z). Describe only the part of a multi-requirement request that
+  the cited work supports; do not imply privacy, federated training or cross-site
+  validation from clinical NLP alone. Read abstracts when an excerpt does not describe
+  the method or setting needed for the explanation. Use title_coverage to tell whether
+  their work covers every
   part of the request or one part. Never write generic phrases like "relevant
   neighbor", "strong fit" or "foundation for". Recommend 5
   people by default (the user may ask for more or fewer); include fewer only when the
@@ -280,6 +291,8 @@ answered normally with tools as needed.
 - Be concise and answer the actual question in the user's language.
 
 # Style rules (strict)
+- Answer in plain research language. Do not narrate tool names, retrieval mechanics
+  or internal ordering; explain the scientific connection instead.
 - Refer to researchers by name or "they". The records contain no gender, so he, she,
   his and her would be guesses.
 - The interface shows the cited papers, so users see what claims rest on; restating
@@ -340,15 +353,15 @@ def _shortlist_cards(answer: ResearchAnswer, tools: ResearchTools) -> list[dict]
         return []
     cards, seen = [], set()
     entries = {entry.author_id: entry for entry in answer.shortlist}
-    publication_discovery = any(call in {'find_paper_audience','explore_coauthors'} for call in tools.calls)
-    if not entries and publication_discovery:
+    if not entries and (tools.publication_search or {}).get('kind') == 'explore_coauthors':
         # A valid prose answer must not make the navigable, deterministic result
-        # set disappear. Supply reasons only from the returned paper records.
+        # set disappear. Explore has already checked shared papers against the
+        # requested filters. Promote's nearest papers can be unrelated, so an
+        # empty model shortlist there must remain empty.
         for person in tools.result_people or []:
             papers = [p for p in person.get('papers',[]) if p.get('evidence_id') and p.get('title')]
             if papers:
-                prefix = 'Shared publication' if 'explore_coauthors' in tools.calls else 'Related publication'
-                entry = ShortlistEntry(author_id=person['author_id'],why=f'{prefix}: {papers[0]["title"]}',
+                entry = ShortlistEntry(author_id=person['author_id'],why=f'Shared publication: {papers[0]["title"]}',
                                        evidence_ids=[p['evidence_id'] for p in papers[:2]])
                 entries[entry.author_id] = entry
     # The retrieval service owns candidate order. The model writes bounded reasons
@@ -413,7 +426,14 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
     cards = _shortlist_cards(answer, tools)
     card_names = [c["name"].casefold() for c in cards]
     blocks = []
+    displayed_ids = {card['author_id'] for card in cards}
     for block in answer.blocks:
+        if (block.kind == 'research' and len(set(block.person_ids)) == 1
+                and set(block.person_ids) <= displayed_ids):
+            # New cards already carry each person's explanation and papers.
+            # Keep framing and comparisons here; follow-ups have no new cards
+            # and retain their detailed person-specific answer.
+            continue
         problem = _block_problem(block, tools)
         if problem:
             logger.warning("Withheld %s answer block: %s", block.kind, problem)
@@ -428,6 +448,20 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
         if any(not _TITLE.fullmatch(p.text.strip()) for p in valid_parts):
             block.parts = valid_parts
             blocks.append(block)
+    empty_search = tools.publication_search or {}
+    if (not blocks and not cards and tools.result_people == []
+            and empty_search.get('status') == 'empty' and not empty_search.get('people')):
+        # An empty query has no paper to cite. A model may label its result summary
+        # as a research claim; publish the checked query outcome instead of a
+        # generic error or an unrelated focal-person profile.
+        text = ('No recorded coauthors match the requested publication filters.'
+                if empty_search.get('kind') == 'explore_coauthors'
+                else 'No potential audience members were found for this paper.')
+        unresolved = empty_search.get('geography_unresolved_people', 0)
+        if unresolved:
+            text += f' Institutions on shared papers could not be placed for {unresolved} coauthors.'
+        blocks.append(AnswerBlock(kind='general', person_ids=[],
+                                  parts=[AnswerPart(text=text, evidence_ids=[])]))
     if not blocks and not cards:
         partial = _grounded_partial(tools)
         if partial:

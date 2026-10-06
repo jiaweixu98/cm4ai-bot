@@ -345,6 +345,18 @@ class PaperLibrary:
             (work_key(work_id),)).fetchall()
         return [(int(r["author_id"]), r["position"]) for r in rows]
 
+    def author_institutions(self, work_id) -> dict[int, list[str]]:
+        """Institutions printed on this work, rather than current profile affiliations."""
+        found = {}
+        for author_id, institution in self._db().execute('''
+                SELECT DISTINCT af.author_id, g.institution
+                FROM publication_affiliations af
+                JOIN publication_groups g USING(author_id, group_id)
+                WHERE af.work_id=? ORDER BY af.author_id, g.institution''', (work_key(work_id),)):
+            if institution and institution.strip():
+                found.setdefault(int(author_id), []).append(institution.strip())
+        return found
+
     def search(self, query: str, from_year: int | None = None, limit: int = 8) -> list[dict]:
         """Title and abstract matches, strongest first: the words as a phrase, then
         every word, then any word. Each row's "match" says which of these found it."""

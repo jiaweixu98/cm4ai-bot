@@ -112,5 +112,103 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(rendered['shortlist'][0]['is_bridge2ai_member'])
         self.assertEqual(rendered['result_update'],'replace')
 
+    def _tools(self):
+        from research_tools import ResearchTools
+        return ResearchTools(lambda *_: [], lambda aid: {
+            'name': f'Person {aid}', 'affiliation': 'Current Institution', 'papers': []
+        }, lambda *_: [], library=self.library)
+
+    def _answer(self, text, kind='general', person_ids=None, shortlist=None):
+        from research_agent import ResearchAnswer, AnswerBlock, AnswerPart
+        return ResearchAnswer(blocks=[AnswerBlock(kind=kind, person_ids=person_ids or [],
+            parts=[AnswerPart(text=text, evidence_ids=[])])], shortlist=shortlist or [],
+            shortlist_kind='researchers', shortlist_title='', result_update='keep',
+            task_goal='', task_requirements=[], suggested_followups=[])
+
+    def test_promote_abstention_does_not_publish_nearest_papers(self):
+        from research_agent import render_answer
+        tools = self._tools()
+        with patch('paper_vectors.load_paper_index', return_value=None):
+            tools.find_paper_audience('W1001', '', '')
+        self.assertTrue(tools.result_people)
+        answer = self._answer('No directly relevant published work was found; I am not recommending anyone.')
+        rendered = render_answer(answer, tools)
+        self.assertNotIn('shortlist', rendered)
+        self.assertEqual(rendered['result_update'], 'replace')
+
+    def test_promote_abstention_after_explore_still_withholds_cards(self):
+        from research_agent import render_answer
+        tools = self._tools()
+        tools.explore_coauthors('1', '', '', '', 2021, None)
+        with patch('paper_vectors.load_paper_index', return_value=None):
+            tools.find_paper_audience('W1001', '', '')
+        rendered = render_answer(self._answer('No audience members have directly relevant work.'), tools)
+        self.assertNotIn('shortlist', rendered)
+
+    def test_positive_promote_keeps_cited_publication_and_own_author_exclusion(self):
+        from research_agent import render_answer, ShortlistEntry
+        tools = self._tools()
+        with patch('paper_vectors.load_paper_index', return_value=None):
+            tools.find_paper_audience('W1001', '', '')
+        person = tools.result_people[0]
+        entry = ShortlistEntry(author_id=person['author_id'], why='Their clinical phenotyping study addresses this topic.',
+                               evidence_ids=[person['papers'][0]['evidence_id']])
+        rendered = render_answer(self._answer('Potential audience based on published work.', shortlist=[entry]), tools)
+        self.assertEqual([p['author_id'] for p in rendered['shortlist']], ['3'])
+        self.assertEqual(rendered['shortlist'][0]['papers'][0]['title'], 'Portable clinical phenotyping systems')
+
+    def test_empty_explore_is_an_answer_even_when_model_mislabels_summary(self):
+        from research_agent import render_answer
+        tools = self._tools()
+        tools.read_person_evidence('1', '')
+        tools.explore_coauthors('1', '', '', '', 2035, 2040)
+        answer = self._answer('No shared publications were returned for this date range.', 'research', ['1'])
+        rendered = render_answer(answer, tools)
+        self.assertEqual(rendered['reply'], 'No recorded coauthors match the requested publication filters.')
+        self.assertNotIn('shortlist', rendered)
+        self.assertEqual(rendered['citations'], [])
+        self.assertEqual(rendered['result_update'], 'replace')
+
+    def test_new_cards_avoid_duplicate_person_prose_but_followups_keep_it(self):
+        from research_agent import render_answer, ShortlistEntry, AnswerBlock, AnswerPart
+        tools = self._tools()
+        with patch('paper_vectors.load_paper_index', return_value=None):
+            tools.find_paper_audience('W1001', '', '')
+        person = tools.result_people[0]
+        evidence = person['papers'][0]['evidence_id']
+        entry = ShortlistEntry(author_id='3', why='Their portable clinical phenotyping study addresses this topic.',
+                               evidence_ids=[evidence])
+        answer = self._answer('Potential audience based on published work.', shortlist=[entry])
+        detail = 'Person 3 published work on portable clinical phenotyping.'
+        answer.blocks.append(AnswerBlock(kind='research', person_ids=['3'],
+                             parts=[AnswerPart(text=detail, evidence_ids=[evidence])]))
+        rendered = render_answer(answer, tools)
+        self.assertNotIn(detail, rendered['reply'])
+        self.assertEqual(rendered['shortlist'][0]['why'], entry.why)
+        # A question about an earlier person has no new result set: retain its answer.
+        tools.result_people = None
+        followup = render_answer(answer, tools)
+        self.assertIn(detail, followup['reply'])
+        self.assertNotIn('shortlist', followup)
+
+    def test_local_paper_info_uses_printed_institutions_and_never_needs_network(self):
+        tools = self._tools()
+        with patch.object(tools, '_openalex_raw', side_effect=AssertionError('Local paper made a network call')):
+            result = tools.get_paper_info('W1001')
+            by_name = {author['name']: author for author in result['authors']}
+            self.assertEqual(by_name['Person 1']['institutions'], [])
+            self.assertEqual(by_name['Person 2']['institutions'], ['Clinical Institute'])
+            self.assertTrue(all(person['affiliation'] == 'Current Institution' for person in result['catalog_people']))
+            abstract = tools.read_abstracts([result['evidence_id']])['abstracts'][result['evidence_id']]
+            self.assertEqual(abstract['abstract'], 'clinical phenotyping electronic records')
+            exact = tools.get_paper_info('Clinical phenotyping with health records')
+            self.assertEqual(exact['title'], result['title'])
+
+    def test_local_title_lookup_does_not_attach_ambiguous_or_short_titles(self):
+        self.assertIsNone(self.library.by_title('Ocean ecosystem biology'))
+        with sqlite3.connect(self.path / 'papers.sqlite') as db:
+            db.execute("INSERT INTO papers SELECT 'W1004',title,abstract,year,venue,doi,doi_key,pmid,cited_by,primary_topic,primary_field,title_key FROM papers WHERE work_id='W1001'")
+        self.assertIsNone(self.library.by_title('Clinical phenotyping with health records'))
+
 
 if __name__ == '__main__': unittest.main()

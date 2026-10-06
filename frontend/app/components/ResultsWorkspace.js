@@ -11,7 +11,6 @@ export default function ResultsWorkspace({
   savedIds,
   isCollaboratorSearch,
   heading = "",
-  candidatesReviewed = 0,
   teamNames = [],
   onOpenProfile,
   onSave,
@@ -21,12 +20,6 @@ export default function ResultsWorkspace({
   selectionDisabled,
 }) {
   const stage = stageForPhase(phase);
-  const context = Object.values(rerankedMap).find((note) => note.source === 'llm');
-  const contextText = context?.context_basis === 'need_profile_team'
-    ? `Using one-time attached context and ${context.team_count} selected people.`
-    : context?.context_basis === 'need_profile' ? 'Using one-time attached context.'
-    : context?.context_basis === 'need_team' ? `Using ${context.team_count} selected ${context.team_count === 1 ? 'person' : 'people'} as context.`
-    : '';
   const resultHeading = heading || (isCollaboratorSearch ? "Potential collaborators" : "Potential mentors");
 
   return (
@@ -51,8 +44,6 @@ export default function ResultsWorkspace({
           <div className="results-header">
             <h2>{resultHeading} <span className="count-badge">{candidates.length}</span></h2>
             {currentQuery && <div className="query-text">For {currentQuery}</div>}
-            {candidatesReviewed > candidates.length && <p className="results-context">Considered {candidatesReviewed} matching researchers</p>}
-            {contextText && <p className="results-context">{contextText}</p>}
             {phase === "explaining" && (
               <div className="stage-progress">
                 <div className="progress-text">{stage.label}</div>

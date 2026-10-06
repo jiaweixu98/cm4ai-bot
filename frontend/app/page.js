@@ -1023,7 +1023,7 @@ export default function Home() {
           setCandidates(shortlist.map((person) => ({
             author_id: String(person.author_id),
             name: person.name,
-            affiliation: person.affiliation || "Affiliation unavailable",
+            affiliation: person.affiliation || "",
             is_bridge2ai_member: Boolean(person.is_bridge2ai_member),
             role: String(person.role || ""),
             latest_year: String(person.latest_year || ""),
@@ -1333,7 +1333,6 @@ export default function Home() {
       savedIds={savedIds}
       isCollaboratorSearch={searchIntent === "collaborator"}
       heading={shortlistKind === "researchers" ? "Researchers" : ""}
-      candidatesReviewed={candidatesReviewed}
       teamNames={selectedContextNames}
       selectionDisabled={isLoading}
       onOpenProfile={openProfile}

@@ -141,6 +141,7 @@ class ResearchTools:
     evidence: dict = field(default_factory=dict)
     result_people: list | None = None
     result_query: str = ""
+    publication_search: dict | None = None
     calls: list = field(default_factory=list)
     max_calls: int = 20
     openalex_requests: int = 0
@@ -282,7 +283,8 @@ class ResearchTools:
         self._remember({k: v for k, v in person.items() if k != "papers"})
         return person
 
-    def _publication_results(self, result, question):
+    def _publication_results(self, result, question, kind):
+        self.publication_search = {**result, 'kind': kind}
         people = []
         for candidate in result.get('people',[]):
             person = self._person(candidate['author_id'], limit=0)
@@ -305,7 +307,8 @@ class ResearchTools:
         from paper_discovery import audience
         from paper_vectors import load_paper_index
         result = audience(self.library,load_paper_index(),identifier,title,abstract,[self.self_id])
-        return self._publication_results(result, 'potential audience for ' + (result.get('source_paper') or {}).get('title',title))
+        return self._publication_results(result, 'potential audience for ' + (result.get('source_paper') or {}).get('title',title),
+                                         'find_paper_audience')
 
     def explore_coauthors(self, author_id: str, specialty: str, institution: str, geography: str,
                           from_year: int | None, to_year: int | None) -> dict:
@@ -317,7 +320,7 @@ class ResearchTools:
         if self.library is None: return {'status':'unavailable','people':[]}
         from paper_discovery import explore
         result = explore(self.library,focal,specialty,institution,geography,from_year,to_year)
-        return self._publication_results(result,'recorded coauthors matching the publication filters')
+        return self._publication_results(result,'recorded coauthors matching the publication filters','explore_coauthors')
 
     def resolve_person(self, name: str) -> dict:
         self._charge("resolve_person")
@@ -400,6 +403,7 @@ class ResearchTools:
             person["topics"] = facets
             person["title_coverage"] = self.topic_coverage(person["author_id"], facets)
         self.candidates_reviewed = len(ranked)
+        self.publication_search = None
         self.result_people, self.result_query = people, question or "; ".join(facets)
         payload = {"status": "ok" if people else "empty", "question": question,
                    "requirements": facets, "scope": scope, "ranking": "rrf-v1", "people": people}
@@ -464,6 +468,7 @@ class ResearchTools:
             })
         self.result_people = people
         self.result_query = "similar to your recent work"
+        self.publication_search = None
         self.candidates_reviewed = len(people)
         return {"status": "ok" if people else "empty", "question": self.result_query, "people": people}
 
@@ -840,13 +845,14 @@ class ResearchTools:
             self.evidence.pop(record["evidence_id"], None)
             record = {**record, **known}
         authors, catalog_people = [], []
+        printed_institutions = self.library.author_institutions(row["work_id"])
         for author_id, position in self.library.authors(row["work_id"])[:12]:
             raw = self.details(str(author_id)) or {}
             if not raw.get("name") or raw["name"] in {"Unknown", "Researcher"}:
                 continue
             affiliation = raw.get("affiliation") if raw.get("affiliation") not in {None, "Unknown"} else ""
             authors.append({"name": raw["name"], "position": position, "orcid": raw.get("orcid") or None,
-                            "institutions": [affiliation] if affiliation else []})
+                            "institutions": printed_institutions.get(author_id, [])})
             person = {"author_id": str(author_id), "name": raw["name"], "affiliation": affiliation or ""}
             self._remember(person)
             catalog_people.append({**person, "link_basis": "listed_author_in_catalog_papers"})
@@ -907,6 +913,7 @@ class ResearchTools:
                              "author_id": aid, "alternates": alternates})
         self.candidates_reviewed = len({str(i["row"]["author_id"]) for items in fused.values() for i in items})
         self.result_people, self.result_query = members, goal.strip()[:200] or "; ".join(cleaned)
+        self.publication_search = None
         payload = {"status": "ok" if members else "empty", "goal": goal[:500], "ranking": "greedy-role-order-v1",
                    "members_in_role_order": members, "coverage": coverage}
         scope_applied = _recommendation_scope(self.place, self.from_year)
