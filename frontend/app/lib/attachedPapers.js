@@ -1,3 +1,5 @@
+import { matrixApiPath } from "./apiPath.mjs";
+
 export const MAX_ATTACHED_FILES = 5;
 export const MAX_FILE_BYTES = 200 * 1024;
 export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
@@ -51,7 +53,7 @@ function toBase64(file) {
 }
 
 async function documentText(file) {
-  const response = await fetch("/api/attachment-text", {
+  const response = await fetch(matrixApiPath("/api/attachment-text"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ filename: file.name, data_base64: await toBase64(file) }),
