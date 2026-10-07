@@ -23,11 +23,12 @@ Default local URL:
 
 For the integrated local workspace, configure:
 
-- `NEXT_PUBLIC_API_URL` to `http://127.0.0.1:8100`
 - `MATRIX_BACKEND_URL` to `http://127.0.0.1:8100`
 - `BRIDGE_REPORT_API_URL` to `http://127.0.0.1:4173/api/report-error`
 
 The backend should be running on `8100`, and the graph app should be running on `4173` for end-to-end integration. Ports `3000`, `8000`, and the `/home/ubuntu` checkouts are production on the shared host.
+
+Browser API requests use the frontend's own origin and Next proxies them to `MATRIX_BACKEND_URL`. The browser does not need a private backend URL or access to port `8100`; the legacy `NEXT_PUBLIC_API_URL` value is no longer used by application requests.
 
 ## Local Development With Backend
 

@@ -10,11 +10,13 @@ export async function POST(request) {
       return Response.json({ error: "user_input is required" }, { status: 400 });
     }
 
+    const token = request.headers.get("x-matrix-user-token");
     const response = await fetch(`${BACKEND}/api/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: request.headers.get("accept") || "application/json",
+        ...(token ? { "x-matrix-user-token": token } : {}),
       },
       body: JSON.stringify(body),
       signal: request.signal,

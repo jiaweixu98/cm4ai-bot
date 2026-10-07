@@ -1,30 +1,36 @@
 """Build the MATRIX data snapshot from a TKG export.
 
-Inputs are the three graph files the bridge app serves, the Cheaha author
-vectors, and the database CSV export, all from the same export:
+Inputs, from one export (the October layout; older exports use 02_data and
+03_cheaha for the table and vector folders):
 
     <export>/01_deployed_data/author_metadata.json
     <export>/01_deployed_data/author_collab_dataset.json
+    <export>/01_deployed_data/tkg_ebd_89k_dataset.json, layout_manifest.json
     <export>/01_deployed_data/tkg_merge_map_*.csv
-    <export>/02_data/papers.csv
-    <export>/02_data/authorships.csv
-    <export>/03_cheaha/author_embeddings.npy
-    <export>/03_cheaha/author_embedding_ids.json
+    <export>/05_database_tables/papers.csv, authorships.csv, collaborator_papers.csv,
+        paper_topics.csv, author_affiliations.csv, paper_affiliations.csv
+    <export>/04_cheaha/author_embeddings.npy, author_embedding_ids.json
+    <export>/04_cheaha/paper_embeddings.npy, paper_embedding_ids.json
 
-Writes the files data_loader.py reads into --out, and optionally the
-per-person paper shards the graph app serves from --graph-papers-out.
+Writes the files data_loader.py reads, papers.sqlite, and the checksummed graph/
+folder into --out (a new directory), and optionally the per-person paper shards
+the graph app serves from --graph-papers-out.
 
     backend/.venv/bin/python backend/scripts/build_tkg_snapshot.py \\
-        --export ~/box_upload_20260927/box_upload_20260927 \\
-        --out data/tkg-20260927 \\
-        --graph-papers-out ../bridge2aikg/work/data/author_papers
+        --export ~/box_upload_20261002/box_upload_20261002 \\
+        --out data/tkg-20261002 --snapshot-version tkg-20261002.3
 
 Check a built snapshot against the graph metadata it will serve beside
 (exits non-zero on any mismatch):
 
     backend/.venv/bin/python backend/scripts/build_tkg_snapshot.py \\
-        --check data/tkg-20260927 \\
-        --graph-metadata ../bridge2aikg/work/data/author_metadata.json
+        --check data/tkg-20261002 \\
+        --graph-metadata data/tkg-20261002/graph/author_metadata.json
+
+paper_faiss_index.bin (and its .json stamp) is not built or checksummed here. It
+is a cache that paper_vectors.py writes on first use from the vectors, and it is
+rebuilt whenever its stamp (row count, size and the vector and id checksums that
+are in this manifest) no longer matches.
 """
 
 import argparse
@@ -39,10 +45,14 @@ from collections import defaultdict
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from paper_library import PAPERS_DB, doi_key, title_key  # noqa: E402
+from tkg_publications import displayable_affiliations  # noqa: E402
+from tkg_release import publication_metadata, write_graph_release  # noqa: E402
+
 RECENT_N = 6
 CITED_N = 6
 GRAPH_PAPER_SHARDS = 256
-HIDDEN_AFFILIATION_SOURCE = "openalex_low_conf"
 
 
 def log(msg: str) -> None:
@@ -65,12 +75,18 @@ def load_merge_map(deployed_dir: str, metadata: list) -> dict:
     return merge
 
 
+def to_int(value):
+    """An integer from CSV text that may be "2020", "2020.0" or empty."""
+    text = str(value or "").strip()
+    return int(float(text)) if text else None
+
+
 def load_papers(path: str) -> dict:
     papers = {}
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             title = (row.get("title") or "").strip()
-            if not title:
+            if not title or row.get("non_publication"):
                 continue
             doi = (row.get("doi") or "").strip()
             if doi and not doi.startswith("http"):
@@ -80,8 +96,8 @@ def load_papers(path: str) -> dict:
             cited = row.get("cited_by_count") or ""
             papers[row["openalex_id"]] = {
                 "title": title,
-                "year": int(float(year)) if year else None,
-                "cited_by": int(float(cited)) if cited else 0,
+                "year": to_int(year),
+                "cited_by": to_int(cited) or 0,
                 "venue": (row.get("venue") or "").strip() or None,
                 "doi": doi or None,
                 "pmid": pmid if pmid.isdigit() else None,
@@ -99,6 +115,26 @@ def load_author_papers(path: str, merge: dict, papers: dict) -> dict:
             aid = node_id(row["author_id"])
             by_author[merge.get(aid, aid)].add(pid)
     return by_author
+
+
+def add_collaborator_papers(tables, merge, papers, author_papers):
+    """Retain collaborators' own selected work, excluding known non-publication IDs."""
+    with open(os.path.join(tables, "papers.csv"), newline="", encoding="utf-8") as f:
+        blocked = {r["openalex_id"] for r in csv.DictReader(f) if r.get("non_publication")}
+    with open(os.path.join(tables, "collaborator_papers.csv"), newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            pid = row["openalex_id"]
+            if pid in blocked or not (row.get("title") or "").strip():
+                continue
+            doi = (row.get("doi") or "").strip()
+            if doi and not doi.startswith("http"): doi = f"https://doi.org/{doi}"
+            papers.setdefault(pid, {"title": row["title"].strip(),
+                "year": to_int(row.get("publication_year")),
+                "cited_by": to_int(row.get("cited_by_count")) or 0, "venue": None,
+                "doi": doi or None, "pmid": row.get("pmid") or None})
+            aid = node_id(row["author_id"])
+            author_papers[merge.get(aid, aid)].add(pid)
+    return blocked
 
 
 def select_papers(paper_ids, papers: dict) -> list:
@@ -127,13 +163,6 @@ def paper_url(p: dict):
     return None
 
 
-def displayable_affiliations(row: dict) -> list:
-    return [
-        a for a in (row.get("affiliations") or [])
-        if a.get("source") != HIDDEN_AFFILIATION_SOURCE and (a.get("institution") or "").strip()
-    ]
-
-
 def build_nodes(people: list, author_papers: dict, papers: dict):
     nodes, graph_papers = {}, {}
     for row in people:
@@ -160,8 +189,9 @@ def build_nodes(people: list, author_papers: dict, papers: dict):
                 "doi": p["doi"],
                 "pmid": p["pmid"],
                 "url": paper_url(p),
+                "work_id": pid,
             }
-            for _, p in selected
+            for pid, p in selected
         ]
         name = (row.get("FullName") or "").strip() or "Unknown"
         features = {
@@ -223,7 +253,95 @@ def build_indexes(emb_dir: str, keep: set, core: set, out_dir: str) -> None:
         with open(os.path.join(out_dir, ids_name), "wb") as f:
             pickle.dump(sel_ids, f)
         log(f"  {name}: {len(sel_ids):,} vectors, dim {mat.shape[1]}")
-        del mat
+        del mat, index
+
+
+def build_paper_db(tables: str, merge: dict, keep: set, out_dir: str) -> dict:
+    """papers.sqlite: every titled paper in the export, its catalog authors, and a
+    title/abstract full-text index, so the research tools answer paper questions
+    from the export before calling OpenAlex."""
+    import sqlite3
+
+    csv.field_size_limit(sys.maxsize)
+    path = os.path.join(out_dir, PAPERS_DB)
+    if os.path.exists(path + ".tmp"):
+        os.remove(path + ".tmp")
+    db = sqlite3.connect(path + ".tmp")
+    db.executescript("""
+        PRAGMA journal_mode = OFF;
+        PRAGMA synchronous = OFF;
+        CREATE TABLE papers (work_id TEXT PRIMARY KEY, title TEXT NOT NULL, abstract TEXT, year INTEGER,
+                             venue TEXT, doi TEXT, doi_key TEXT, pmid TEXT, cited_by INTEGER,
+                             primary_topic TEXT, primary_field TEXT, title_key TEXT);
+        CREATE TABLE paper_authors (work_id TEXT NOT NULL, author_id INTEGER NOT NULL, position INTEGER,
+                                    PRIMARY KEY (work_id, author_id));
+    """)
+
+    def number(value):
+        return int(float(value)) if str(value or "").strip() else None
+
+    def paper_row(row, venue=None):
+        doi = (row.get("doi") or "").strip()
+        pmid = (row.get("pmid") or "").strip()
+        return (row["openalex_id"], row["title"].strip(), (row.get("abstract") or "").strip() or None,
+                number(row.get("publication_year")), venue, f"https://doi.org/{doi_key(doi)}" if doi else None,
+                doi_key(doi) or None, pmid if pmid.isdigit() else None, number(row.get("cited_by_count")) or 0,
+                title_key(row["title"]))
+
+    insert = ("INSERT INTO papers (work_id, title, abstract, year, venue, doi, doi_key, pmid, cited_by, title_key) "
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    blocked = set()
+    with open(os.path.join(tables, "papers.csv"), newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            if r.get("non_publication"):
+                blocked.add(r["openalex_id"])
+            elif (r.get("title") or "").strip():
+                db.execute(insert, paper_row(r, (r.get("venue") or "").strip() or None))
+
+    def add_author(rows):
+        for r in rows:
+            aid = node_id(r["author_id"])
+            aid = merge.get(aid, aid)
+            if aid in keep:
+                yield r.get("paper_id") or r["openalex_id"], aid, number(r.get("author_position"))
+
+    with open(os.path.join(tables, "authorships.csv"), newline="", encoding="utf-8") as f:
+        db.executemany("INSERT OR IGNORE INTO paper_authors VALUES (?, ?, ?)", add_author(csv.DictReader(f)))
+    # Collaborators' papers carry their own text; they fill papers and abstracts papers.csv lacks.
+    with open(os.path.join(tables, "collaborator_papers.csv"), newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            if r["openalex_id"] in blocked or not (r.get("title") or "").strip():
+                continue
+            db.execute(insert.replace("INSERT", "INSERT OR IGNORE"), paper_row(r))
+            if (r.get("abstract") or "").strip():
+                db.execute("UPDATE papers SET abstract = ? WHERE work_id = ? AND abstract IS NULL",
+                           (r["abstract"].strip(), r["openalex_id"]))
+            db.executemany("INSERT OR IGNORE INTO paper_authors VALUES (?, ?, ?)", add_author([r]))
+    with open(os.path.join(tables, "paper_topics.csv"), newline="", encoding="utf-8") as f:
+        db.executemany("UPDATE papers SET primary_topic = ?, primary_field = ? WHERE work_id = ?",
+                       ((r["topic_name"], r["field_name"], r["paper_id"])
+                        for r in csv.DictReader(f) if r.get("is_primary") == "t"))
+    db.executescript("""
+        DELETE FROM paper_authors WHERE work_id NOT IN (SELECT work_id FROM papers);
+        CREATE INDEX papers_doi ON papers (doi_key);
+        CREATE INDEX papers_title ON papers (title_key);
+        CREATE INDEX paper_authors_author ON paper_authors (author_id);
+        CREATE VIRTUAL TABLE papers_fts USING fts5(title, abstract, content='papers', content_rowid='rowid',
+                                                   tokenize='porter unicode61');
+        INSERT INTO papers_fts (papers_fts) VALUES ('rebuild');
+    """)
+    db.commit()
+    stats = {
+        "papers": db.execute("SELECT COUNT(*) FROM papers").fetchone()[0],
+        "with_abstract": db.execute("SELECT COUNT(*) FROM papers WHERE abstract IS NOT NULL").fetchone()[0],
+        "author_links": db.execute("SELECT COUNT(*) FROM paper_authors").fetchone()[0],
+    }
+    db.execute("VACUUM")
+    db.close()
+    os.replace(path + ".tmp", path)
+    log(f"  {PAPERS_DB}: {stats['papers']:,} papers, {stats['with_abstract']:,} with abstracts, "
+        f"{stats['author_links']:,} catalog author links")
+    return stats
 
 
 def write_graph_paper_shards(graph_papers: dict, out_dir: str) -> None:
@@ -264,6 +382,7 @@ SNAPSHOT_FILES = (
     "author_ids.pkl",
     "faiss_core_index.bin",
     "core_ids.pkl",
+    PAPERS_DB,
 )
 
 
@@ -309,6 +428,16 @@ def check_snapshot(snapshot: str, graph_metadata: str) -> int:
     stray = sum(1 for k, v in graph.items() for n in [k, *v] if not isinstance(n, str) or int(n) not in node_ids)
     if stray:
         problems.append(f"{stray} coauthor graph entries point outside the snapshot")
+    del graph
+
+    import sqlite3
+    db = sqlite3.connect(f"file:{os.path.join(snapshot, PAPERS_DB)}?mode=ro", uri=True)
+    if not db.execute("SELECT COUNT(*) FROM papers").fetchone()[0]:
+        problems.append(f"{PAPERS_DB} has no papers")
+    linked = {r[0] for r in db.execute("SELECT DISTINCT author_id FROM paper_authors")}
+    if linked - node_ids:
+        problems.append(f"{len(linked - node_ids)} {PAPERS_DB} authors are not snapshot people")
+    db.close()
 
     manifest_path = os.path.join(snapshot, "snapshot_manifest.json")
     recorded = json.load(open(manifest_path, encoding="utf-8")).get("sha256", {}) if os.path.exists(manifest_path) else {}
@@ -330,6 +459,7 @@ def main() -> None:
     ap.add_argument("--graph-papers-out")
     ap.add_argument("--check", metavar="SNAPSHOT_DIR")
     ap.add_argument("--graph-metadata")
+    ap.add_argument("--snapshot-version", help="Release identifier, e.g. tkg-20261002")
     args = ap.parse_args()
 
     if args.check:
@@ -340,9 +470,12 @@ def main() -> None:
         ap.error("--export and --out are required to build")
 
     deployed = os.path.join(args.export, "01_deployed_data")
-    tables = os.path.join(args.export, "02_data")
-    cheaha = os.path.join(args.export, "03_cheaha")
-    os.makedirs(args.out, exist_ok=True)
+    tables = os.path.join(args.export, "05_database_tables" if os.path.isdir(os.path.join(args.export, "05_database_tables")) else "02_data")
+    cheaha = os.path.join(args.export, "04_cheaha" if os.path.isdir(os.path.join(args.export, "04_cheaha")) else "03_cheaha")
+    if os.path.exists(args.out):
+        ap.error("--out must be a new directory; existing snapshots are never overwritten")
+    os.makedirs(args.out)
+    version = args.snapshot_version or os.path.basename(os.path.abspath(args.out))
 
     log("reading author_metadata.json")
     metadata = json.load(open(os.path.join(deployed, "author_metadata.json"), encoding="utf-8"))
@@ -353,10 +486,10 @@ def main() -> None:
     log("reading papers.csv and authorships.csv")
     papers = load_papers(os.path.join(tables, "papers.csv"))
     author_papers = load_author_papers(os.path.join(tables, "authorships.csv"), merge, papers)
+    blocked = add_collaborator_papers(tables, merge, papers, author_papers)
     log(f"  {len(papers):,} titled papers, {len(author_papers):,} authors with papers")
 
     nodes, graph_papers = build_nodes(people, author_papers, papers)
-    del metadata
 
     # A person with no papers has no vector and nothing to ground a card on.
     keep = {int(k) for k, v in nodes.items() if v["features"]["Top Cited or Most Recent Papers"]}
@@ -380,6 +513,20 @@ def main() -> None:
     log("building FAISS indexes")
     build_indexes(cheaha, keep, core, args.out)
 
+    log(f"building {PAPERS_DB}")
+    paper_db = build_paper_db(tables, merge, keep, args.out)
+    if os.path.basename(tables) == "05_database_tables":
+        paper_db["affiliation_groups"] = publication_metadata(tables, merge, keep,
+                                                            os.path.join(args.out, PAPERS_DB), metadata)
+        for row in metadata:
+            if str(row['id']) in nodes:
+                nodes[str(row['id'])]['features']['affiliations'] = displayable_affiliations(row)
+        dump_json(nodes, os.path.join(args.out, "updated_author_nodes_with_papers.json"))
+        graph_release = write_graph_release(deployed, cheaha, args.out, metadata, merge, version)
+    else:
+        graph_release = None
+    del metadata
+
     if args.graph_papers_out:
         log(f"writing graph paper shards to {args.graph_papers_out}")
         write_graph_paper_shards(graph_papers, args.graph_papers_out)
@@ -387,12 +534,19 @@ def main() -> None:
     with open(os.path.join(args.out, "snapshot_manifest.json"), "w", encoding="utf-8") as f:
         json.dump({
             "export": os.path.abspath(args.export),
+            "snapshot_version": version,
+            "paper_vector_source": os.path.relpath(cheaha, args.out),
+            "paper_vectors_sha256": sha256(os.path.join(cheaha, "paper_embeddings.npy")),
+            "paper_vector_ids_sha256": sha256(os.path.join(cheaha, "paper_embedding_ids.json")),
+            "excluded_non_publication_ids": len(blocked),
+            "graph": graph_release,
             "people": len(nodes),
             "core": len(core),
             "papers_per_person": f"{RECENT_N} most recent + {CITED_N} most cited",
             "merged_away_ids": len(merge),
             "coauthor_people": graph_people,
             "left_out_without_papers": dropped,
+            "paper_db": paper_db,
             "sha256": {name: sha256(os.path.join(args.out, name)) for name in SNAPSHOT_FILES},
         }, f, indent=2)
     log("done")

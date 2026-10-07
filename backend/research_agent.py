@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
+import datetime
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 
 import research_skills
-from research_tools import ResearchTools
+from research_tools import ResearchTools, paper_title
 
 # Share the existing backend index. Serialize its CPU work rather than creating
 # a new encoder/index for every agent, or blocking FastAPI's event loop.
@@ -104,7 +105,7 @@ class AnswerBlock(BaseModel):
 class ShortlistEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     author_id: str
-    why: str = Field(description="One or two sentences on why this person fits the request.")
+    why: str = Field(description="Two or three sentences on why this person fits the request.")
     evidence_ids: list[str] = Field(description="This person's papers supporting the why, strongest first.")
 
 
@@ -135,12 +136,45 @@ search and summarize the literature. Adapt to what the user actually asks.
 - For discovery requests, search immediately. Ask only clarifications that would
   materially change the result. Pass the original question and up to three distinct,
   concrete requirements to one search_people call; it performs deterministic facet fusion.
+- find_similar_work lists people whose papers are close to one person's and who have
+  never written with them. Use it for "who works on things like mine", "similar to my
+  papers", or "has not written with me". Pass "" for the signed-in researcher, or a
+  catalog author_id after resolve_person. Keep the returned order. Each why names their
+  paper and the focal person's paper it is close to, and cites matched_paper_evidence_id.
+  A plain research need ("find mentors for X", "who could help with Y") still uses
+  search_people. If it returns empty with reason no_focal_person, ask which person to use.
+- For promoting a paper or finding its audience, use find_paper_audience with its DOI,
+  work ID or exact title; for a new paper pass its supplied title and abstract instead.
+  Ask for the paper when missing. Keep the deterministic order and cite each person's
+  returned matching publications. These are potential audiences based on related work,
+  not confirmed readers, willing collaborators or contacts. Do not send messages.
+  The tool returns retrieval candidates, not proof of a relevant audience. Return an
+  empty shortlist when their publications do not support the paper's topic; never fill
+  the list just because nearest publications were returned.
+- For exploring a person's coauthors with specialty, institution, geography or a date
+  range, resolve the person then use explore_coauthors. Dates and specialties apply to
+  shared publications, not a person's overall career. Apply the requested filters through
+  the tool even when no matches are expected; do not infer catalog contents from dates.
+  Geography is the institution printed
+  on the shared paper (placed through its ROR id), never where someone lives now; say so
+  when you report it. Accepted geography: a country name or alias (USA, U.S., United States,
+  UK, Great Britain), an ISO code (US, DEU), a US state or Canadian province name (California,
+  Ontario) or "US-CA" style code, a city (San Diego), or a continent (Europe, North America).
+  A bare two-letter code is a country (CA is Canada). Regions like "Bay Area" are not
+  recognised; use the city or state. Institution accepts a name fragment or initials (UCSF).
+  If geography_complete is false or geography_unresolved_people is nonzero, some coauthors
+  could not be placed (no institution or ROR id on the paper): state that, with the count,
+  and do not claim the returned set exhausts all matching coauthors.
 - For a named person: resolve_person, then read_person_evidence for the actual question.
   If ambiguous, ask which person and show the returned affiliations. Never guess.
 - For "the second person" or earlier results, call read_context; it keeps display order.
+- For a supporting publication already shown in a card, read_context returns that
+  specific paper from the catalog. Read its abstract to explain methods or findings.
+  Keep the displayed cards; do not repeat discovery unless a new search is requested.
 - read_abstracts gives abstracts for catalog papers; use it when titles are not enough
   to judge methods, settings or findings.
-- search_literature searches published work in OpenAlex for explicit literature,
+- search_literature searches the catalog's own papers (titles and abstracts) first and
+  OpenAlex only when those do not cover the topic, for explicit literature,
   reading-list, current-evidence or study-finding requests. It is not a replacement
   for local people discovery. For topics, competing
   approaches, reading lists and state of the art. Send only short topic keywords, never
@@ -158,10 +192,14 @@ search and summarize the literature. Adapt to what the user actually asks.
 - analyze_niche measures concept intersections in OpenAlex (counts, trend, top works,
   nearby catalog researchers).
 - Scope defaults to all; use bridge2ai only when asked. Exclude people only on request.
-- signed_in_researcher (when present) is the user: their affiliation and papers. Use it
-  to tailor results (build on their strengths, fill their gaps, skip their own team's
-  expertise, exclude them from recommendations) without restating it back to them.
-  It is never the person assessed unless the user asks about themselves.
+- signed_in_researcher (when present) is the user: their affiliation, topics, and the
+  papers included for this chat. Use it to tailor results (build on their strengths,
+  fill their gaps, skip their own team's expertise, exclude them from recommendations)
+  without restating it back to them. It is never the person assessed unless the user
+  asks about themselves.
+- When recommendation_scope is present, search_people and assemble_team already limit
+  results to that place or to catalog work since from_year. Recommend only people
+  those tools return.
 - When user_publications_on_record is false (guests, students, early-career or
   industry researchers, people whose papers are not indexed), their background is only
   what they say in this conversation or attach. Treat that as fully valid context. If a
@@ -183,8 +221,10 @@ search and summarize the literature. Adapt to what the user actually asks.
 
 # Grounding
 - Use only names, affiliations and papers returned by tools in this turn.
-- Catalog papers are titles unless read_abstracts returned an abstract. Describe
-  findings only from abstracts; from titles, discuss topic only.
+- Catalog papers are titles unless they carry an abstract. Search results include an
+  abstract excerpt for each person's best-matching papers; read_abstracts gives the
+  full text for others. Describe findings only from abstracts; from titles, discuss
+  topic only.
 - A coauthor path is a record of joint work, not an introduction or relationship. Cite
   the evidence_id get_connection returns for statements about the path.
 - No fit percentages. Never claim an action you did not perform.
@@ -198,6 +238,8 @@ search and summarize the literature. Adapt to what the user actually asks.
 - A citation says "this statement comes from that record". Cite statements of what a
   paper or person's work covers and numbers. Your own synthesis, fit reasoning and
   recommendations are uncited: put them in general blocks without person_ids.
+- Search summaries, including no matches and filter coverage, describe tool output.
+  Put them in general blocks without person_ids or publication citations.
 - Answer with what the tools returned. Do not narrate tool failures, service limits,
   what you could not verify, or what a paper is "not evidence" of; leave it unsaid.
 
@@ -210,10 +252,15 @@ answered normally with tools as needed.
 
 # Output
 - shortlist: when you recommend people, list them there, best first, with a specific
-  one-or-two-sentence why and that person's supporting evidence_ids. A convincing why
-  names what their cited papers actually do for this request, what this person brings
+  why of two or three sentences and that person's supporting evidence_ids. A convincing why
+  names what their cited papers actually do for this request (the method, data,
+  population or finding, from the abstract when one is present), what this person brings
   that the others on the list do not, and what the user would go to them for (learn X,
-  collaborate on Y, read Z). Use title_coverage to tell whether their work covers every
+  collaborate on Y, read Z). Describe only the part of a multi-requirement request that
+  the cited work supports; do not imply privacy, federated training or cross-site
+  validation from clinical NLP alone. Read abstracts when an excerpt does not describe
+  the method or setting needed for the explanation. Use title_coverage to tell whether
+  their work covers every
   part of the request or one part. Never write generic phrases like "relevant
   neighbor", "strong fit" or "foundation for". Recommend 5
   people by default (the user may ask for more or fewer); include fewer only when the
@@ -247,6 +294,8 @@ answered normally with tools as needed.
 - Be concise and answer the actual question in the user's language.
 
 # Style rules (strict)
+- Answer in plain research language. Do not narrate tool names, retrieval mechanics
+  or internal ordering; explain the scientific connection instead.
 - Refer to researchers by name or "they". The records contain no gender, so he, she,
   his and her would be guesses.
 - The interface shows the cited papers, so users see what claims rest on; restating
@@ -307,6 +356,17 @@ def _shortlist_cards(answer: ResearchAnswer, tools: ResearchTools) -> list[dict]
         return []
     cards, seen = [], set()
     entries = {entry.author_id: entry for entry in answer.shortlist}
+    if not entries and (tools.publication_search or {}).get('kind') == 'explore_coauthors':
+        # A valid prose answer must not make the navigable, deterministic result
+        # set disappear. Explore has already checked shared papers against the
+        # requested filters. Promote's nearest papers can be unrelated, so an
+        # empty model shortlist there must remain empty.
+        for person in tools.result_people or []:
+            papers = [p for p in person.get('papers',[]) if p.get('evidence_id') and p.get('title')]
+            if papers:
+                entry = ShortlistEntry(author_id=person['author_id'],why=f'Shared publication: {papers[0]["title"]}',
+                                       evidence_ids=[p['evidence_id'] for p in papers[:2]])
+                entries[entry.author_id] = entry
     # The retrieval service owns candidate order. The model writes bounded reasons
     # for those candidates but cannot silently rerank the result set.
     for result_person in tools.result_people or []:
@@ -369,7 +429,14 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
     cards = _shortlist_cards(answer, tools)
     card_names = [c["name"].casefold() for c in cards]
     blocks = []
+    displayed_ids = {card['author_id'] for card in cards}
     for block in answer.blocks:
+        if (block.kind == 'research' and len(set(block.person_ids)) == 1
+                and set(block.person_ids) <= displayed_ids):
+            # New cards already carry each person's explanation and papers.
+            # Keep framing and comparisons here; follow-ups have no new cards
+            # and retain their detailed person-specific answer.
+            continue
         problem = _block_problem(block, tools)
         if problem:
             logger.warning("Withheld %s answer block: %s", block.kind, problem)
@@ -384,6 +451,20 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
         if any(not _TITLE.fullmatch(p.text.strip()) for p in valid_parts):
             block.parts = valid_parts
             blocks.append(block)
+    empty_search = tools.publication_search or {}
+    if (not blocks and not cards and tools.result_people == []
+            and empty_search.get('status') == 'empty' and not empty_search.get('people')):
+        # An empty query has no paper to cite. A model may label its result summary
+        # as a research claim; publish the checked query outcome instead of a
+        # generic error or an unrelated focal-person profile.
+        text = ('No recorded coauthors match the requested publication filters.'
+                if empty_search.get('kind') == 'explore_coauthors'
+                else 'No potential audience members were found for this paper.')
+        unresolved = empty_search.get('geography_unresolved_people', 0)
+        if unresolved:
+            text += f' Institutions on shared papers could not be placed for {unresolved} coauthors.'
+        blocks.append(AnswerBlock(kind='general', person_ids=[],
+                                  parts=[AnswerPart(text=text, evidence_ids=[])]))
     if not blocks and not cards:
         partial = _grounded_partial(tools)
         if partial:
@@ -442,7 +523,7 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
                            or (piece.startswith("**") and "\n- " in piece))
         if text:
             paragraphs.append(text)
-    searched = any(call in {"search_people", "assemble_team"} for call in tools.calls)
+    searched = any(call in {"search_people", "assemble_team", "find_similar_work", "find_paper_audience", "explore_coauthors"} for call in tools.calls)
     result_update = ("replace" if cards or searched
                      else "keep" if answer.result_update == "replace" else answer.result_update)
     payload = {"action": "agent", "reply": "\n\n".join(paragraphs).strip(),
@@ -454,6 +535,10 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
                                    "requirements": [r.strip()[:300] for r in answer.task_requirements if r.strip()][:8]}}
     payload["suggested_followups"] = [q.strip()[:120] for q in answer.suggested_followups if q.strip()][:3]
     if cards:
+        if not payload['reply']:
+            payload['reply'] = ('Potential audience for your paper, based on related publications:'
+                if 'find_paper_audience' in tools.calls else 'Recorded coauthors matching your publication filters:'
+                if 'explore_coauthors' in tools.calls else 'Researchers with matching publication evidence:')
         payload.update(shortlist=cards, shortlist_kind=answer.shortlist_kind,
                        shortlist_title=answer.shortlist_title.strip()[:120] or tools.result_query[:120],
                        candidates_reviewed=tools.candidates_reviewed)
@@ -474,6 +559,9 @@ def _status_label(name: str, args: dict, tools: ResearchTools) -> str:
     roles = [_clip(r, 26) for r in (args.get("roles") or [])[:4]]
     labels = {
         "search_people": f"Searching researchers: {_clip(args.get('question', ''), 70)}",
+        "find_similar_work": "Finding similar work",
+        "find_paper_audience": "Finding a paper’s audience",
+        "explore_coauthors": "Filtering recorded coauthors",
         "resolve_person": f"Looking up {_clip(args.get('name', ''), 60)}",
         "read_person_evidence": f"Reading {person}'s publications" if person else "Reading publications",
         "read_context": "Reviewing the current conversation",
@@ -504,7 +592,82 @@ def _fallback_answer(message: str) -> ResearchAnswer:
                           result_update="keep", task_goal="", task_requirements=[], suggested_followups=[])
 
 
-def _build_input(req, profile: dict | None = None, selected: list | None = None) -> list[dict]:
+def _paper_year(value) -> int:
+    match = re.search(r"\d{4}", str(value or ""))
+    return int(match.group()) if match else 0
+
+
+def _catalog_rows(raw: dict, titles: list[dict]) -> list[dict]:
+    rows = []
+    seen = set()
+    for item in titles or []:
+        title = str(item.get("title") or "").strip()
+        key = title.casefold()
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        year = item.get("year")
+        rows.append({"title": title, "year": str(year) if year else ""})
+    for paper in (raw or {}).get("papers") or []:
+        title = paper_title(paper)
+        key = title.casefold()
+        if not title or title == "Untitled" or key in seen:
+            continue
+        seen.add(key)
+        year = ""
+        if isinstance(paper, dict):
+            year = str(paper.get("PubYear") or paper.get("year") or "")
+        rows.append({"title": title, "year": year})
+    return rows
+
+
+def _signed_in_profile(person: dict, raw: dict, choices, titles: list[dict]) -> dict:
+    """The profile the user chose to send: topics and MeSH, a few papers, or a picked set."""
+    profile = {
+        "author_id": person["author_id"],
+        "name": person["name"],
+        "affiliation": person.get("affiliation", ""),
+    }
+    scope = getattr(choices, "paper_scope", None) or "profile"
+    if scope != "papers":
+        topics = [str(term).strip() for term in (person.get("research_topics") or []) if str(term).strip()]
+        mesh = [str(term).strip() for term in (person.get("mesh") or []) if str(term).strip()]
+        if topics:
+            profile["topics"] = topics[:6]
+        if mesh:
+            profile["mesh"] = mesh[:8]
+    evidence = {str(paper.get("title") or "").casefold(): paper for paper in person.get("papers") or []}
+    rows = _catalog_rows(raw, titles)
+    if scope == "chosen":
+        wanted = []
+        for value in getattr(choices, "paper_titles", None) or []:
+            title = " ".join(str(value).split())[:300]
+            if title and title.casefold() not in {item.casefold() for item in wanted}:
+                wanted.append(title)
+        by_title = {row["title"].casefold(): row for row in rows}
+        picked = [by_title.get(title.casefold()) or {"title": title, "year": ""} for title in wanted]
+    elif scope == "papers":
+        picked = rows[:8]
+    else:
+        floor = datetime.date.today().year - 5
+        recent = [row for row in rows if _paper_year(row.get("year")) >= floor]
+        picked = (recent or rows)[:8]
+    papers = []
+    for row in picked[:8]:
+        known = evidence.get(row["title"].casefold()) or {}
+        item = {"title": row["title"]}
+        year = str(known.get("year") or row.get("year") or "")
+        if _paper_year(year):
+            item["year"] = str(_paper_year(year))
+        if known.get("evidence_id"):
+            item["evidence_id"] = known["evidence_id"]
+        papers.append(item)
+    profile["papers"] = papers
+    return profile
+
+
+def _build_input(req, profile: dict | None = None, selected: list | None = None,
+                 recommendation_scope: dict | None = None) -> list[dict]:
     # Compatibility bridge: replay bounded visible messages, but never treat
     # browser-supplied result text as evidence. Durable server runs follow later.
     history = [{"role": m.role, "content": m.content[:4000]}
@@ -520,9 +683,11 @@ def _build_input(req, profile: dict | None = None, selected: list | None = None)
                "has_selected_people": bool(req.context_person_ids),
                "displayed_shortlist": [{"author_id": str(p.get("author_id", "")), "name": str(p.get("name", ""))[:120]}
                                        for p in req.search_results[:8]]}
-    current["user_publications_on_record"] = bool(profile and profile.get("papers"))
+    current["user_publications_on_record"] = bool(profile and (profile.get("papers") or profile.get("topics")))
     if profile:
         current["signed_in_researcher"] = profile
+    if recommendation_scope:
+        current["recommendation_scope"] = recommendation_scope
     if selected:
         current["people_added_to_chat"] = selected
     history.append({"role": "user", "content": json.dumps(current, ensure_ascii=False)})
@@ -532,7 +697,16 @@ def _build_input(req, profile: dict | None = None, selected: list | None = None)
 async def stream_research_turn(req, services: ResearchTools, model: str) -> AsyncIterator[tuple[str, object]]:
     """Yield ("status", label) events, then exactly one ("result", payload)."""
     async def call(fn, *args, executor=_research_executor):
-        return await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+        traced = getattr(fn, "__self__", None) is services and not fn.__name__.startswith("_")
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+        except Exception as exc:
+            if traced:
+                services.record_decision(fn, args, error=type(exc).__name__)
+            raise
+        if traced:
+            services.record_decision(fn, args, result)
+        return result
 
     @function_tool(failure_error_function=_tool_error)
     async def resolve_person(name: str) -> dict:
@@ -551,6 +725,22 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
         return await call(services.search_people, question, requirements, scope, exclude_ids)
 
     @function_tool(failure_error_function=_tool_error)
+    async def find_similar_work(author_id: str) -> dict:
+        """People with similar papers who have not written with this person. Pass "" for the signed-in researcher."""
+        return await call(services.find_similar_work, author_id)
+
+    @function_tool(failure_error_function=_tool_error)
+    async def find_paper_audience(identifier: str, title: str, abstract: str) -> dict:
+        """Potential audience from matching papers. Use an identifier, or supplied title and abstract. Never invent the source paper."""
+        return await call(services.find_paper_audience, identifier, title, abstract)
+
+    @function_tool(failure_error_function=_tool_error)
+    async def explore_coauthors(author_id: str, specialty: str, institution: str, geography: str,
+                                from_year: int | None, to_year: int | None) -> dict:
+        """Filter a person's recorded coauthors by their shared papers: specialty, printed institution (name fragment or initials), geography of the institution printed on the shared paper (country/alias/ISO code, US state or Canadian province, city, continent; not current residence) and inclusive years. Empty author_id uses the signed-in person. Report geography_unresolved_people when nonzero."""
+        return await call(services.explore_coauthors, author_id, specialty, institution, geography, from_year, to_year, executor=_network_executor)
+
+    @function_tool(failure_error_function=_tool_error)
     async def get_connection(from_author_id: str, to_author_id: str) -> dict:
         """Find the shortest recorded coauthorship path between two catalog people."""
         return await call(services.get_connection, from_author_id, to_author_id)
@@ -559,16 +749,17 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
     async def read_context() -> dict:
         """Read profile, selected people and the displayed shortlist (in order) from catalog records."""
         return await call(services.read_context, req.aid, req.context_person_ids,
-                          [str(p.get("author_id", "")) for p in req.search_results[:8]])
+                          [str(p.get("author_id", "")) for p in req.search_results[:8]],
+                          req.search_results[:8])
 
     @function_tool(failure_error_function=_tool_error)
     async def read_abstracts(evidence_ids: list[str]) -> dict:
-        """Fetch abstracts (via OpenAlex) for up to 5 catalog papers already returned as evidence."""
+        """Fetch abstracts for up to 5 catalog papers already returned as evidence."""
         return await call(services.read_abstracts, evidence_ids, executor=_network_executor)
 
     @function_tool(failure_error_function=_tool_error)
     async def search_literature(query: str, from_year: int | None) -> dict:
-        """Search published work in OpenAlex with short topic keywords. Returns titles, authors, abstracts."""
+        """Search published work with short topic keywords. Returns titles, authors, abstracts."""
         request_text = req.user_input.casefold()
         allowed = ("literature", "paper", "study", "studies", "evidence", "finding", "result",
                    "recent", "current", "state of the art", "reading list", "approach", "niche", "trend")
@@ -598,25 +789,56 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
         return await call(services.analyze_niche, concepts, from_year, executor=_network_executor)
 
     profile = None
+    choices = getattr(req, "context_choices", None)
     if req.aid not in {"", "unlinked", "0"}:
         person = await call(services._person, req.aid, req.user_input[:2000], 8)
         if person:
             services.self_id = person["author_id"]
-            profile = {"author_id": person["author_id"], "name": person["name"],
-                       "affiliation": person.get("affiliation", ""),
-                       "papers": [{"evidence_id": p["evidence_id"], "title": p["title"], "year": p.get("year", "")}
-                                  for p in person["papers"]]}
+            raw = await call(services.details, person["author_id"]) or {}
+            titles = []
+            if services.library is not None and str(person["author_id"]).isdigit():
+                titles = await call(services.library.titles, int(person["author_id"]), 24)
+            if choices:
+                profile = _signed_in_profile(person, raw if isinstance(raw, dict) else {}, choices, titles)
+            else:
+                profile = {"author_id": person["author_id"], "name": person["name"],
+                           "affiliation": person.get("affiliation", ""),
+                           "papers": [{"evidence_id": p["evidence_id"], "title": p["title"], "year": p.get("year", "")}
+                                      for p in person["papers"]]}
+    place = ""
+    from_year = None
+    if choices and getattr(choices, "same_place", False):
+        place = str((profile or {}).get("affiliation") or "").strip()
+        if place.casefold() in {"unknown", "affiliation unavailable"}:
+            place = ""
+    recent_years = int(getattr(choices, "recent_years", 0) or 0) if choices else 0
+    if not recent_years and choices and getattr(choices, "recent_work", False):
+        recent_years = 5
+    if recent_years in {5, 10}:
+        from_year = datetime.date.today().year - recent_years
+    services.place = place
+    services.from_year = from_year
+    search_limit = getattr(services, "search_limit", None)
+    if isinstance(search_limit, dict) and (place or from_year):
+        search_limit["value"] = 40
+    recommendation_scope = {}
+    if place:
+        recommendation_scope["same_place"] = place
+    if from_year:
+        recommendation_scope["from_year"] = from_year
     selected = []
     for pid in list(dict.fromkeys(str(p) for p in req.context_person_ids))[:8]:
         if pid != services.self_id and (person := await call(services._person, pid, req.user_input[:2000], 3)):
             selected.append({"author_id": person["author_id"], "name": person["name"],
                              "affiliation": person.get("affiliation", ""),
                              "papers": [{"evidence_id": p["evidence_id"], "title": p["title"]} for p in person["papers"]]})
-    tools = [resolve_person, read_person_evidence, search_people, assemble_team, read_context]
+    tools = [resolve_person, read_person_evidence, search_people, find_similar_work, find_paper_audience, explore_coauthors, assemble_team, read_context]
     if services.path is not None:
         tools.append(get_connection)
+    if services.openalex or services.library is not None:
+        tools += [read_abstracts, search_literature, get_paper_info]
     if services.openalex:
-        tools += [read_abstracts, search_literature, get_author_info, get_paper_info, analyze_niche]
+        tools += [get_author_info, analyze_niche]
 
     effort = os.environ.get("MATRIX_AGENT_REASONING", "medium").strip().lower()
     reasoning = Reasoning(effort=effort) if effort in REASONING_EFFORTS else None
@@ -646,7 +868,7 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
                           tools=tools, output_type=ResearchAnswer,
                           model_settings=ModelSettings(parallel_tool_calls=True, reasoning=reasoning,
                                                        max_tokens=8000, store=False))
-            result = Runner.run_streamed(agent, _build_input(req, profile, selected), max_turns=MAX_TURNS,
+            result = Runner.run_streamed(agent, _build_input(req, profile, selected, recommendation_scope or None), max_turns=MAX_TURNS,
                                          error_handlers=handlers,
                                          run_config=RunConfig(tracing_disabled=True, trace_include_sensitive_data=False))
             pending = 0

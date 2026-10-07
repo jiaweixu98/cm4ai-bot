@@ -1,8 +1,7 @@
-// Same-origin by default so the browser talks to Next on :3100, which proxies
-// chat/rerank to the already-loaded SPECTER. Set NEXT_PUBLIC_API_URL only when
-// you really want a cross-origin backend.
-const rawApiBase = process.env.NEXT_PUBLIC_API_URL;
-const API_BASE = (rawApiBase !== undefined ? rawApiBase : "").replace(/\/$/, "");
+import { matrixApiPath } from "./apiPath.mjs";
+
+// Next proxies application APIs to MATRIX_BACKEND_URL. Browsers never need the
+// private backend address, including for people lookup and error reports.
 
 function withMatrixAuth(headers = {}, authToken) {
   if (!authToken) return headers;
@@ -10,8 +9,16 @@ function withMatrixAuth(headers = {}, authToken) {
 }
 
 export async function fetchAuthor(aid) {
-  const res = await fetch(`${API_BASE}/api/author/${aid}`);
+  const res = await fetch(matrixApiPath(`/api/author/${encodeURIComponent(aid)}`));
   if (!res.ok) throw new Error("Author not found");
+  return res.json();
+}
+
+export async function fetchAuthorDetails(aid, signal) {
+  // Same-origin so Next can proxy to the backend. A cross-origin API base is not
+  // reachable from every browser that can open this app.
+  const res = await fetch(matrixApiPath(`/api/author/${encodeURIComponent(aid)}/details`), { signal });
+  if (!res.ok) throw new Error("Author details unavailable");
   return res.json();
 }
 
@@ -19,14 +26,14 @@ export async function searchPeopleByName(name, signal) {
   const query = String(name || "").trim();
   if (query.length < 2) return [];
   const params = new URLSearchParams({ name: query, limit: "8" });
-  const res = await fetch(`${API_BASE}/api/people?${params.toString()}`, { signal });
+  const res = await fetch(matrixApiPath(`/api/people?${params.toString()}`), { signal });
   if (!res.ok) throw new Error("People search is unavailable");
   const payload = await res.json();
   return Array.isArray(payload?.people) ? payload.people : [];
 }
 
 export async function generateQuery({ aid, userInput, currentQuery, pastQueries, priorInputs }) {
-  const res = await fetch(`${API_BASE}/api/generate-query`, {
+  const res = await fetch(matrixApiPath("/api/generate-query"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -42,7 +49,7 @@ export async function generateQuery({ aid, userInput, currentQuery, pastQueries,
 }
 
 export async function checkConfirmation({ userText, currentQuery, priorInputs }) {
-  const res = await fetch(`${API_BASE}/api/check-confirmation`, {
+  const res = await fetch(matrixApiPath("/api/check-confirmation"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -63,12 +70,13 @@ export async function searchCandidates({
   outsideNetwork = false,
   teamMemberIds = [],
   researchPlan = null,
+  authToken,
   signal,
 }) {
   // Same-origin Next route talks to the already-loaded MATRIX backend.
-  const res = await fetch("/api/search-people", {
+  const res = await fetch(matrixApiPath("/api/search-people"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
     signal,
     body: JSON.stringify({
       aid: aid || "unlinked",
@@ -94,10 +102,10 @@ export async function explainCandidates({
   candidates,
   signal,
 }) {
-  const res = await fetch("/api/why-lines", {
+  const res = await fetch(matrixApiPath("/api/why-lines"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(22000)]),
+    signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(37000)]),
     body: JSON.stringify({
       aid,
       team_member_ids: teamMemberIds,
@@ -113,7 +121,7 @@ export async function explainCandidates({
 }
 
 export function rerankCandidates({ aid, query, candidates }, onBatch, onComplete, onError, signal) {
-  const url = `${API_BASE}/api/rerank`;
+  const url = matrixApiPath("/api/rerank");
   fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -190,17 +198,24 @@ export async function chatMessage({
   intent,
   pendingResearchPlan = null,
   contextMode = null,
+  contextChoices = null,
   workingContext = {},
+  chatSessionId = null,
+  authToken,
   onStatus,
   signal,
 }) {
-  const res = await fetch("/api/chat-lite", {
+  const res = await fetch(matrixApiPath("/api/chat-lite"), {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream, application/json" },
+    headers: withMatrixAuth(
+      { "Content-Type": "application/json", Accept: "text/event-stream, application/json" },
+      authToken,
+    ),
     signal,
     body: JSON.stringify({
       aid: aid || "unlinked",
       user_input: userInput,
+      chat_session_id: chatSessionId || null,
       context_person_ids: contextPersonIds.map(String),
       attached_context: Array.isArray(attachedContext)
         ? attachedContext.map((text) => String(text || "").trim().slice(0, 6000)).filter(Boolean).slice(0, 5)
@@ -213,6 +228,7 @@ export async function chatMessage({
       search_phase: searchPhase || null,
       intent: intent || null,
       context_mode: contextMode || null,
+      context_choices: contextChoices && typeof contextChoices === "object" ? contextChoices : null,
       working_context: workingContext && typeof workingContext === "object" ? workingContext : {},
       pending_research_plan: pendingResearchPlan && typeof pendingResearchPlan === "object"
         ? pendingResearchPlan
@@ -262,9 +278,10 @@ async function readChatStream(body, onStatus) {
 }
 
 export async function listChatSessions({ aid, intent, authToken }) {
-  const params = new URLSearchParams({ aid: String(aid || "unlinked") });
+  const params = new URLSearchParams();
+  if (aid !== undefined && aid !== null && String(aid).trim()) params.set("aid", String(aid));
   if (intent) params.set("intent", String(intent));
-  const res = await fetch(`${API_BASE}/api/chat-sessions?${params.toString()}`, {
+  const res = await fetch(matrixApiPath(`/api/chat-sessions?${params.toString()}`), {
     headers: withMatrixAuth({}, authToken),
   });
   if (!res.ok) throw new Error("Session list request failed");
@@ -272,7 +289,7 @@ export async function listChatSessions({ aid, intent, authToken }) {
 }
 
 export async function getChatSession({ sessionId, authToken }) {
-  const res = await fetch(`${API_BASE}/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
+  const res = await fetch(matrixApiPath(`/api/chat-sessions/${encodeURIComponent(sessionId)}`), {
     headers: withMatrixAuth({}, authToken),
   });
   if (!res.ok) throw new Error("Session fetch failed");
@@ -280,8 +297,9 @@ export async function getChatSession({ sessionId, authToken }) {
 }
 
 export async function createChatSession({ aid, focalAuthorName, messages, state, authToken }) {
-  const res = await fetch(`${API_BASE}/api/chat-sessions`, {
+  const res = await fetch(matrixApiPath("/api/chat-sessions"), {
     method: "POST",
+    signal: AbortSignal.timeout(8000),
     headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
     body: JSON.stringify({
       aid,
@@ -295,23 +313,27 @@ export async function createChatSession({ aid, focalAuthorName, messages, state,
 }
 
 export async function saveChatSession({ sessionId, aid, focalAuthorName, messages, state, authToken }) {
-  const res = await fetch(`${API_BASE}/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
+  const body = JSON.stringify({
+    aid,
+    focal_author_name: focalAuthorName || "",
+    messages: messages || [],
+    state: state || {},
+  });
+  const res = await fetch(matrixApiPath(`/api/chat-sessions/${encodeURIComponent(sessionId)}`), {
     method: "PUT",
     signal: AbortSignal.timeout(8000),
+    // Small saves can finish after an iframe closes. Larger histories are flushed
+    // before in-app navigation rather than exceeding fetch's keepalive budget.
+    keepalive: new TextEncoder().encode(body).byteLength <= 60_000,
     headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
-    body: JSON.stringify({
-      aid,
-      focal_author_name: focalAuthorName || "",
-      messages: messages || [],
-      state: state || {},
-    }),
+    body,
   });
   if (!res.ok) throw new Error("Session save failed");
   return res.json();
 }
 
 export async function fetchGraphPath(aid, collaboratorId) {
-  const res = await fetch(`${API_BASE}/api/graph-path/${aid}/${collaboratorId}`);
+  const res = await fetch(matrixApiPath(`/api/graph-path/${aid}/${collaboratorId}`));
   if (!res.ok) throw new Error("Graph path fetch failed");
   return res.json();
 }
@@ -335,23 +357,12 @@ export async function submitErrorReport({
     user_agent: userAgent || null,
   };
 
-  // Primary: backend API (same base as chat/search/rerank)
-  const primaryRes = await fetch(`${API_BASE}/api/report-error`, {
+  // Next forwards this request to the configured Graph report endpoint.
+  const response = await fetch(matrixApiPath("/api/report-error"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (primaryRes.ok) return primaryRes.json();
-
-  // Fallback: Next.js local API route in the frontend app
-  const fallbackRes = await fetch(`/api/report-error`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (fallbackRes.ok) return fallbackRes.json();
-
-  throw new Error(
-    `Error report submission failed (backend ${primaryRes.status}, fallback ${fallbackRes.status})`
-  );
+  if (response.ok) return response.json();
+  throw new Error(`Error report submission failed (${response.status})`);
 }

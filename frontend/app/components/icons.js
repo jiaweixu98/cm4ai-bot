@@ -14,6 +14,7 @@ import {
   PaperPlaneTilt,
   Paperclip,
   Plus,
+  SidebarSimple,
   Sparkle,
   Square,
   Stethoscope,
@@ -37,6 +38,10 @@ export function IconPlus() {
 
 export function IconHistory() {
   return <ClockCounterClockwise {...iconProps} />;
+}
+
+export function IconSidebar() {
+  return <SidebarSimple {...iconProps} size={22} />;
 }
 
 export function IconCopy() {

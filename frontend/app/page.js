@@ -25,10 +25,10 @@ import {
   RESULT_LIMIT,
   followUpPrompts,
   normalizeMessage,
-  relativeTime,
 } from "./lib/matrixUi";
 import { MAX_ATTACHED_FILES, readAttachedFiles } from "./lib/attachedPapers";
 import FocalAuthorBar from "./components/FocalAuthorBar";
+import HistorySidebar from "./components/HistorySidebar";
 import ChatPane from "./components/ChatPane";
 import ResultsWorkspace from "./components/ResultsWorkspace";
 import ConfirmPopover from "./components/ConfirmPopover";
@@ -44,6 +44,21 @@ const PHASE = {
 };
 
 const SESSION_TOKEN_STORAGE_KEY = "matrix_user_token";
+const RAIL_STORAGE_KEY = "matrix_history_rail";
+
+function sessionFingerprint(messages, state) {
+  const source = JSON.stringify({ messages: Array.isArray(messages) ? messages : [], state: state || {} });
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function hasUserMessage(messages) {
+  return (Array.isArray(messages) ? messages : []).some((message) => message?.role === "user" && String(message?.content || "").trim());
+}
 
 export default function Home() {
   const [aid, setAid] = useState(UNLINKED_AID);
@@ -62,7 +77,14 @@ export default function Home() {
   const [graphHandoffPersonId, setGraphHandoffPersonId] = useState(null);
   const [attachedPapers, setAttachedPapers] = useState([]);
   const [profileNotice, setProfileNotice] = useState("");
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [railOpen, setRailOpen] = useState(true);
+  const [narrowLayout, setNarrowLayout] = useState(false);
+  const [contextChoices, setContextChoices] = useState({
+    samePlace: false,
+    recentYears: 0,
+    paperScope: "profile",
+    paperTitles: [],
+  });
   const [queuedFollowUp, setQueuedFollowUp] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState(null);
 
@@ -95,7 +117,13 @@ export default function Home() {
   const sessionHydratingRef = useRef(false);
   const sessionBootstrappedRef = useRef(false);
   const sessionSaveTimerRef = useRef(null);
+  const sessionCreateRef = useRef(null);
+  const sessionWriteQueueRef = useRef(Promise.resolve());
+  const sessionSnapshotRef = useRef(null);
+  const lastSaveMessagesRef = useRef(null);
   const currentSessionIdRef = useRef(null);
+  const savedFingerprintRef = useRef("");
+  const baselineSessionRef = useRef(null);
   const chatAbortRef = useRef(null);
   const searchAbortRef = useRef(null);
   const rerankAbortRef = useRef(null);
@@ -112,7 +140,38 @@ export default function Home() {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
 
+  const persistRail = useCallback((open) => {
+    setRailOpen(open);
+    try {
+      sessionStorage.setItem(RAIL_STORAGE_KEY, open ? "open" : "closed");
+    } catch {
+      // Session storage can be unavailable in a private frame.
+    }
+  }, []);
+
+  useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 720px)");
+    const apply = () => {
+      setNarrowLayout(narrow.matches);
+    };
+    apply();
+    let stored = "";
+    try {
+      stored = sessionStorage.getItem(RAIL_STORAGE_KEY) || "";
+    } catch {
+      stored = "";
+    }
+    if (stored === "open" || stored === "closed") setRailOpen(stored === "open");
+    else setRailOpen(!narrow.matches);
+    narrow.addEventListener("change", apply);
+    return () => {
+      narrow.removeEventListener("change", apply);
+    };
+  }, []);
+
   const resetWorkflowState = useCallback(() => {
+    savedFingerprintRef.current = "";
+    baselineSessionRef.current = null;
     setContextPersonIds([]);
     setAttachedPapers([]);
     setGraphHandoffPersonId(null);
@@ -163,15 +222,19 @@ export default function Home() {
       workingContext,
       shortlistKind,
       candidatesReviewed,
+      contextChoices,
     }),
-    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed]
+    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed, contextChoices]
   );
+
+  sessionSnapshotRef.current = { aid, focalName, matrixUserToken, messages, state: buildSessionStateSnapshot() };
 
   const applySessionSnapshot = useCallback((session) => {
     const snapshot = session?.state || {};
     const restoredMessages = (Array.isArray(session?.messages) ? session.messages : []).map(normalizeMessage);
 
     sessionHydratingRef.current = true;
+    baselineSessionRef.current = session?.id || null;
     currentSessionIdRef.current = session?.id || null;
     setCurrentSessionId(session?.id || null);
     const restoredContextIds = Array.isArray(snapshot.contextPersonIds)
@@ -221,6 +284,13 @@ export default function Home() {
     setExpandedCards(
       snapshot.expandedCards && typeof snapshot.expandedCards === "object" ? snapshot.expandedCards : {}
     );
+    const restoredChoices = snapshot.contextChoices && typeof snapshot.contextChoices === "object" ? snapshot.contextChoices : {};
+    setContextChoices({
+      samePlace: false,
+      recentYears: 0,
+      paperScope: ["profile", "papers", "chosen"].includes(restoredChoices.paperScope) ? restoredChoices.paperScope : "profile",
+      paperTitles: Array.isArray(restoredChoices.paperTitles) ? restoredChoices.paperTitles.map(String).slice(0, 8) : [],
+    });
     if (snapshot.searchIntent === "mentor" || snapshot.searchIntent === "collaborator") {
       setSearchIntent(snapshot.searchIntent);
     }
@@ -256,7 +326,10 @@ export default function Home() {
       const seekerNameParam = String(params.get("seeker_name") || "").trim();
       const storedToken =
         typeof window !== "undefined" ? window.sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || "" : "";
-      const resolvedToken = tokenFromUrl || storedToken;
+      const authHandoff = params.get("auth_handoff") === "1";
+      params.delete("auth_handoff");
+      const resolvedToken = tokenFromUrl || (authHandoff ? "" : storedToken);
+      if (authHandoff && !tokenFromUrl) window.sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
       const isEmbedded = params.get("embedded") === "1" || inBridgeIframe();
 
       if (tokenFromUrl && typeof window !== "undefined") {
@@ -265,7 +338,7 @@ export default function Home() {
         const nextSearch = params.toString();
         const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
         window.history.replaceState({}, "", nextUrl);
-      } else if (freshConversation || graphHandoff) {
+      } else if (freshConversation || graphHandoff || authHandoff) {
         const nextSearch = params.toString();
         const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
         window.history.replaceState({}, "", nextUrl);
@@ -274,6 +347,7 @@ export default function Home() {
       setIntent(nextIntent);
       setSearchIntent(nextIntent);
       setAid(aidParam);
+      setAuthorInfo(null);
       setSeekerName(seekerNameParam);
       setEmbedded(isEmbedded);
       setMatrixUserToken(resolvedToken);
@@ -337,18 +411,10 @@ export default function Home() {
       }
 
       try {
-        const [mentorPayload, collaboratorPayload] = await Promise.all([
-          listChatSessions({ aid: aidParam, intent: "mentor", authToken: resolvedToken }),
-          listChatSessions({ aid: aidParam, intent: "collaborator", authToken: resolvedToken }),
-        ]);
+        const historyPayload = await listChatSessions({ authToken: resolvedToken });
         if (cancelled) return;
-        const tagSessions = (items, fallbackIntent) => (Array.isArray(items) ? items : []).map((item) => (
-          item?.intent === "mentor" || item?.intent === "collaborator" ? item : { ...item, intent: fallbackIntent }
-        ));
-        const mergedSessions = [
-          ...tagSessions(mentorPayload.sessions, "mentor"),
-          ...tagSessions(collaboratorPayload.sessions, "collaborator"),
-        ].sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
+        const mergedSessions = (Array.isArray(historyPayload.sessions) ? historyPayload.sessions : [])
+          .sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
         setSessions(mergedSessions);
         let effectiveIntent = nextIntent;
         const requestedSessionId = graphHandoff ? "" : params.get("session") || "";
@@ -424,7 +490,7 @@ export default function Home() {
       }
     };
     window.addEventListener("message", onMessage);
-    postToBridge({ type: BRIDGE_MSG.REQUEST_SAVED });
+    postToBridge({ type: BRIDGE_MSG.REQUEST_SAVED, supportsSaveBeforeClose: true });
     return () => window.removeEventListener("message", onMessage);
   }, [inIframe]);
 
@@ -461,52 +527,72 @@ export default function Home() {
     ]);
   }, []);
 
-  const ensureCurrentSession = useCallback(async () => {
-    if (!matrixUserToken) return null;
+  const ensureCurrentSession = useCallback(async (initialMessages) => {
+    const snapshot = sessionSnapshotRef.current;
+    if (!snapshot.matrixUserToken) return null;
     if (currentSessionIdRef.current) return currentSessionIdRef.current;
-
-    const sessionPayload = await createChatSession({
-      aid,
-      focalAuthorName: focalName || "",
-      messages: Array.isArray(messages) ? messages : [],
-      state: buildSessionStateSnapshot(),
-      authToken: matrixUserToken,
-    });
-    const created = sessionPayload.session;
-    currentSessionIdRef.current = created.id;
-    setCurrentSessionId(created.id);
-    upsertSessionSummary(created);
-    return created.id;
-  }, [aid, focalName, buildSessionStateSnapshot, matrixUserToken, messages, upsertSessionSummary]);
-
-  const persistSessionNow = useCallback(async () => {
-    if (!matrixUserToken) return null;
-    try {
-      const sessionId = await ensureCurrentSession();
-      if (!sessionId) return null;
-      const payload = await saveChatSession({
-        sessionId,
-        aid,
-        focalAuthorName: focalName || "",
-        messages,
-        state: buildSessionStateSnapshot(),
-        authToken: matrixUserToken,
-      });
-      upsertSessionSummary(payload.session);
-      return sessionId;
-    } catch (error) {
-      console.error("Failed to persist chat session:", error);
-      return currentSessionIdRef.current;
+    if (!sessionCreateRef.current) {
+      const initial = initialMessages || snapshot.messages;
+      sessionCreateRef.current = createChatSession({
+        aid: snapshot.aid,
+        focalAuthorName: snapshot.focalName || "",
+        messages: initial,
+        state: snapshot.state,
+        authToken: snapshot.matrixUserToken,
+      }).then(({ session }) => {
+        savedFingerprintRef.current = sessionFingerprint(initial, snapshot.state);
+        currentSessionIdRef.current = session.id;
+        setCurrentSessionId(session.id);
+        upsertSessionSummary(session);
+        return session.id;
+      }).finally(() => { sessionCreateRef.current = null; });
     }
-  }, [
-    aid,
-    focalName,
-    buildSessionStateSnapshot,
-    ensureCurrentSession,
-    matrixUserToken,
-    messages,
-    upsertSessionSummary,
-  ]);
+    return sessionCreateRef.current;
+  }, [upsertSessionSummary]);
+
+  const persistSessionNow = useCallback(({ flush = false } = {}) => {
+    const snapshot = sessionSnapshotRef.current;
+    if (!snapshot.matrixUserToken || !hasUserMessage(snapshot.messages)) return Promise.resolve(currentSessionIdRef.current);
+    const targetId = currentSessionIdRef.current;
+    const fingerprint = sessionFingerprint(snapshot.messages, snapshot.state);
+    const write = async () => {
+      if (targetId === currentSessionIdRef.current && targetId && fingerprint === savedFingerprintRef.current) return targetId;
+      setSessionStatus((prev) => ({ ...prev, saving: true, error: "" }));
+      const sessionId = targetId || await ensureCurrentSession(snapshot.messages);
+      const { session } = await saveChatSession({
+        sessionId,
+        aid: snapshot.aid,
+        focalAuthorName: snapshot.focalName || "",
+        messages: snapshot.messages,
+        state: snapshot.state,
+        authToken: snapshot.matrixUserToken,
+      });
+      if (currentSessionIdRef.current === sessionId) savedFingerprintRef.current = fingerprint;
+      upsertSessionSummary(session);
+      setSessionStatus((prev) => ({ ...prev, saving: false, error: "" }));
+      return sessionId;
+    };
+    // Save requests stay in order; an older reply cannot overwrite a newer one.
+    const pending = (flush ? write() : sessionWriteQueueRef.current.catch(() => {}).then(write)).catch((error) => {
+      console.error("Failed to persist chat session:", error);
+      setSessionStatus((prev) => ({ ...prev, saving: false, error: "Could not save this chat." }));
+      throw error;
+    });
+    sessionWriteQueueRef.current = pending;
+    return pending;
+  }, [ensureCurrentSession, upsertSessionSummary]);
+
+  const retrySession = useCallback(async () => {
+    try {
+      setSessionStatus((prev) => ({ ...prev, loading: true, error: "" }));
+      await persistSessionNow();
+      const payload = await listChatSessions({ authToken: matrixUserToken });
+      setSessions(Array.isArray(payload.sessions) ? payload.sessions : []);
+      setSessionStatus({ loading: false, saving: false, error: "" });
+    } catch {
+      setSessionStatus({ loading: false, saving: false, error: "Could not save or load chats. Try again." });
+    }
+  }, [matrixUserToken, persistSessionNow]);
 
   const handleStop = useCallback(() => {
     chatAbortRef.current?.abort();
@@ -520,19 +606,23 @@ export default function Home() {
   }, [addMessage, candidates.length]);
 
   const startNewSession = useCallback(() => {
+    savedFingerprintRef.current = "";
+    baselineSessionRef.current = null;
     currentSessionIdRef.current = null;
     setCurrentSessionId(null);
-    setHistoryOpen(false);
     resetWorkflowState();
   }, [resetWorkflowState]);
 
-  const handleNewSession = useCallback(() => {
+  const handleNewSession = useCallback(async () => {
     if (phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
       setPendingConfirm({ type: "new" });
       return;
     }
-    startNewSession();
-  }, [phase, startNewSession]);
+    try {
+      await persistSessionNow();
+      startNewSession();
+    } catch { /* Keep the unsaved conversation open for retry. */ }
+  }, [persistSessionNow, phase, startNewSession]);
 
   const navigateToSession = useCallback((targetIntent, sessionId) => {
     const params = new URLSearchParams(window.location.search);
@@ -555,7 +645,10 @@ export default function Home() {
           setPendingConfirm({ type: "switch", sessionId, sessionIntent: selectedIntent });
           return;
         }
-        navigateToSession(selectedIntent, sessionId);
+        try {
+          await persistSessionNow();
+          navigateToSession(selectedIntent, sessionId);
+        } catch { /* Keep the current chat open for retry. */ }
         return;
       }
       if (phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
@@ -563,7 +656,7 @@ export default function Home() {
         return;
       }
       try {
-        setHistoryOpen(false);
+        await persistSessionNow();
         setSessionStatus((prev) => ({ ...prev, loading: true, error: "" }));
         const payload = await getChatSession({ sessionId, authToken: matrixUserToken });
         applySessionSnapshot(payload.session);
@@ -577,7 +670,7 @@ export default function Home() {
         }));
       }
     },
-    [applySessionSnapshot, intent, matrixUserToken, navigateToSession, phase, sessions]
+    [applySessionSnapshot, intent, matrixUserToken, navigateToSession, persistSessionNow, phase, sessions]
   );
 
   const confirmPending = useCallback(async () => {
@@ -585,6 +678,7 @@ export default function Home() {
     setPendingConfirm(null);
     if (!pending) return;
     handleStop();
+    try { await persistSessionNow(); } catch { return; }
     if (pending.type === "new") {
       startNewSession();
       return;
@@ -608,36 +702,27 @@ export default function Home() {
         }));
       }
     }
-  }, [applySessionSnapshot, handleStop, intent, matrixUserToken, navigateToSession, pendingConfirm, startNewSession]);
+  }, [applySessionSnapshot, handleStop, intent, matrixUserToken, navigateToSession, pendingConfirm, persistSessionNow, startNewSession]);
 
   useEffect(() => {
-    if (!sessionBootstrappedRef.current || sessionHydratingRef.current) return;
-    if (!matrixUserToken || !currentSessionId) return;
+    if (!sessionBootstrappedRef.current) return;
+    if (!matrixUserToken) return;
+    const state = buildSessionStateSnapshot();
+    const fingerprint = sessionFingerprint(messages, state);
+    if (baselineSessionRef.current === currentSessionId) {
+      savedFingerprintRef.current = fingerprint;
+      baselineSessionRef.current = null;
+      sessionHydratingRef.current = false;
+      return;
+    }
+    if (sessionHydratingRef.current || !hasUserMessage(messages) || fingerprint === savedFingerprintRef.current) return;
 
     if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
-
-    sessionSaveTimerRef.current = window.setTimeout(async () => {
-      try {
-        setSessionStatus((prev) => ({ ...prev, saving: true, error: "" }));
-        const payload = await saveChatSession({
-          sessionId: currentSessionId,
-          aid,
-          focalAuthorName: focalName || "",
-          messages,
-          state: buildSessionStateSnapshot(),
-          authToken: matrixUserToken,
-        });
-        upsertSessionSummary(payload.session);
-        setSessionStatus((prev) => ({ ...prev, saving: false, error: "" }));
-      } catch (error) {
-        console.error("Failed to save chat session:", error);
-        setSessionStatus((prev) => ({
-          ...prev,
-          saving: false,
-          error: "Could not save this chat.",
-        }));
-      }
-    }, 800);
+    const messagesChanged = lastSaveMessagesRef.current !== messages;
+    lastSaveMessagesRef.current = messages;
+    sessionSaveTimerRef.current = window.setTimeout(() => {
+      void persistSessionNow().catch(() => {});
+    }, messagesChanged ? 0 : 600);
 
     return () => {
       if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
@@ -649,16 +734,22 @@ export default function Home() {
     currentSessionId,
     matrixUserToken,
     messages,
-    upsertSessionSummary,
+    persistSessionNow,
   ]);
 
   useEffect(() => {
     const flush = () => {
       if (!matrixUserToken || !currentSessionIdRef.current) return;
-      void persistSessionNow();
+      // Start the keepalive fetch synchronously while the frame is still alive.
+      void persistSessionNow({ flush: true }).catch(() => {});
     };
+    const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
     window.addEventListener("pagehide", flush);
-    return () => window.removeEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [matrixUserToken, persistSessionNow]);
 
   const shortlistForChat = useCallback((activeIntent = intent) => {
@@ -761,6 +852,7 @@ export default function Home() {
         outsideNetwork: activeIntent === "collaborator",
         teamMemberIds: activeIntent === "collaborator" ? contextPersonIds : [],
         researchPlan,
+        authToken: matrixUserToken,
         signal: searchController.signal,
       });
       if (searchController.signal.aborted) return;
@@ -811,6 +903,7 @@ export default function Home() {
     linked,
     runRerank,
     contextPersonIds,
+    matrixUserToken,
   ]);
 
   const handleConfirmSearchPlan = useCallback(() => {
@@ -825,19 +918,21 @@ export default function Home() {
     const text = String(presetText ?? inputValue).trim();
     if (!text) return;
     let activeIntent = requestedIntent || inferPersonaIntent(text, intent);
-    if (activeIntent !== intent) setIntent(activeIntent);
+    if (activeIntent !== intent) {
+      setIntent(activeIntent);
+    }
     if (phase === PHASE.SEARCHING || phase === PHASE.RERANKING) {
       setQueuedFollowUp(text);
       setInputValue("");
       return;
     }
     try {
-      await ensureCurrentSession();
+      await ensureCurrentSession([...messages, normalizeMessage({ role: "user", content: text, at: Date.now() }, messages.length)]);
     } catch (sessionError) {
       console.error("Failed to create chat session:", sessionError);
       setSessionStatus((prev) => ({
         ...prev,
-        error: "Chats are not being saved in this tab.",
+        error: "Could not save this chat. Try again.",
       }));
     }
     setInputValue("");
@@ -862,7 +957,15 @@ export default function Home() {
         searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
         intent: activeIntent,
+        contextChoices: {
+          same_place: contextChoices.samePlace,
+          recent_years: contextChoices.recentYears,
+          paper_scope: contextChoices.paperScope,
+          paper_titles: contextChoices.paperScope === "chosen" ? contextChoices.paperTitles.slice(0, 8) : [],
+        },
         workingContext,
+        chatSessionId: currentSessionIdRef.current,
+        authToken: matrixUserToken,
         pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
         onStatus: (label) => {
           if (!chatController.signal.aborted) setAgentStatus(label);
@@ -920,7 +1023,7 @@ export default function Home() {
           setCandidates(shortlist.map((person) => ({
             author_id: String(person.author_id),
             name: person.name,
-            affiliation: person.affiliation || "Affiliation unavailable",
+            affiliation: person.affiliation || "",
             is_bridge2ai_member: Boolean(person.is_bridge2ai_member),
             role: String(person.role || ""),
             latest_year: String(person.latest_year || ""),
@@ -1085,12 +1188,13 @@ export default function Home() {
     setAttachedPapers((prev) => prev.filter((paper) => paper.id !== id));
   }, []);
 
-  const openProfile = async (authorId) => {    setProfileNotice("");
-    await persistSessionNow();
-    postToBridge({ type: BRIDGE_MSG.OPEN_PERSON, authorId: Number(authorId) });
-    if (!inIframe) {
-      setProfileNotice("Open this from the graph to view the profile.");
-    }
+  const openProfile = async (authorId) => {
+    setProfileNotice("");
+    try {
+      await persistSessionNow();
+      postToBridge({ type: BRIDGE_MSG.OPEN_PERSON, authorId: Number(authorId) });
+      if (!inIframe) setProfileNotice("Open this from the graph to view the profile.");
+    } catch { /* Keep the current chat open for retry. */ }
   };
 
   const savePerson = (candidate, ranked) => {
@@ -1111,10 +1215,23 @@ export default function Home() {
     setProfileNotice("Saved. Use Add people in the composer when you want them in this chat.");
   };
 
-  const returnToGraph = useCallback(() => {
-    void persistSessionNow();
-    postToBridge({ type: BRIDGE_MSG.RETURN_TO_GRAPH });
+  const returnToGraph = useCallback(async () => {
+    try {
+      await persistSessionNow();
+      postToBridge({ type: BRIDGE_MSG.RETURN_TO_GRAPH });
+    } catch {
+      postToBridge({ type: BRIDGE_MSG.CLOSE_FAILED });
+    }
   }, [persistSessionNow]);
+
+  useEffect(() => {
+    if (!inIframe) return undefined;
+    const onClose = (event) => {
+      if (event.source === window.parent && isBridgeOrigin(event.origin) && event.data?.type === BRIDGE_MSG.REQUEST_CLOSE) void returnToGraph();
+    };
+    window.addEventListener("message", onClose);
+    return () => window.removeEventListener("message", onClose);
+  }, [inIframe, returnToGraph]);
 
   const unsavePerson = (authorId) => {
     postToBridge({ type: BRIDGE_MSG.UNSAVE_PERSON, authorId: Number(authorId) });
@@ -1155,7 +1272,7 @@ export default function Home() {
           top_candidate_id: orderedCandidates[0]?.author_id || null,
         },
       });
-      setReportStatus("Thanks! Your feedback has been recorded.");
+        setReportStatus("Thanks! Your feedback has been recorded.");
       setReportFeedback("");
       setTimeout(() => {
         setReportModalOpen(false);
@@ -1171,43 +1288,21 @@ export default function Home() {
   useEffect(() => {
     const onKey = (event) => {
       if (event.key !== "Escape") return;
-      setHistoryOpen(false);
+      setRailOpen((open) => {
+        if (!narrowLayout || !open) return open;
+        try {
+          sessionStorage.setItem(RAIL_STORAGE_KEY, "closed");
+        } catch {
+          // Ignore storage failures; the rail still closes.
+        }
+        return false;
+      });
       setPendingConfirm(null);
       setReportModalOpen((open) => (reportSubmitting ? open : false));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [reportSubmitting]);
-
-  const historyMenu = (
-    <div className="history-menu" role="menu">
-      {sessionStatus.error && <div className="session-status session-status-error">{sessionStatus.error}</div>}
-      {!matrixUserToken ? (
-        <div className="session-empty">Sign in on the graph to keep chats.</div>
-      ) : sessions.length === 0 ? (
-        <div className="session-empty">No previous chats yet.</div>
-      ) : (
-        sessions.map((session) => (
-          <button
-            key={session.id}
-            className={`session-chip ${session.id === currentSessionId ? "active" : ""}`}
-            onClick={() => {
-              setHistoryOpen(false);
-              handleSelectSession(session.id);
-            }}
-            type="button"
-            role="menuitem"
-          >
-            <span className="session-chip-title">{session.title || "Untitled session"}</span>
-            <span className="session-chip-meta">
-              <span>{session.intent === "mentor" ? "Mentor" : "Collaborators"}</span>
-              <span>{relativeTime(session.last_message_at)}</span>
-            </span>
-          </button>
-        ))
-      )}
-    </div>
-  );
+  }, [narrowLayout, reportSubmitting]);
 
   if (!uiReady) {
     return (
@@ -1238,7 +1333,6 @@ export default function Home() {
       savedIds={savedIds}
       isCollaboratorSearch={searchIntent === "collaborator"}
       heading={shortlistKind === "researchers" ? "Researchers" : ""}
-      candidatesReviewed={candidatesReviewed}
       teamNames={selectedContextNames}
       selectionDisabled={isLoading}
       onOpenProfile={openProfile}
@@ -1249,21 +1343,56 @@ export default function Home() {
     />
   ) : null;
 
+  const showRail = railOpen || !narrowLayout;
+
   return (
     <div className={shellClass}>
+      {showRail && (
+        <HistorySidebar
+          sessions={sessions}
+          currentIntent={intent}
+          currentSessionId={currentSessionId}
+          sessionStatus={sessionStatus}
+          signedIn={Boolean(matrixUserToken)}
+          isLoading={isLoading}
+          expanded={railOpen}
+          overlay={narrowLayout && railOpen}
+          onToggle={() => persistRail(!railOpen)}
+          onNewSession={handleNewSession}
+          onRetry={retrySession}
+          you={{
+            signedIn: Boolean(matrixUserToken),
+            linked,
+            aid,
+            authorInfo,
+            seekerName,
+            choices: contextChoices,
+            onChoices: setContextChoices,
+            onOpenProfile: openProfile,
+            people: contextPeople,
+            workingContext,
+            attachments: attachedPapers,
+          }}
+          onSelectSession={(sessionId) => {
+            if (narrowLayout) persistRail(false);
+            handleSelectSession(sessionId);
+          }}
+        />
+      )}
+      {narrowLayout && railOpen && (
+        <button type="button" className="rail-scrim" aria-label="Close sidebar" onClick={() => persistRail(false)} />
+      )}
+
+      <div className="matrix-stage">
       <FocalAuthorBar
-        intent={intent}
         authorInfo={authorInfo}
         seekerName={seekerName}
         profileContextEnabled={linked}
         sessionStatus={sessionStatus}
         matrixUserToken={matrixUserToken}
-        historyOpen={historyOpen}
-        historyMenu={historyMenu}
-        isLoading={isLoading}
+        showSidebarToggle={narrowLayout && !railOpen}
         onOpenFocal={() => openProfile(aid)}
-        onNewSession={handleNewSession}
-        onToggleHistory={() => setHistoryOpen((open) => !open)}
+        onToggleSidebar={() => persistRail(true)}
         onReturnToGraph={inIframe ? returnToGraph : undefined}
       />
 
@@ -1311,6 +1440,7 @@ export default function Home() {
           citations={orderedCandidates.flatMap((candidate) => rerankedMap[candidate.author_id]?.papers || candidate.papers || []).slice(0, 8)}
         />
 
+      </div>
       </div>
 
       <ConfirmPopover

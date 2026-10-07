@@ -1,5 +1,7 @@
 import numpy as np
 import faiss
+import threading
+INDEX_LOCK = threading.RLock()
 
 
 class Retriever:
@@ -16,6 +18,7 @@ class Retriever:
         norm = float(np.linalg.norm(query))
         if norm > 0:
             query = query / norm
-        D, I = self.index.search(query, min(topk, self.index.ntotal))
+        with INDEX_LOCK:
+            D, I = self.index.search(query, min(topk, self.index.ntotal))
         original_indices = np.array(self.doc_lookup)[I].tolist()[0]
         return list(zip(original_indices, D[0]))

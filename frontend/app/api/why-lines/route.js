@@ -46,7 +46,7 @@ export async function POST(request) {
             })).filter((person) => person.author_id)
           : [],
       }),
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(20000)]),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(35000)]),
       cache: 'no-store',
     });
     if (!response.ok) return fallback();

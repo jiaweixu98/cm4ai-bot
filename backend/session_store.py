@@ -122,10 +122,19 @@ def validate_matrix_user_token(token: str) -> dict[str, str] | None:
     if not orcid:
         return None
 
-    return {
+    identity = {
         "orcid": orcid,
         "name": name,
+        "account_id": "",
+        "session_ref": "",
     }
+    account_id = str(payload.get("acct") or "").strip()
+    session_ref = str(payload.get("sref") or "").strip()
+    if account_id:
+        identity["account_id"] = account_id
+    if session_ref:
+        identity["session_ref"] = session_ref
+    return identity
 
 
 def _truncate(value: str, max_len: int) -> str:
@@ -185,60 +194,45 @@ def _serialize_session_row(row: dict[str, Any], include_full: bool = False) -> d
 
 def list_chat_sessions(
     owner_orcid: str,
-    focal_author_id: str,
+    focal_author_id: str | None = None,
     intent: str | None = None,
-    limit: int = 20,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     ensure_session_store()
     intent_key = str(intent or "").strip().lower()
+    focal_key = str(focal_author_id or "").strip()
+    conditions = ["owner_orcid = %s", "jsonb_array_length(messages) > 0"]
+    params: list[Any] = [owner_orcid]
+    if focal_key:
+        conditions.append("focal_author_id = %s")
+        params.append(focal_key)
+    if intent_key:
+        conditions.append("COALESCE(state->>'intent', '') = %s")
+        params.append(intent_key)
+    params.append(max(1, min(limit, 100)))
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            if intent_key:
-                cur.execute(
-                    """
-                    SELECT
-                        id,
-                        owner_orcid,
-                        owner_name,
-                        focal_author_id,
-                        focal_author_name,
-                        title,
-                        COALESCE(state->>'intent', '') AS intent,
-                        last_message_preview,
-                        created_at,
-                        updated_at,
-                        last_message_at
-                    FROM matrix_chat_sessions
-                    WHERE owner_orcid = %s
-                      AND focal_author_id = %s
-                      AND COALESCE(state->>'intent', '') = %s
-                    ORDER BY last_message_at DESC, created_at DESC
-                    LIMIT %s
-                    """,
-                    (owner_orcid, str(focal_author_id), intent_key, max(1, min(limit, 100))),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT
-                        id,
-                        owner_orcid,
-                        owner_name,
-                        focal_author_id,
-                        focal_author_name,
-                        title,
-                        COALESCE(state->>'intent', '') AS intent,
-                        last_message_preview,
-                        created_at,
-                        updated_at,
-                        last_message_at
-                    FROM matrix_chat_sessions
-                    WHERE owner_orcid = %s AND focal_author_id = %s
-                    ORDER BY last_message_at DESC, created_at DESC
-                    LIMIT %s
-                    """,
-                    (owner_orcid, str(focal_author_id), max(1, min(limit, 100))),
-                )
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    owner_orcid,
+                    owner_name,
+                    focal_author_id,
+                    focal_author_name,
+                    title,
+                    COALESCE(state->>'intent', '') AS intent,
+                    last_message_preview,
+                    created_at,
+                    updated_at,
+                    last_message_at
+                FROM matrix_chat_sessions
+                WHERE {' AND '.join(conditions)}
+                ORDER BY last_message_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
             rows = cur.fetchall()
     return [_serialize_session_row(row) for row in rows]
 
@@ -373,9 +367,16 @@ def save_chat_session(
                     last_message_preview = EXCLUDED.last_message_preview,
                     messages = EXCLUDED.messages,
                     state = EXCLUDED.state,
-                    updated_at = NOW(),
-                    last_message_at = NOW()
+                    updated_at = CASE
+                        WHEN matrix_chat_sessions.messages IS DISTINCT FROM EXCLUDED.messages THEN NOW()
+                        ELSE matrix_chat_sessions.updated_at
+                    END,
+                    last_message_at = CASE
+                        WHEN matrix_chat_sessions.messages IS DISTINCT FROM EXCLUDED.messages THEN NOW()
+                        ELSE matrix_chat_sessions.last_message_at
+                    END
                 WHERE matrix_chat_sessions.owner_orcid = EXCLUDED.owner_orcid
+                  AND jsonb_array_length(EXCLUDED.messages) >= jsonb_array_length(matrix_chat_sessions.messages)
                 RETURNING
                     id,
                     owner_orcid,
@@ -406,5 +407,10 @@ def save_chat_session(
         conn.commit()
 
     if not row:
+        # An unload flush may overtake an earlier autosave. Histories only append;
+        # an older browser must never erase a question or reply already committed.
+        current = get_chat_session(session_id, owner_orcid)
+        if current:
+            return current
         raise PermissionError("Session does not belong to the authenticated user")
     return _serialize_session_row(row, include_full=True)

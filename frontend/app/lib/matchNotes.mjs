@@ -1,7 +1,16 @@
 export const titleOf = (paper) => String(typeof paper === 'string' ? paper : paper?.Title || paper?.title || '').trim();
 
-const MAX_WORDS = 55;
-const MAX_CHARS = 360;
+const MAX_WORDS = 90;
+const MAX_CHARS = 620;
+
+function clip(text) {
+  const words = text.split(/\s+/).filter(Boolean);
+  let clipped = words.length > MAX_WORDS ? words.slice(0, MAX_WORDS).join(' ') : text;
+  if (clipped.length > MAX_CHARS) clipped = clipped.slice(0, MAX_CHARS);
+  if (clipped === text) return text;
+  const sentenceEnd = clipped.search(/[.!?](?=[^.!?]*$)/);
+  return sentenceEnd > 80 ? clipped.slice(0, sentenceEnd + 1) : `${clipped.replace(/\s+\S*$/, '')}.`;
+}
 
 function shortenTopic(title) {
   const cleaned = String(title || '').replace(/\s+/g, ' ').trim();
@@ -14,13 +23,9 @@ export function fallbackNote(candidate, options = {}) {
   const papers = Array.isArray(candidate?.papers) ? candidate.papers : [];
   const index = papers.slice(0, 3).findIndex((paper) => titleOf(paper));
   const topic = index >= 0 ? shortenTopic(titleOf(papers[index])) : '';
-  const teamNames = Array.isArray(options.teamNames) ? options.teamNames.filter(Boolean).slice(0, 4) : [];
   let explanation;
   if (!topic) {
     explanation = 'No indexed publications available.';
-  } else if (teamNames.length) {
-    const team = teamNames.length === 1 ? teamNames[0] : `${teamNames.slice(0, -1).join(', ')} and ${teamNames.at(-1)}`;
-    explanation = `Complements ${team}.`;
   } else {
     explanation = 'See supporting publication.';
   }
@@ -77,17 +82,14 @@ export function validateNotes(candidates, payload, options = {}) {
     const row = rows.find((item) => item && String(item.author_id) === String(candidate.author_id)) || null;
     const papers = Array.isArray(candidate?.papers) ? candidate.papers : [];
     let text = typeof row?.explanation === 'string' ? row.explanation.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
-    let index = Number(row?.evidence_paper_index);
-    if (!Number.isInteger(index) || index < 0 || index > 2 || !titleOf(papers[index])) {
-      index = papers.slice(0, 3).findIndex((paper) => titleOf(paper));
-    }
+    const suppliedIndex = row?.evidence_paper_index;
+    const index = typeof suppliedIndex === 'number' || (typeof suppliedIndex === 'string' && suppliedIndex.trim())
+      ? Number(suppliedIndex) : NaN;
+    if (!Number.isInteger(index) || index < 0 || index > 2 || !titleOf(papers[index])) return fallbackNote(candidate, options);
     const words = text.split(/\s+/).filter(Boolean);
     if (!text || words.length < 8 || !Number.isInteger(index) || index < 0) {
       return fallbackNote(candidate, options);
     }
-    let explanation = text;
-    if (words.length > MAX_WORDS) explanation = words.slice(0, MAX_WORDS).join(' ');
-    if (explanation.length > MAX_CHARS) explanation = `${explanation.slice(0, MAX_CHARS - 1).replace(/\s+\S*$/, '')}.`;
-    return { author_id: String(candidate.author_id), explanation, evidence_paper_index: index, source: 'llm' };
+    return { author_id: String(candidate.author_id), explanation: clip(text), evidence_paper_index: index, source: 'llm' };
   });
 }

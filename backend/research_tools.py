@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -26,6 +27,9 @@ _OPENALEX_CACHE: dict[str, tuple[float, dict]] = {}
 _DOI = re.compile(r"(10\.\d{4,9}/[^\s\"<>]+)", re.I)
 _WORK_ID = re.compile(r"\b(W\d{4,12})\b")
 ABSTRACT_CHARS = 1500
+# Search results carry a shorter excerpt; read_abstracts returns the full text.
+EXCERPT_CHARS = 700
+LIBRARY_SCOPE = "papers by researchers in the catalog"
 RRF_K = 60
 
 
@@ -56,12 +60,72 @@ def _abstract_text(inverted: dict | None) -> str:
     if not inverted:
         return ""
     positions = [(pos, word) for word, spots in inverted.items() for pos in spots]
-    text = " ".join(word for _, word in sorted(positions))
+    return _clip_abstract(" ".join(word for _, word in sorted(positions)))
+
+
+def _clip_abstract(text) -> str:
+    text = " ".join(str(text or "").split())
     return text if len(text) <= ABSTRACT_CHARS else text[:ABSTRACT_CHARS].rsplit(" ", 1)[0] + " …"
+
+
+def _papers_for_question(library, author_id, question: str, limit: int = 2) -> list[dict]:
+    """Papers of this person closest to the question. Vector closeness when the
+    paper index is loaded, otherwise the keyword overlap lookup."""
+    try:
+        from paper_vectors import load_paper_index
+
+        index = load_paper_index()
+    except Exception:
+        index = None
+    if index is not None:
+        try:
+            matched = index.matching_papers(author_id, question, library, limit)
+        except Exception:
+            matched = []
+        if matched:
+            return matched
+    return library.matched_papers(author_id, question, limit)
+
+
+def library_paper(row: dict) -> dict:
+    """A papers.sqlite row in the catalog's paper shape, abstract included."""
+    return {"Title": row["title"], "PubYear": row.get("year"), "Venue": row.get("venue") or "",
+            "DOI": row.get("doi"), "PMID": row.get("pmid"), "CitedCount": row.get("cited_by"),
+            "OpenAlexWork": row.get("work_id"), "Abstract": row.get("abstract") or ""}
+
+
+def _with_excerpt(record: dict) -> dict:
+    if len(record.get("abstract") or "") <= EXCERPT_CHARS:
+        return record
+    return {**record, "abstract": record["abstract"][:EXCERPT_CHARS].rsplit(" ", 1)[0] + " …"}
 
 
 def openalex_enabled() -> bool:
     return os.environ.get("MATRIX_OPENALEX", "on").strip().lower() not in {"off", "0", "false", "no"}
+
+
+def _catalog_year(raw: dict) -> int:
+    latest = 0
+    recent = str((raw or {}).get("recent_year") or "")
+    match = re.search(r"\d{4}", recent)
+    if match:
+        latest = int(match.group())
+    for paper in (raw or {}).get("papers") or []:
+        if not isinstance(paper, dict):
+            continue
+        year_match = re.search(r"\d{4}", str(paper.get("PubYear") or paper.get("year") or ""))
+        if year_match:
+            latest = max(latest, int(year_match.group()))
+    return latest
+
+
+def _recommendation_scope(place: str, from_year: int | None) -> dict:
+    scope = {}
+    if place:
+        scope["same_place"] = place
+    if from_year:
+        scope["from_year"] = from_year
+    return scope
 
 
 @dataclass
@@ -70,16 +134,22 @@ class ResearchTools:
     details: Callable
     search: Callable
     path: Callable | None = None
+    similar: Callable | None = None
     openalex: bool = False
+    library: object | None = None
     people: dict = field(default_factory=dict)
     evidence: dict = field(default_factory=dict)
     result_people: list | None = None
     result_query: str = ""
+    publication_search: dict | None = None
     calls: list = field(default_factory=list)
     max_calls: int = 20
     openalex_requests: int = 0
     self_id: str = ""
     candidates_reviewed: int = 0
+    trace: list = field(default_factory=list)
+    place: str = ""
+    from_year: int | None = None
     _niche_reviewed: set = field(default_factory=set)
 
     def topic_coverage(self, author_id: str, topics: list[str]) -> dict:
@@ -106,12 +176,69 @@ class ResearchTools:
             raise ValueError("Research tool budget reached. Answer using the evidence already read.")
         self.calls.append(name)
 
+    def record_decision(self, fn, args: tuple, result=None, error: str = "") -> None:
+        """One compact entry of what a tool was asked and returned, for the usage log."""
+        try:
+            names = list(inspect.signature(fn).parameters)
+        except (TypeError, ValueError):
+            names = []
+        compact = {}
+        for index, value in enumerate(args):
+            key = names[index] if index < len(names) else f"arg{index}"
+            if isinstance(value, str):
+                # Free text a user supplied (an abstract) is recorded by size, not content.
+                compact[key] = {"chars": len(value)} if len(value) > 300 else value
+            elif isinstance(value, (list, tuple)):
+                compact[key] = [str(v)[:120] for v in value[:8]]
+            elif isinstance(value, (int, float, bool)) or value is None:
+                compact[key] = value
+            else:
+                compact[key] = str(value)[:120]
+        count, method = None, ""
+        if isinstance(result, dict):
+            for key in ("people", "members_in_role_order", "papers", "works", "path", "results", "candidates"):
+                if isinstance(result.get(key), list):
+                    count = len(result[key])
+                    break
+            method = str(result.get("method") or result.get("ranking") or result.get("status") or "")[:80]
+        if error:
+            method = f"error:{error}"[:80]
+        self.trace.append({"name": fn.__name__, "args": compact, "result_count": count, "method": method})
+
     def _remember(self, person: dict):
         known = self.people.get(person["author_id"], {})
         self.people[person["author_id"]] = {**known, **{k: v for k, v in person.items() if v not in (None, "")}}
 
+    def _remember_paper(self, author_id: str, paper) -> dict | None:
+        """Store one catalog paper as citable evidence and return that record."""
+        title = paper_title(paper)
+        if not title:
+            return None
+        eid = "paper:" + hashlib.sha256(f"{author_id}:{title}".encode()).hexdigest()[:20]
+        record = self.evidence.get(eid) or {"evidence_id": eid, "author_id": author_id, "title": title,
+                                            "source": "local_catalog", "text_level": "title"}
+        if isinstance(paper, dict):
+            for target, keys in {"year": ("PubYear", "year"), "url": ("url", "URL")}.items():
+                value = next((paper[k] for k in keys if paper.get(k)), None)
+                if value and target not in record:
+                    record[target] = str(value)
+            doi = str(paper.get("DOI") or paper.get("doi") or "").strip()
+            pmid = str(paper.get("PMID") or paper.get("pmid") or "").strip()
+            if doi and not doi.lower().startswith("http"):
+                doi = f"https://doi.org/{doi.removeprefix('doi:')}"
+            if "url" not in record and (doi or pmid.isdigit()):
+                record["url"] = doi or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            if paper.get("OpenAlexWork") and "work_id" not in record:
+                record["work_id"] = str(paper["OpenAlexWork"])
+            if paper.get("Abstract") and not record.get("abstract"):
+                record.update(abstract=_clip_abstract(paper["Abstract"]), text_level="abstract")
+        self.evidence[eid] = record
+        return record
+
     def _person(self, author_id: str, question: str = "", limit: int = 10) -> dict | None:
         author_id = str(author_id).strip()
+        if self.library is not None and hasattr(self.library,'canonical_author'):
+            author_id = self.library.canonical_author(author_id)
         if not author_id.isdigit() or len(author_id) > 20:
             return None
         raw = self.details(author_id)
@@ -119,33 +246,24 @@ class ResearchTools:
             return None
         terms = set(re.findall(r"\w+", question.casefold()))
         papers = [p for p in raw.get("papers", []) if paper_title(p)]
+        if self.library is not None and hasattr(self.library, 'author_works'):
+            papers = [library_paper(p) for p in self.library.author_works(author_id)[:24]]
         # A lexical ordering of the available titles, not a scientific fit score.
         papers = sorted(papers, key=lambda p: -len(terms & set(re.findall(r"\w+", paper_title(p).casefold()))))
+        if self.library is not None and question.strip() and limit:
+            papers = [library_paper(row) for row in _papers_for_question(self.library, author_id, question)] + papers
         records = []
         seen = set()
         for paper in papers:
             if len(records) >= limit:
                 break
             title = paper_title(paper)
-            if title.casefold() in seen:
+            if not title or title.casefold() in seen:
                 continue
             seen.add(title.casefold())
-            eid = "paper:" + hashlib.sha256(f"{author_id}:{title}".encode()).hexdigest()[:20]
-            record = self.evidence.get(eid) or {"evidence_id": eid, "author_id": author_id, "title": title,
-                                                "source": "local_catalog", "text_level": "title"}
-            if isinstance(paper, dict):
-                for target, keys in {"year": ("PubYear", "year"), "url": ("url", "URL")}.items():
-                    value = next((paper[k] for k in keys if paper.get(k)), None)
-                    if value and target not in record:
-                        record[target] = str(value)
-                doi = str(paper.get("DOI") or paper.get("doi") or "").strip()
-                pmid = str(paper.get("PMID") or paper.get("pmid") or "").strip()
-                if doi and not doi.lower().startswith("http"):
-                    doi = f"https://doi.org/{doi.removeprefix('doi:')}"
-                if "url" not in record and (doi or pmid.isdigit()):
-                    record["url"] = doi or f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-            self.evidence[eid] = record
-            records.append(record)
+            record = self._remember_paper(author_id, paper)
+            if record:
+                records.append(record)
         affiliation = raw.get("affiliation", "") if raw.get("affiliation") not in {None, "Unknown"} else ""
         profile_eid = f"profile:{author_id}"
         self.evidence[profile_eid] = {"evidence_id": profile_eid, "author_id": author_id,
@@ -156,12 +274,53 @@ class ResearchTools:
                  for y in [str(p.get("PubYear") or p.get("year") or "")] if y.isdigit()]
         latest = str(raw.get("recent_year") or "") or (str(max(years)) if years else "")
         person = {"author_id": author_id, "name": raw["name"], "affiliation": affiliation,
-                  "profile_evidence_id": profile_eid, "latest_year": latest, "papers": records,
+                  "is_bridge2ai_member": bool(raw.get('is_bridge2ai_member')),
+                  "profile_evidence_id": profile_eid, "latest_year": latest,
+                  "papers": [_with_excerpt(r) for r in records],
                   "orcid": raw.get("orcid") or "",
                   "research_topics": list(raw.get("topics") or [])[:6],
                   "mesh": list(raw.get("mesh") or [])[:8]}
         self._remember({k: v for k, v in person.items() if k != "papers"})
         return person
+
+    def _publication_results(self, result, question, kind):
+        self.publication_search = {**result, 'kind': kind}
+        people = []
+        for candidate in result.get('people',[]):
+            person = self._person(candidate['author_id'], limit=0)
+            if not person or person['author_id'] == str(self.self_id): continue
+            papers = [self._remember_paper(person['author_id'],library_paper(p))
+                      for p in candidate.get('matched_papers',[])]
+            papers = [_with_excerpt(p) for p in papers if p]
+            if not papers: continue
+            people.append({**person,'papers':papers,'matched_paper_evidence_id':papers[0]['evidence_id'],
+                           'shared_paper_count':candidate.get('shared_paper_count'),
+                           'location_evidence':candidate.get('location_evidence',[])})
+        self.result_people = people
+        self.result_query = question
+        self.candidates_reviewed = len(people)
+        return {**result,'people':people}
+
+    def find_paper_audience(self, identifier: str, title: str, abstract: str) -> dict:
+        self._charge('find_paper_audience')
+        if self.library is None: return {'status':'unavailable','people':[]}
+        from paper_discovery import audience
+        from paper_vectors import load_paper_index
+        result = audience(self.library,load_paper_index(),identifier,title,abstract,[self.self_id])
+        return self._publication_results(result, 'potential audience for ' + (result.get('source_paper') or {}).get('title',title),
+                                         'find_paper_audience')
+
+    def explore_coauthors(self, author_id: str, specialty: str, institution: str, geography: str,
+                          from_year: int | None, to_year: int | None) -> dict:
+        self._charge('explore_coauthors')
+        focal = str(author_id or self.self_id)
+        if self.library is not None and hasattr(self.library,'canonical_author'):
+            focal = self.library.canonical_author(focal)
+        if not focal.isdigit(): return {'status':'needs_person','people':[]}
+        if self.library is None: return {'status':'unavailable','people':[]}
+        from paper_discovery import explore
+        result = explore(self.library,focal,specialty,institution,geography,from_year,to_year)
+        return self._publication_results(result,'recorded coauthors matching the publication filters','explore_coauthors')
 
     def resolve_person(self, name: str) -> dict:
         self._charge("resolve_person")
@@ -181,17 +340,36 @@ class ResearchTools:
         # Existing retrieval scores are not comparable across independently phrased
         # facets. Fuse ranks instead and use the stable catalog ID for ties.
         fused: dict[str, dict] = {}
+        window = 40 if self.place or self.from_year else 16
         for facet in facets:
-            for rank, row in enumerate(self.search(facet, scope, exclude_ids[:25])[:16], start=1):
+            rank = 0
+            for row in self.search(facet, scope, exclude_ids[:25])[:window]:
                 author_id = str(row.get("author_id", ""))
                 if not author_id or author_id in exclude_ids or author_id == self.self_id:
                     continue
+                if not self._in_recommendation_scope(row):
+                    continue
+                rank += 1
                 item = fused.setdefault(author_id, {"row": row, "rrf_score": 0.0,
                                                      "facet_ranks": {}, "matched_requirements": []})
                 item["rrf_score"] += 1.0 / (RRF_K + rank)
                 item["facet_ranks"][facet] = rank
                 item["matched_requirements"].append(facet)
         return sorted(fused.values(), key=lambda item: (-item["rrf_score"], str(item["row"]["author_id"])))
+
+    def _in_recommendation_scope(self, row: dict) -> bool:
+        if not self.place and not self.from_year:
+            return True
+        author_id = str(row.get("author_id") or "")
+        raw = self.details(author_id) if author_id else {}
+        raw = raw if isinstance(raw, dict) else {}
+        if self.place:
+            affiliation = str(raw.get("affiliation") or row.get("affiliation") or "")
+            if self.place.casefold() not in affiliation.casefold():
+                return False
+        if self.from_year and _catalog_year(raw) < self.from_year:
+            return False
+        return True
 
     def search_people(self, question: str, requirements: list[str], scope: str,
                       exclude_ids: list[str]) -> dict:
@@ -225,9 +403,74 @@ class ResearchTools:
             person["topics"] = facets
             person["title_coverage"] = self.topic_coverage(person["author_id"], facets)
         self.candidates_reviewed = len(ranked)
+        self.publication_search = None
         self.result_people, self.result_query = people, question or "; ".join(facets)
-        return {"status": "ok" if people else "empty", "question": question,
-                "requirements": facets, "scope": scope, "ranking": "rrf-v1", "people": people}
+        payload = {"status": "ok" if people else "empty", "question": question,
+                   "requirements": facets, "scope": scope, "ranking": "rrf-v1", "people": people}
+        scope_applied = _recommendation_scope(self.place, self.from_year)
+        if scope_applied:
+            payload["recommendation_scope"] = scope_applied
+        return payload
+
+    def _pin_matched_paper(self, author_id: str, row: dict) -> dict | None:
+        """The similar-work paper, with its abstract, as this person's cited evidence."""
+        paper = None
+        work_id = str(row.get("their_work_id") or "").strip()
+        if self.library is not None and work_id:
+            try:
+                found = self.library.work(work_id)
+            except Exception:
+                found = None
+            if found and found.get("title"):
+                paper = library_paper(found)
+        if paper is None and row.get("their_title"):
+            paper = {"Title": row["their_title"], "PubYear": row.get("their_year")}
+        if paper is None:
+            return None
+        record = self._remember_paper(author_id, paper)
+        return _with_excerpt(record) if record else None
+
+    def find_similar_work(self, author_id: str) -> dict:
+        """People whose papers are close to this person's, and who have not written with them.
+
+        An empty author_id uses the signed-in researcher. Order is the paper-vector order.
+        """
+        self._charge("find_similar_work")
+        focal = str(author_id or "").strip() or str(self.self_id or "")
+        if self.similar is None:
+            return {"status": "empty", "people": []}
+        if not focal.isdigit():
+            return {"status": "empty", "people": [], "reason": "no_focal_person"}
+        try:
+            rows = list(self.similar(focal) or [])
+        except Exception:
+            return {"status": "empty", "people": []}
+        people = []
+        for row in rows:
+            other = str(row.get("author_id") or "")
+            if not other.isdigit() or other in {focal, str(self.self_id or "")}:
+                continue
+            person = self._person(other, "", 3)
+            if not person:
+                continue
+            pinned = self._pin_matched_paper(other, row)
+            papers = list(person.get("papers") or [])
+            if pinned:
+                papers = [pinned] + [p for p in papers if p.get("evidence_id") != pinned.get("evidence_id")]
+            people.append({
+                **person,
+                "papers": papers[:3],
+                "their_title": row.get("their_title") or "",
+                "their_year": row.get("their_year"),
+                "your_title": row.get("your_title") or "",
+                "your_year": row.get("your_year"),
+                "matched_paper_evidence_id": (pinned or {}).get("evidence_id", ""),
+            })
+        self.result_people = people
+        self.result_query = "similar to your recent work"
+        self.publication_search = None
+        self.candidates_reviewed = len(people)
+        return {"status": "ok" if people else "empty", "question": self.result_query, "people": people}
 
     def get_connection(self, from_id: str, to_id: str) -> dict:
         self._charge("get_connection")
@@ -252,12 +495,42 @@ class ResearchTools:
         return {"status": "connected" if path else "no_recorded_path", "evidence_id": eid,
                 "coauthor_hops": max(len(path) - 1, 0), "path": path}
 
-    def read_context(self, profile_id: str, selected_ids: list[str], displayed_ids: list[str]) -> dict:
+    def read_context(self, profile_id: str, selected_ids: list[str], displayed_ids: list[str],
+                     displayed_results: list[dict] | None = None) -> dict:
         self._charge("read_context")
         def read(ids):
             return [p for aid in ids[:8] if (p := self._person(aid, limit=3))]
+        displayed = []
+        previous = {str(row.get('author_id', '')): row for row in (displayed_results or [])[:8]}
+        for author_id in displayed_ids[:8]:
+            supplied = previous.get(str(author_id))
+            if self.library is None or supplied is None:
+                person = self._person(author_id, limit=3)
+            else:
+                person = self._person(author_id, limit=0)
+                if person:
+                    papers = []
+                    for paper in (supplied.get('papers') or [])[:3]:
+                        if isinstance(paper, str):
+                            paper = {'title': paper}
+                        if not isinstance(paper, dict):
+                            continue
+                        row = self._library_row({
+                            'work_id': paper.get('work_id') or paper.get('OpenAlexWork'),
+                            'url': paper.get('url') or paper.get('DOI') or paper.get('doi'),
+                            'title': paper_title(paper), 'year': paper.get('year') or paper.get('PubYear'),
+                        })
+                        # Saved/browser records identify a paper, but cannot supply its
+                        # authorship or abstract. Live corrections still apply here.
+                        if row and self.library.owns(person['author_id'], row['work_id']):
+                            record = self._remember_paper(person['author_id'], library_paper(row))
+                            if record and record not in papers:
+                                papers.append(record)
+                    person = {**person, 'papers': [_with_excerpt(p) for p in papers]}
+            if person:
+                displayed.append(person)
         return {"profile_context": self._person(profile_id, limit=3),
-                "selected_people": read(selected_ids), "displayed_people_in_order": read(displayed_ids)}
+                "selected_people": read(selected_ids), "displayed_people_in_order": displayed}
 
     # ---------- OpenAlex (approved external source) ----------
 
@@ -314,6 +587,20 @@ class ResearchTools:
             if record.get("abstract"):
                 results[eid] = {"status": "ok", "title": record["title"], "abstract": record["abstract"]}
                 continue
+            row = self._library_row(record)
+            if row:
+                # The export holds OpenAlex's own text, so a paper it has without an
+                # abstract has none in OpenAlex either.
+                abstract = _clip_abstract(row.get("abstract"))
+                if not abstract:
+                    results[eid] = {"status": "no_abstract_available", "title": record["title"]}
+                    continue
+                record.update(abstract=abstract, text_level="abstract",
+                              openalex_id=f"https://openalex.org/{row['work_id']}")
+                if row.get("doi") and not record.get("url"):
+                    record["url"] = row["doi"]
+                results[eid] = {"status": "ok", "title": record["title"], "abstract": abstract}
+                continue
             wanted = _normalize_title(record["title"])
             query = " ".join(wanted.split()[:30])
             try:
@@ -337,12 +624,58 @@ class ResearchTools:
         words = re.findall(r"[\w-]+", query)[:20]
         if not words:
             raise ValueError("Give short topic keywords")
+        from_year = from_year if from_year and 1900 < from_year < 2100 else None
+        local = self.library.search(" ".join(words), from_year, 8) if self.library else []
+        strong = [row for row in local if row["match"] != "any_word"]
+        works = [self._public(self._library_record(row)) for row in strong]
+        if len(works) >= 3 or not self.openalex:
+            works = works if len(works) >= 3 else [self._public(self._library_record(row)) for row in local]
+            return {"status": "ok" if works else "empty", "works": works, "searched": LIBRARY_SCOPE}
         params = {"search": " ".join(words), "per-page": 8}
-        if from_year and 1900 < from_year < 2100:
+        if from_year:
             params["filter"] = f"from_publication_date:{from_year}-01-01"
-        works = [self._public(self._work_record(work)) for work in self._openalex_get(params)
-                 if str(work.get("display_name") or "").strip()]
-        return {"status": "ok" if works else "empty", "works": works}
+        try:
+            external = self._openalex_get(params)
+        except ValueError:
+            if not local:
+                raise
+            works = [self._public(self._library_record(row)) for row in local]
+            return {"status": "ok", "works": works, "searched": LIBRARY_SCOPE}
+        seen = {_normalize_title(w["title"]) for w in works}
+        for work in external:
+            title = str(work.get("display_name") or "").strip()
+            if title and _normalize_title(title) not in seen and len(works) < 8:
+                seen.add(_normalize_title(title))
+                works.append(self._public(self._work_record(work)))
+        return {"status": "ok" if works else "empty", "works": works,
+                "searched": LIBRARY_SCOPE + " and OpenAlex" if strong else "OpenAlex"}
+
+    def _library_row(self, record: dict) -> dict | None:
+        if not self.library:
+            return None
+        for value in (record.get("work_id"), record.get("openalex_id")):
+            if value and (row := self.library.work(value)):
+                return row
+        if (doi := _DOI.search(str(record.get("url") or ""))) and (row := self.library.by_doi(doi.group(1))):
+            return row
+        return self.library.by_title(record.get("title"), record.get("year"))
+
+    def _library_record(self, row: dict) -> dict:
+        openalex_id = f"https://openalex.org/{row['work_id']}"
+        eid = "work:" + hashlib.sha256(openalex_id.encode()).hexdigest()[:20]
+        authors = []
+        for author_id, _ in self.library.authors(row["work_id"])[:6]:
+            name = (self.details(str(author_id)) or {}).get("name")
+            if name and name not in {"Unknown", "Researcher"}:
+                authors.append(name)
+        pmid = str(row.get("pmid") or "")
+        record = {"evidence_id": eid, "author_id": None, "title": row["title"], "year": str(row.get("year") or ""),
+                  "url": row.get("doi") or (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else openalex_id),
+                  "authors": authors, "source": "catalog_library", "openalex_id": openalex_id,
+                  "cited_by_count": row.get("cited_by"), "abstract": _clip_abstract(row.get("abstract"))}
+        record["text_level"] = "abstract" if record["abstract"] else "title"
+        self.evidence[eid] = {**self.evidence.get(eid, {}), **record}
+        return self.evidence[eid]
 
     @staticmethod
     def _public(record: dict) -> dict:
@@ -423,10 +756,18 @@ class ResearchTools:
         if not self.openalex:
             result["openalex_status"] = "disabled"
             return result
+        known_id = str((self.details(local["author_id"]) or {}).get("openalex_id") or "") if local else ""
+        known_id = known_id.rsplit("/", 1)[-1]
         try:
-            candidates = self._openalex_raw("authors", {"search": query_name, "per-page": 5},
-                                            AUTHOR_FIELDS).get("results") or []
-            match, basis = self._match_openalex_author(candidates, local)
+            match, basis, candidates = None, "", []
+            if re.fullmatch(r"A\d{4,12}", known_id):
+                profile = self._openalex_raw(f"authors/{known_id}", {}, AUTHOR_FIELDS)
+                if profile.get("id"):
+                    match, basis = profile, "catalog_openalex_id"
+            if not match:
+                candidates = self._openalex_raw("authors", {"search": query_name, "per-page": 5},
+                                                AUTHOR_FIELDS).get("results") or []
+                match, basis = self._match_openalex_author(candidates, local)
         except ValueError as exc:
             result["openalex_status"] = str(exc)
             return result
@@ -466,6 +807,11 @@ class ResearchTools:
         if not identifier:
             raise ValueError("Give a DOI, OpenAlex work ID, evidence ID or title")
         known = self.evidence.get(identifier)
+        row = self._library_row(known) if known else self._library_row(
+            {"work_id": (wid.group(1) if (wid := _WORK_ID.search(identifier)) else ""),
+             "url": identifier, "title": identifier})
+        if row:
+            return self._library_paper_info(row, known)
         work = None
         if known and known.get("openalex_id"):
             work = self._openalex_raw(f"works/{known['openalex_id'].rsplit('/', 1)[-1]}", {}, PAPER_FIELDS)
@@ -521,6 +867,33 @@ class ResearchTools:
                 "authors": authors, "catalog_people": catalog_people,
                 "abstract": record.get("abstract") or "", "text_level": record.get("text_level", "title")}
 
+    def _library_paper_info(self, row: dict, known: dict | None) -> dict:
+        record = self._library_record(row)
+        if known and known is not record:
+            known.update(abstract=record["abstract"] or known.get("abstract", ""), openalex_id=record["openalex_id"],
+                         text_level="abstract" if record["abstract"] or known.get("abstract") else known["text_level"])
+            self.evidence.pop(record["evidence_id"], None)
+            record = {**record, **known}
+        authors, catalog_people = [], []
+        printed_institutions = self.library.author_institutions(row["work_id"])
+        for author_id, position in self.library.authors(row["work_id"])[:12]:
+            raw = self.details(str(author_id)) or {}
+            if not raw.get("name") or raw["name"] in {"Unknown", "Researcher"}:
+                continue
+            affiliation = raw.get("affiliation") if raw.get("affiliation") not in {None, "Unknown"} else ""
+            authors.append({"name": raw["name"], "position": position, "orcid": raw.get("orcid") or None,
+                            "institutions": printed_institutions.get(author_id, [])})
+            person = {"author_id": str(author_id), "name": raw["name"], "affiliation": affiliation or ""}
+            self._remember(person)
+            catalog_people.append({**person, "link_basis": "listed_author_in_catalog_papers"})
+        return {"status": "ok", "match_basis": "catalog_library", "evidence_id": record["evidence_id"],
+                "title": record["title"], "year": record.get("year"), "venue": row.get("venue"),
+                "doi": row.get("doi"), "cited_by_count": row.get("cited_by"),
+                "topics": [t for t in (row.get("primary_topic"), row.get("primary_field")) if t],
+                "authors": authors, "authors_listed": "catalog researchers only",
+                "catalog_people": catalog_people,
+                "abstract": record.get("abstract") or "", "text_level": record.get("text_level", "title")}
+
     # ---------- Team assembly ----------
 
     def assemble_team(self, goal: str, roles: list[str], scope: str, exclude_ids: list[str]) -> dict:
@@ -570,8 +943,13 @@ class ResearchTools:
                              "author_id": aid, "alternates": alternates})
         self.candidates_reviewed = len({str(i["row"]["author_id"]) for items in fused.values() for i in items})
         self.result_people, self.result_query = members, goal.strip()[:200] or "; ".join(cleaned)
-        return {"status": "ok" if members else "empty", "goal": goal[:500], "ranking": "greedy-role-order-v1",
-                "members_in_role_order": members, "coverage": coverage}
+        self.publication_search = None
+        payload = {"status": "ok" if members else "empty", "goal": goal[:500], "ranking": "greedy-role-order-v1",
+                   "members_in_role_order": members, "coverage": coverage}
+        scope_applied = _recommendation_scope(self.place, self.from_year)
+        if scope_applied:
+            payload["recommendation_scope"] = scope_applied
+        return payload
 
     # ---------- Niche analysis ----------
 
