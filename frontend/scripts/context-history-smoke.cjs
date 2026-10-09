@@ -77,6 +77,10 @@ function fullSession(id) {
             { Title: "Health data quality", PubYear: 2023 },
           ],
         };
+      } else if (url.pathname === "/api/author/42/publications") {
+        payload={author_id:'43',total:3,papers:[{work_id:'W1',title:'Clinical data standards',year:2025},{work_id:'W2',title:'Portable phenotyping',year:2024},{work_id:'W3',title:'Health data quality',year:2023}]};
+      } else if(url.pathname === '/api/context-publications/resolve') {
+        payload={selected_publications:(data.references || []).map(p=>({...p,title:p.work_id==='W1'?'Clinical data standards':p.work_id==='W2'?'Portable phenotyping':'Health data quality'}))};
       } else if (url.pathname === "/api/chat-lite") {
         capture.chats.push(data);
         payload = { action: "chat", reply: "I will use that context for this conversation." };
@@ -99,20 +103,20 @@ function fullSession(id) {
     assert.equal(capture.puts.length, 0, "opening a chat must not save it");
 
     const rail = page.getByRole("complementary", { name: "Chat history" });
-    await rail.getByText("Context", { exact: true }).click();
-    assert.equal(await page.getByRole("button", { name: /^Context/ }).count(), 0, "top-bar Context button is gone");
-    assert.equal(await page.getByText("Coauthors", { exact: true }).count(), 0, "coauthor list is gone");
-    await rail.getByText("Avery Researcher", { exact: true }).waitFor();
-    await rail.getByText("Example University", { exact: true }).waitFor();
-    await rail.getByText("Sent with questions: 3 recent papers \u00b7 2 topics", { exact: true }).waitFor();
-    await rail.getByText("Today", { exact: true }).waitFor();
-    await shot(page, "desktop-rail");
-    assert.equal(await rail.getByRole("button", { name: "Recent", exact: true }).count(), 1);
-    await rail.getByRole("button", { name: "Pick", exact: true }).click();
-    assert.equal(await rail.locator(".you-papers").getByRole("checkbox").count(), 3, "Pick shows selectable papers");
-    assert.equal(await rail.getByText("Same institution", { exact: true }).count(), 0);
-    assert.equal(await rail.getByRole("button", { name: "5 years", exact: true }).count(), 0);
-    await shot(page, "desktop-edit-open");
+    assert.equal(await rail.getByText('Context',{exact:true}).count(),0);
+    assert.equal(await page.getByRole('complementary',{name:'Conversation context'}).count(),0);
+    await page.getByRole('button',{name:'Manage context'}).click();
+    const panel=page.getByRole('complementary',{name:'Conversation context'});
+    await panel.getByRole('button',{name:'Avery Researcher',exact:true}).waitFor();
+    await panel.getByText('Example University',{exact:true}).waitFor();
+    await panel.getByText('Clinical informatics · Data standards',{exact:true}).waitFor();
+    await panel.getByText('No publications selected.',{exact:true}).waitFor();
+    await panel.locator('.you-paper-choice').first().waitFor();
+    assert.equal(await panel.locator('.you-paper-choice').count(),3);
+    await panel.locator('.you-paper-choice input').first().check();
+    await panel.getByText('1/8 selected',{exact:true}).waitFor();
+    await shot(page,'desktop-context');
+    await panel.getByRole('button',{name:'Close context'}).click();
 
     await page.locator(".chat-input").fill("Use my profile and focus settings");
     await page.getByRole("button", { name: "Send message", exact: true }).click();
@@ -121,26 +125,27 @@ function fullSession(id) {
     assert.equal(sent.same_place, false);
     assert.equal(sent.recent_years, 0);
     assert.equal(sent.paper_scope, "chosen");
-    assert.equal(sent.paper_titles.length, 3);
+    assert.deepEqual(sent.paper_titles, []);
+    assert.deepEqual(sent.selected_publications, [{author_id:'43',work_id:'W1'}]);
     await page.waitForTimeout(1_000);
     assert(capture.puts.length > 0, "a changed conversation should save");
 
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.waitForTimeout(300);
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
-    await rail.getByRole("button", { name: "Close sidebar", exact: true }).click();
-    await shot(page, "mobile-chat");
-    await page.getByRole("button", { name: "Open sidebar", exact: true }).click();
-    await rail.getByText("Context", { exact: true }).click();
-    await rail.getByText("Avery Researcher", { exact: true }).waitFor();
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
-    await shot(page, "mobile-rail-open");
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(200);
-    assert.equal(await rail.count(), 0, "Escape closes the mobile rail");
+    await page.setViewportSize({width:390,height:844});
+    await page.waitForTimeout(250);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button',{name:'Manage context'}).click();
+    await panel.getByText('1/8 selected',{exact:true}).waitFor();
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+    await shot(page,'mobile-context');
+    await page.keyboard.press('Escape');
+    assert.equal(await panel.count(),0,'Escape closes the context drawer');
+    await page.getByRole('button',{name:'Open sidebar'}).click();
+    await rail.getByText('Earlier team chat',{exact:true}).waitFor();
+    await page.keyboard.press('Escape');
+    assert.equal(await rail.count(),0,'Escape closes the mobile history rail');
 
     assert.deepEqual(errors, []);
-    console.log("PASS: owner-wide history, unchanged-open guard, You card controls, request payload, changed-chat save, and responsive rail.");
+    console.log("PASS: owner-wide history, unchanged-open guard, topics-only migration, explicit paper request, changed-chat save, right context and mobile history.");
   } finally {
     await browser.close();
   }

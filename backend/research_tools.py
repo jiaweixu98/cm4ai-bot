@@ -311,7 +311,7 @@ class ResearchTools:
                                          'find_paper_audience')
 
     def explore_coauthors(self, author_id: str, specialty: str, institution: str, geography: str,
-                          from_year: int | None, to_year: int | None) -> dict:
+                          from_year: int | None, to_year: int | None, limit: int = 8) -> dict:
         self._charge('explore_coauthors')
         focal = str(author_id or self.self_id)
         if self.library is not None and hasattr(self.library,'canonical_author'):
@@ -319,7 +319,9 @@ class ResearchTools:
         if not focal.isdigit(): return {'status':'needs_person','people':[]}
         if self.library is None: return {'status':'unavailable','people':[]}
         from paper_discovery import explore
-        result = explore(self.library,focal,specialty,institution,geography,from_year,to_year)
+        result = explore(self.library,focal,specialty,institution,'',from_year,to_year,
+                         limit=limit,
+                         affiliation_lookup=lambda aid: (self.details(aid) or {}).get("affiliations", []))
         return self._publication_results(result,'recorded coauthors matching the publication filters','explore_coauthors')
 
     def resolve_person(self, name: str) -> dict:
@@ -499,7 +501,7 @@ class ResearchTools:
                      displayed_results: list[dict] | None = None) -> dict:
         self._charge("read_context")
         def read(ids):
-            return [p for aid in ids[:8] if (p := self._person(aid, limit=3))]
+            return [p for aid in ids[:8] if (p := self._person(aid, limit=0))]
         displayed = []
         previous = {str(row.get('author_id', '')): row for row in (displayed_results or [])[:8]}
         for author_id in displayed_ids[:8]:
@@ -529,8 +531,21 @@ class ResearchTools:
                     person = {**person, 'papers': [_with_excerpt(p) for p in papers]}
             if person:
                 displayed.append(person)
-        return {"profile_context": self._person(profile_id, limit=3),
+        chosen = self.context_publications()
+        profile = self._person(profile_id, limit=0)
+        if profile:
+            profile['topics'] = profile.get('research_topics') or []
+            profile['papers'] = [p for p in chosen if p['author_id'] == profile['author_id']]
+        return {"profile_context": profile, "selected_publications": chosen,
                 "selected_people": read(selected_ids), "displayed_people_in_order": displayed}
+
+    def context_publications(self):
+        if self.library is None: return []
+        records = []
+        for row in self.library.selected_publications(getattr(self,'selected_publication_refs',[])):
+            paper = self._remember_paper(row['author_id'],library_paper(row))
+            if paper: records.append(_with_excerpt(paper))
+        return records
 
     # ---------- OpenAlex (approved external source) ----------
 

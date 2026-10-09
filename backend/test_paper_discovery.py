@@ -6,7 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from paper_library import PaperLibrary
-from paper_discovery import audience, explore
+from paper_discovery import audience, explore as source_explore, explore_people
+
+def current_affiliations(aid):
+    return [{"institution":"Clinical Institute","ror_id":"https://ror.org/012345678","source":"orcid","trusted":True,"is_current":True}] if str(aid)=="2" else []
+
+def explore(*args, **kwargs):
+    return source_explore(*args, affiliation_lookup=current_affiliations, **kwargs)
+
 from geography import Geography
 
 
@@ -22,6 +29,8 @@ class DiscoveryTests(unittest.TestCase):
             INSERT INTO papers VALUES('W1001','Clinical phenotyping with health records','clinical phenotyping electronic records',2025,NULL,NULL,NULL,NULL,0,NULL,NULL,'clinical phenotyping with health records'),
                 ('W1002','Portable clinical phenotyping systems','clinical phenotyping electronic records',2024,NULL,NULL,NULL,NULL,0,NULL,NULL,'portable clinical phenotyping systems'),
                 ('W1003','Ocean ecosystem biology','coral ocean ecosystems',2020,NULL,NULL,NULL,NULL,0,NULL,NULL,'ocean ecosystem biology');
+            UPDATE papers SET primary_topic='clinical phenotyping' WHERE work_id IN ('W1001','W1002');
+            UPDATE papers SET primary_topic='ocean' WHERE work_id='W1003';
             INSERT INTO paper_authors VALUES('W1001',1,1,'confirmed'),('W1001',2,2,'unrecognised'),('W1002',3,1,'unknown'),('W1003',1,1,'confirmed'),('W1003',4,2,'unknown');
             INSERT INTO publication_groups VALUES(2,'institution','Clinical Institute','https://ror.org/012345678','unrecognised');
             INSERT INTO publication_affiliations VALUES(2,'W1001','institution');
@@ -47,6 +56,12 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result,audience(self.library,None,'W1001'))
         self.assertEqual(audience(self.library,None)['status'],'needs_paper')
 
+    def test_audience_accepts_description_without_inventing_title(self):
+        result = audience(self.library,None,abstract='clinical phenotyping electronic health records')
+        self.assertEqual(result['status'],'ok')
+        self.assertTrue(result['people'])
+        self.assertEqual(result['source_paper']['title'],'')
+
     def test_explore_dates_apply_to_joint_papers_and_geography_has_a_source(self):
         self.assertEqual(explore(self.library,1,from_year=2021)['people'][0]['author_id'],'2')
         self.assertEqual(explore(self.library,1,to_year=2021)['people'][0]['author_id'],'4')
@@ -58,9 +73,9 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual([p['author_id'] for p in result['people']],['2'],typed)
         result=explore(self.library,1,geography='US',locations=places)
         self.assertEqual(result['people'][0]['location_evidence'][0]['source'],'https://ror.org/012345678')
-        self.assertEqual(result['geography_basis'],'institution_on_shared_paper')
+        self.assertEqual(result['geography_basis'],'current_trusted_affiliations')
         self.assertEqual(result['geography_locations_version'],'fixture')
-        # Person 4 has no ROR on the shared paper, so the answer says it is incomplete.
+        # Person 4 has no resolved current trusted institution.
         self.assertFalse(result['geography_complete']); self.assertEqual(result['geography_unresolved_people'],1)
         self.assertEqual(result['geography_checked_people'],1)
         for typed in ('UK','Germany','Texas','Europe','CA'):  # CA alone is Canada
@@ -84,6 +99,63 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(calls,['012345678'])  # the failure is cached
         result=explore(self.library,1,geography='US',locations=places)
         self.assertEqual(result['people'],[]); self.assertFalse(result['geography_complete'])
+
+    def test_historical_and_imported_affiliations_cannot_establish_geography(self):
+        places=Geography({'012345678':{'country_code':'US','country_name':'United States'}},live=None)
+        for aff in ({'institution':'Clinical Institute','ror_id':'https://ror.org/012345678','trusted':True,'is_current':False,'end_year':2024},
+                    {'institution':'Clinical Institute','ror_id':'https://ror.org/012345678','trusted':False,'is_current':True}):
+            result=source_explore(self.library,1,geography='US',locations=places,affiliation_lookup=lambda aid:[aff])
+            self.assertEqual(result['people'],[])
+
+    def test_specialty_keeps_specific_terms_and_names_a_nearby_topic(self):
+        with sqlite3.connect(self.path / 'papers.sqlite') as db:
+            db.execute("INSERT INTO papers VALUES('W1005','Clinical glioblastoma radiation','clinical radiation resistance',2022,NULL,NULL,NULL,NULL,0,'glioblastoma',NULL,'clinical glioblastoma radiation')")
+            db.execute("INSERT INTO paper_authors VALUES('W1005',1,1,'confirmed'),('W1005',5,2,'unknown')")
+            rowid = db.execute("SELECT rowid FROM papers WHERE work_id='W1005'").fetchone()[0]
+            db.execute("INSERT INTO papers_fts(rowid,title,abstract) VALUES(?,?,?)", (rowid, 'Clinical glioblastoma radiation', 'clinical radiation resistance'))
+        result = explore(self.library, 1, specialty='clinical phenotyping')
+        self.assertNotIn('5', [person['author_id'] for person in result['people']])
+        matched = next(person for person in result['people'] if person['author_id'] == '2')
+        self.assertTrue(all('phenotyp' in (paper['title'] + ' ' + (paper.get('abstract') or '')).casefold() for paper in matched['matched_papers']))
+        empty = explore(self.library, 1, specialty='quantum cryptocurrency')
+        self.assertEqual(empty['people'], [])
+        self.assertIn('clinical phenotyping', empty['nearby_topics'])
+
+    def test_topics_or_combined_categories_and_complete_pagination(self):
+        first=explore_people(self.library,'1',topics=['clinical phenotyping','ocean'],coauthors_only=True,limit=1)
+        second=explore_people(self.library,'1',topics=['clinical phenotyping','ocean'],coauthors_only=True,offset=1,limit=1)
+        self.assertEqual(first['total'],2);self.assertTrue(first['has_more'])
+        self.assertEqual([p['author_id'] for p in first['people']+second['people']],['2','4'])
+        self.assertEqual(explore_people(self.library,'1',topics=['ocean'],from_year=2025,to_year=2025,coauthors_only=True)['people'],[])
+        exact=explore_people(self.library,'1',topics=['clinical phenotyping'],from_year=2025,to_year=2025,coauthors_only=True)
+        self.assertEqual([p['author_id'] for p in exact['people']],['2'])
+
+    def test_selected_context_is_live_and_automatic_papers_do_not_migrate(self):
+        from context_selection import resolve_references, revalidate_session
+        ref={'author_id':'2','work_id':'W1001'}
+        self.assertEqual(resolve_references(self.library,[ref])[0]['work_id'],'W1001')
+        recent={'aid':'2','state':{'contextChoices':{'paperScope':'profile','paperTitles':['Clinical phenotyping with health records']}}}
+        self.assertEqual(revalidate_session(recent,self.library)['state']['contextChoices']['selectedPapers'],[])
+        explicit={'focal_author_id':'2','state':{'contextChoices':{'paperScope':'chosen','paperTitles':['Clinical phenotyping with health records']}}}
+        self.assertEqual(revalidate_session(explicit,self.library)['state']['contextChoices']['selectedPapers'][0]['work_id'],'W1001')
+        with sqlite3.connect(self.state) as db: db.execute("INSERT INTO excluded_links VALUES('test-v1',2,'W1001')")
+        self.assertEqual(resolve_references(self.library,[ref]),[])
+        self.assertEqual(resolve_references(self.library,[],['Clinical phenotyping with health records'],'2'),[])
+
+    def test_read_context_has_topics_but_only_explicit_profile_papers(self):
+        from research_tools import ResearchTools
+        tools=ResearchTools(lambda *_:[],lambda aid:{'name':f'Person {aid}',
+            'topics':['clinical phenotyping'],'papers':[{'Title':'Injected browser title'}]},lambda *_:[],library=self.library)
+        initial=tools.read_context('1',['2'],[])
+        self.assertEqual(initial['profile_context']['topics'],['clinical phenotyping'])
+        self.assertEqual(initial['profile_context']['papers'],[])
+        self.assertEqual(initial['selected_people'][0]['papers'],[])
+        self.assertEqual(initial['selected_publications'],[])
+        tools.selected_publication_refs=[{'author_id':'1','work_id':'W1001'}]
+        chosen=tools.read_context('1',[],[])
+        self.assertEqual([p['work_id'] for p in chosen['profile_context']['papers']],['W1001'])
+        with sqlite3.connect(self.state) as db: db.execute("INSERT INTO excluded_links VALUES('test-v1',1,'W1001')")
+        self.assertEqual(tools.read_context('1',[],[])['selected_publications'],[])
 
     def test_pasted_title_of_a_catalog_paper_excludes_its_authors(self):
         pasted=audience(self.library,None,'','Clinical phenotyping with health records','')
@@ -125,6 +197,15 @@ class DiscoveryTests(unittest.TestCase):
             shortlist_kind='researchers', shortlist_title='', result_update='keep',
             task_goal='', task_requirements=[], suggested_followups=[])
 
+    def test_explore_requested_count_preserves_deterministic_order(self):
+        tools = self._tools()
+        full = tools.explore_coauthors('1', '', '', '', None, None)
+        self.assertEqual(len(full['people']), 2)
+        limited = tools.explore_coauthors('1', '', '', '', None, None, limit=1)
+        self.assertEqual([p['author_id'] for p in limited['people']],
+                         [full['people'][0]['author_id']])
+        self.assertEqual(len(tools.result_people), 1)
+
     def test_promote_abstention_does_not_publish_nearest_papers(self):
         from research_agent import render_answer
         tools = self._tools()
@@ -164,7 +245,7 @@ class DiscoveryTests(unittest.TestCase):
         tools.explore_coauthors('1', '', '', '', 2035, 2040)
         answer = self._answer('No shared publications were returned for this date range.', 'research', ['1'])
         rendered = render_answer(answer, tools)
-        self.assertEqual(rendered['reply'], 'No recorded coauthors match the requested publication filters.')
+        self.assertEqual(rendered['reply'], 'No recorded coauthors have papers on that topic.')
         self.assertNotIn('shortlist', rendered)
         self.assertEqual(rendered['citations'], [])
         self.assertEqual(rendered['result_update'], 'replace')

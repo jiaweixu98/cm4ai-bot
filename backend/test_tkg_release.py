@@ -55,6 +55,14 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual([a['institution'] for a in displayable_affiliations(row)],['A'])
         self.assertEqual([to_int(v) for v in ('2020','2020.0','',None,' 7 ')],[2020,2020,None,None,7])
 
+    def test_pending_edits_are_retained_for_review_but_not_displayed(self):
+        row={'affiliations':[{'institution':'ORCID Institute','source':'orcid','is_current':True}]}
+        reviews=[{'group_id':'orcid institute','state':'pending','override':{'institution':'Edited Institute'}},
+                 {'group_id':'addition','state':'pending','override':{'institution':'Added Institute'}}]
+        self.assertEqual([a['institution'] for a in displayable_affiliations(row,reviews)],['ORCID Institute'])
+        reviews[1]['state']='approved'
+        self.assertEqual([a['institution'] for a in displayable_affiliations(row,reviews)],['ORCID Institute','Added Institute'])
+
     def test_refresh_uses_the_display_filter(self):
         import inspect
         from scripts import tkg_release

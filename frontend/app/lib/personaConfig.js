@@ -50,6 +50,12 @@ export const GENERAL_STARTERS = [
   },
 ];
 
+export const SHOWCASE_STARTERS = [
+  { intent: "collaborator", icon: "sparkle", label: "Explore", prompt: "Explore Jake Y. Chen’s recorded coauthors on clinical phenotyping papers from 2020 through 2026." },
+  { intent: "collaborator", icon: "team", label: "Collaborate", prompt: "Find Bridge2AI researchers for a proposed study combining clinical phenotyping and responsible AI, supported by relevant publications." },
+  { intent: "collaborator", icon: "sparkle", label: "Promote", prompt: "Find potential audience members for my paper on pathway and gene-set enrichment for molecular phenotype discovery. Use related publications to support each recommendation." },
+];
+
 export function parseAidParam(value) {
   const aid = String(value || "").trim();
   if (!aid || aid.toLowerCase() === UNLINKED_AID) return UNLINKED_AID;

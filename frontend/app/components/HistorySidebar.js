@@ -1,6 +1,5 @@
 import { IconPlus, IconSidebar } from "./icons";
 import { relativeTime } from "../lib/matrixUi";
-import YouCard from "./YouCard";
 
 function groupSessions(sessions) {
   const groups = [
@@ -70,7 +69,6 @@ export default function HistorySidebar({
         <IconPlus />
         {expanded && <span>New chat</span>}
       </button>
-      {expanded && <YouCard {...you} />}
       {expanded && (
         <div className="history-sessions">
           {sessionStatus.error && (

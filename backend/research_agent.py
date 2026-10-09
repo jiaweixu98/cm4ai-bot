@@ -144,27 +144,26 @@ search and summarize the literature. Adapt to what the user actually asks.
   A plain research need ("find mentors for X", "who could help with Y") still uses
   search_people. If it returns empty with reason no_focal_person, ask which person to use.
 - For promoting a paper or finding its audience, use find_paper_audience with its DOI,
-  work ID or exact title; for a new paper pass its supplied title and abstract instead.
-  Ask for the paper when missing. Keep the deterministic order and cite each person's
+  work ID or exact title; for a new paper use its supplied description or PDF text as
+  abstract, and its title only when supplied. A description alone is sufficient to
+  search; use an empty title rather than inventing one. Ask for the paper only when
+  no description, identifier or attachment is available. Keep the deterministic order and cite each person's
   returned matching publications. These are potential audiences based on related work,
   not confirmed readers, willing collaborators or contacts. Do not send messages.
   The tool returns retrieval candidates, not proof of a relevant audience. Return an
   empty shortlist when their publications do not support the paper's topic; never fill
   the list just because nearest publications were returned.
-- For exploring a person's coauthors with specialty, institution, geography or a date
-  range, resolve the person then use explore_coauthors. Dates and specialties apply to
-  shared publications, not a person's overall career. Apply the requested filters through
-  the tool even when no matches are expected; do not infer catalog contents from dates.
-  Geography is the institution printed
-  on the shared paper (placed through its ROR id), never where someone lives now; say so
-  when you report it. Accepted geography: a country name or alias (USA, U.S., United States,
-  UK, Great Britain), an ISO code (US, DEU), a US state or Canadian province name (California,
-  Ontario) or "US-CA" style code, a city (San Diego), or a continent (Europe, North America).
-  A bare two-letter code is a country (CA is Canada). Regions like "Bay Area" are not
-  recognised; use the city or state. Institution accepts a name fragment or initials (UCSF).
-  If geography_complete is false or geography_unresolved_people is nonzero, some coauthors
-  could not be placed (no institution or ROR id on the paper): state that, with the count,
-  and do not claim the returned set exhausts all matching coauthors.
+- For exploring a person's coauthors by specialty or a date range, resolve the person
+  then use explore_coauthors. Pass geography as an empty string. Current affiliations do
+  not support a location filter. If the user asks for a place, answer from specialty and
+  years, and say that in one sentence. Do not return a partial country list.
+  Dates and specialties apply to shared publications, not a person's overall career.
+  A person matches only when a shared paper supports the specialty words. Do not present
+  a nearby paper as that specialty. If the tool returns no people and nearby_topics is
+  set, name the first nearby topic in one sentence and ask if they want researchers in
+  that area. Do not list those people until they agree. Use find_similar_work or
+  find_paper_audience only when they ask for similar or related work, or accept that
+  follow-up. Write with commas, periods, and hyphens. Do not use em dashes.
 - For a named person: resolve_person, then read_person_evidence for the actual question.
   If ambiguous, ask which person and show the returned affiliations. Never guess.
 - For "the second person" or earlier results, call read_context; it keeps display order.
@@ -457,12 +456,12 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
         # An empty query has no paper to cite. A model may label its result summary
         # as a research claim; publish the checked query outcome instead of a
         # generic error or an unrelated focal-person profile.
-        text = ('No recorded coauthors match the requested publication filters.'
+        text = ('No recorded coauthors have papers on that topic.'
                 if empty_search.get('kind') == 'explore_coauthors'
                 else 'No potential audience members were found for this paper.')
-        unresolved = empty_search.get('geography_unresolved_people', 0)
-        if unresolved:
-            text += f' Institutions on shared papers could not be placed for {unresolved} coauthors.'
+        nearby = empty_search.get('nearby_topics') or []
+        if empty_search.get('kind') == 'explore_coauthors' and nearby:
+            text += f' The closest recorded area is {nearby[0]}. Ask if you want researchers in that area.'
         blocks.append(AnswerBlock(kind='general', person_ids=[],
                                   parts=[AnswerPart(text=text, evidence_ids=[])]))
     if not blocks and not cards:
@@ -526,13 +525,15 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
     searched = any(call in {"search_people", "assemble_team", "find_similar_work", "find_paper_audience", "explore_coauthors"} for call in tools.calls)
     result_update = ("replace" if cards or searched
                      else "keep" if answer.result_update == "replace" else answer.result_update)
-    payload = {"action": "agent", "reply": "\n\n".join(paragraphs).strip(),
+    payload = {"action": "agent", "reply": "\n\n".join(paragraphs).strip().replace("\u2014", ", ").replace("\u2013", "-"),
                "citations": [{k: v for k, v in c.items() if k in {"evidence_id", "title", "year", "url", "source"}}
                              for c in citations],
                "runtime": "agents-sdk", "tool_calls": tools.calls,
                "result_update": result_update,
                "working_context": {"goal": answer.task_goal.strip()[:500],
                                    "requirements": [r.strip()[:300] for r in answer.task_requirements if r.strip()][:8]}}
+    if (tools.publication_search or {}).get("kind") == "explore_coauthors":
+        payload["explore_filters"] = tools.publication_search["filters"]
     payload["suggested_followups"] = [q.strip()[:120] for q in answer.suggested_followups if q.strip()][:3]
     if cards:
         if not payload['reply']:
@@ -622,48 +623,10 @@ def _catalog_rows(raw: dict, titles: list[dict]) -> list[dict]:
 
 
 def _signed_in_profile(person: dict, raw: dict, choices, titles: list[dict]) -> dict:
-    """The profile the user chose to send: topics and MeSH, a few papers, or a picked set."""
-    profile = {
-        "author_id": person["author_id"],
-        "name": person["name"],
-        "affiliation": person.get("affiliation", ""),
-    }
-    scope = getattr(choices, "paper_scope", None) or "profile"
-    if scope != "papers":
-        topics = [str(term).strip() for term in (person.get("research_topics") or []) if str(term).strip()]
-        mesh = [str(term).strip() for term in (person.get("mesh") or []) if str(term).strip()]
-        if topics:
-            profile["topics"] = topics[:6]
-        if mesh:
-            profile["mesh"] = mesh[:8]
-    evidence = {str(paper.get("title") or "").casefold(): paper for paper in person.get("papers") or []}
-    rows = _catalog_rows(raw, titles)
-    if scope == "chosen":
-        wanted = []
-        for value in getattr(choices, "paper_titles", None) or []:
-            title = " ".join(str(value).split())[:300]
-            if title and title.casefold() not in {item.casefold() for item in wanted}:
-                wanted.append(title)
-        by_title = {row["title"].casefold(): row for row in rows}
-        picked = [by_title.get(title.casefold()) or {"title": title, "year": ""} for title in wanted]
-    elif scope == "papers":
-        picked = rows[:8]
-    else:
-        floor = datetime.date.today().year - 5
-        recent = [row for row in rows if _paper_year(row.get("year")) >= floor]
-        picked = (recent or rows)[:8]
-    papers = []
-    for row in picked[:8]:
-        known = evidence.get(row["title"].casefold()) or {}
-        item = {"title": row["title"]}
-        year = str(known.get("year") or row.get("year") or "")
-        if _paper_year(year):
-            item["year"] = str(_paper_year(year))
-        if known.get("evidence_id"):
-            item["evidence_id"] = known["evidence_id"]
-        papers.append(item)
-    profile["papers"] = papers
-    return profile
+    # Selection is resolved against the live catalog before this function runs.
+    return {"author_id": person["author_id"], "name": person["name"],
+            "affiliation": person.get("affiliation", ""),
+            "topics": list(person.get('research_topics') or [])[:6], "papers": list(person.get('papers') or [])[:8]}
 
 
 def _build_input(req, profile: dict | None = None, selected: list | None = None,
@@ -683,6 +646,8 @@ def _build_input(req, profile: dict | None = None, selected: list | None = None,
                "has_selected_people": bool(req.context_person_ids),
                "displayed_shortlist": [{"author_id": str(p.get("author_id", "")), "name": str(p.get("name", ""))[:120]}
                                        for p in req.search_results[:8]]}
+    if getattr(req, "_resolved_displayed", None):
+        current["displayed_shortlist"] = req._resolved_displayed
     current["user_publications_on_record"] = bool(profile and (profile.get("papers") or profile.get("topics")))
     if profile:
         current["signed_in_researcher"] = profile
@@ -690,6 +655,8 @@ def _build_input(req, profile: dict | None = None, selected: list | None = None,
         current["recommendation_scope"] = recommendation_scope
     if selected:
         current["people_added_to_chat"] = selected
+    if getattr(req, "_resolved_publications", None):
+        current["selected_publications"] = req._resolved_publications
     history.append({"role": "user", "content": json.dumps(current, ensure_ascii=False)})
     return history
 
@@ -731,14 +698,14 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
 
     @function_tool(failure_error_function=_tool_error)
     async def find_paper_audience(identifier: str, title: str, abstract: str) -> dict:
-        """Potential audience from matching papers. Use an identifier, or supplied title and abstract. Never invent the source paper."""
+        """Potential audience from matching papers. Use an identifier, or supplied description/PDF text as abstract with optional supplied title. Never invent source metadata."""
         return await call(services.find_paper_audience, identifier, title, abstract)
 
     @function_tool(failure_error_function=_tool_error)
     async def explore_coauthors(author_id: str, specialty: str, institution: str, geography: str,
-                                from_year: int | None, to_year: int | None) -> dict:
-        """Filter a person's recorded coauthors by their shared papers: specialty, printed institution (name fragment or initials), geography of the institution printed on the shared paper (country/alias/ISO code, US state or Canadian province, city, continent; not current residence) and inclusive years. Empty author_id uses the signed-in person. Report geography_unresolved_people when nonzero."""
-        return await call(services.explore_coauthors, author_id, specialty, institution, geography, from_year, to_year, executor=_network_executor)
+                                from_year: int | None, to_year: int | None, limit: int = 8) -> dict:
+        """Filter a person's recorded coauthors by shared papers: specialty and inclusive years. Use the requested result count as limit (1-20; default 8). Pass geography as an empty string. Location is not applied. Empty author_id uses the signed-in person. A paper must support the specialty words. If people is empty, use nearby_topics."""
+        return await call(services.explore_coauthors, author_id, specialty, institution, geography, from_year, to_year, limit, executor=_network_executor)
 
     @function_tool(failure_error_function=_tool_error)
     async def get_connection(from_author_id: str, to_author_id: str) -> dict:
@@ -790,21 +757,22 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
 
     profile = None
     choices = getattr(req, "context_choices", None)
+    from context_selection import resolve_references
+    refs = [r.model_dump() for r in (getattr(choices,'selected_publications',None) or [])]
+    legacy = (getattr(choices,'paper_titles',None) or []) if getattr(choices,'paper_scope',None) == 'chosen' else []
+    services.selected_publication_refs = await call(resolve_references, services.library, refs, legacy, req.aid)
+    selected_publications = await call(services.context_publications)
+    if req.search_results:
+        verified = await call(services.read_context, req.aid, [], [str(p.get("author_id", "")) for p in req.search_results[:8]],req.search_results[:8])
+        req._resolved_displayed = verified["displayed_people_in_order"]
+    req._resolved_publications = selected_publications
     if req.aid not in {"", "unlinked", "0"}:
-        person = await call(services._person, req.aid, req.user_input[:2000], 8)
+        person = await call(services._person, req.aid, '', 0)
         if person:
             services.self_id = person["author_id"]
-            raw = await call(services.details, person["author_id"]) or {}
-            titles = []
-            if services.library is not None and str(person["author_id"]).isdigit():
-                titles = await call(services.library.titles, int(person["author_id"]), 24)
-            if choices:
-                profile = _signed_in_profile(person, raw if isinstance(raw, dict) else {}, choices, titles)
-            else:
-                profile = {"author_id": person["author_id"], "name": person["name"],
-                           "affiliation": person.get("affiliation", ""),
-                           "papers": [{"evidence_id": p["evidence_id"], "title": p["title"], "year": p.get("year", "")}
-                                      for p in person["papers"]]}
+            person['papers'] = [p for p in selected_publications if p['author_id'] == person['author_id']]
+            profile = _signed_in_profile(person, {}, choices, [])
+            profile['selected_publications'] = selected_publications
     place = ""
     from_year = None
     if choices and getattr(choices, "same_place", False):
@@ -828,10 +796,11 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
         recommendation_scope["from_year"] = from_year
     selected = []
     for pid in list(dict.fromkeys(str(p) for p in req.context_person_ids))[:8]:
-        if pid != services.self_id and (person := await call(services._person, pid, req.user_input[:2000], 3)):
+        if pid != services.self_id and (person := await call(services._person, pid, "", 0)):
             selected.append({"author_id": person["author_id"], "name": person["name"],
                              "affiliation": person.get("affiliation", ""),
-                             "papers": [{"evidence_id": p["evidence_id"], "title": p["title"]} for p in person["papers"]]})
+                             "topics": person.get("research_topics") or [],
+                             "papers": [p for p in selected_publications if p["author_id"] == person["author_id"]]})
     tools = [resolve_person, read_person_evidence, search_people, find_similar_work, find_paper_audience, explore_coauthors, assemble_team, read_context]
     if services.path is not None:
         tools.append(get_connection)

@@ -1,4 +1,6 @@
 export const BRIDGE_MSG = {
+  EXPLORE: "bridge2ai-explore",
+  PROFILE_UPDATED: "bridge2ai-profile-updated",
   OPEN_PERSON: "bridge2ai-open-person",
   SAVE_PERSON: "bridge2ai-save-person",
   UNSAVE_PERSON: "bridge2ai-unsave-person",

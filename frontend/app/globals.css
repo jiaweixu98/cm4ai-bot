@@ -3746,3 +3746,17 @@ body,
   .you-switch,
   .you-switch::after { transition: none; }
 }
+
+.conversation-context { position: fixed; right: 0; top: 0; bottom: 0; width: 360px; max-width: 92vw; z-index: 70; background: var(--matrix-bg-elevated); color: var(--matrix-text); border-left: 1px solid var(--matrix-border); overflow-y: auto; }
+.context-panel-head { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; background: inherit; z-index: 1; }
+.context-panel-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.conversation-context .you-edit-body { max-height: none; overflow: visible; padding: 4px 20px 24px; display: grid; gap: 24px; }
+.context-picker-label { display: grid; gap: 6px; margin: 10px 0; font-size: 13px; }
+.context-picker-label :is(input,select) { width: 100%; min-width: 0; padding: 8px; font: inherit; color: inherit; background: var(--matrix-bg-elevated); border: 1px solid var(--matrix-border); border-radius: 6px; }
+.context-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
+.context-scrim { display: none; }
+.matrix-stage.has-context { margin-right: 360px; }
+@media (max-width: 960px) { .matrix-stage.has-context { margin-right: 0; } .context-scrim { display: block; position: fixed; inset: 0; z-index: 69; background: #0003; border: 0; } }
+
+.showcase-examples { margin-top: 18px; font-size: 13px; color: var(--matrix-text-2); }
+.showcase-examples summary { cursor: pointer; margin-bottom: 12px; }

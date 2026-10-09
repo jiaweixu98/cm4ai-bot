@@ -3,6 +3,7 @@ import { CHAT_WINDOW } from "../lib/matrixUi";
 import { searchPeopleByName } from "../lib/api";
 import { StarterIcon, IconClose, IconPaperclip, IconSend, IconStop, IconTeam } from "./icons";
 import MessageBubble from "./MessageBubble";
+import { SHOWCASE_STARTERS } from "../lib/personaConfig";
 
 export default function ChatPane({
   starters,
@@ -448,6 +449,7 @@ export default function ChatPane({
                 </button>
               ))}
             </div>
+            <details className="showcase-examples"><summary>More examples</summary><div className="starter-grid">{SHOWCASE_STARTERS.map(starter => <button type="button" className="starter-card" key={starter.label} onClick={() => onUseStarter ? onUseStarter(starter) : setInputValue(starter.prompt)}><span className="starter-copy"><span className="starter-label">{starter.label}</span><span className="starter-prompt">{starter.prompt}</span></span></button>)}</div></details>
           </div>
         )}
         {visibleMessages.map((msg) => (

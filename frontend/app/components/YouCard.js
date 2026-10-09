@@ -1,165 +1,104 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchAuthorDetails } from "../lib/api";
+import { matrixApiPath } from "../lib/apiPath.mjs";
 
-const PAPER_PREVIEW = 3;
-const SCOPE_OPTIONS = [
-  { id: "profile", label: "Recent" },
-  { id: "papers", label: "Papers only" },
-  { id: "chosen", label: "Pick" },
-];
+const affiliation = value => ["unknown", "affiliation unavailable"].includes(String(value || "").toLowerCase()) ? "" : value;
+const key = paper => `${paper.author_id}:${paper.work_id}`;
 
-function shownAffiliation(value) {
-  const text = String(value || "").trim();
-  if (!text || ["unknown", "affiliation unavailable"].includes(text.toLowerCase())) return "";
-  return text;
-}
-
-function uniqueCount(value) {
-  return new Set((Array.isArray(value) ? value : []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)).size;
-}
-
-function paperEntries(papers, limit = 24) {
-  const rows = [];
-  const seen = new Set();
-  for (const paper of Array.isArray(papers) ? papers : []) {
-    const title = String(paper?.Title || paper?.title || "").trim();
-    const key = title.toLowerCase();
-    if (!title || title === "Untitled" || seen.has(key)) continue;
-    seen.add(key);
-    const year = String(paper?.PubYear || paper?.year || "").match(/\d{4}/)?.[0] || "";
-    rows.push({ title, year });
-    if (rows.length >= limit) break;
-  }
-  return rows;
-}
-
-function recentPapers(papers) {
-  const floor = new Date().getFullYear() - 5;
-  const recent = papers.filter((paper) => Number(paper.year) >= floor);
-  return recent.length ? recent : papers;
-}
-
-function sentSummary(details, papers, scope, selectedTitles) {
-  const parts = [];
-  const topics = scope === "papers" ? 0 : Math.min(uniqueCount(details?.topics), 6);
-  const paperCount = Math.min(8, scope === "chosen" ? selectedTitles.length : scope === "papers" ? papers.length : recentPapers(papers).length);
-  if (paperCount) parts.push(`${paperCount} ${scope === "profile" ? "recent " : scope === "chosen" ? "picked " : ""}${paperCount === 1 ? "paper" : "papers"}`);
-  if (topics) parts.push(`${topics} ${topics === 1 ? "topic" : "topics"}`);
-  return parts.length ? `Sent with questions: ${parts.join(" · ")}` : "";
-}
-
-function PaperChoices({ papers, scope, selectedTitles, onToggle }) {
-  const [shown, setShown] = useState(PAPER_PREVIEW);
-  const pool = scope === "profile" ? recentPapers(papers).slice(0, 8) : scope === "papers" ? papers.slice(0, 8) : papers;
-  const visible = pool.slice(0, shown);
-  if (!pool.length) return <p className="you-note">No papers are linked.</p>;
-  return (
-    <div className="you-paper-block">
-      <ul className="you-papers">
-        {visible.map((paper) => {
-          const picked = selectedTitles.some((title) => title.toLowerCase() === paper.title.toLowerCase());
-          return (
-            <li key={`${paper.title}-${paper.year}`}>
-              {scope === "chosen" ? (
-                <label className="you-paper-choice">
-                  <input type="checkbox" checked={picked} onChange={() => onToggle(paper.title)} />
-                  <span>{paper.title}{paper.year ? <small>{paper.year}</small> : null}</span>
-                </label>
-              ) : <span className="you-paper-line">{paper.title}{paper.year ? <small>{paper.year}</small> : null}</span>}
-            </li>
-          );
-        })}
-      </ul>
-      {pool.length > visible.length && <button type="button" className="you-more" onClick={() => setShown((count) => count + 6)}>Show more</button>}
-    </div>
-  );
-}
-
-export default function YouCard({ signedIn, linked, aid, authorInfo, seekerName, choices, onChoices, onOpenProfile, people = [], workingContext = {}, attachments = [] }) {
-  // The record carries the aid it was loaded for, so a previous person never renders.
-  const [record, setRecord] = useState(null);
-  const [failedAid, setFailedAid] = useState(null);
+export default function YouCard({ linked, aid, authorInfo, seekerName, choices, onChoices, onOpenProfile, people = [], workingContext = {}, attachments = [], onClose }) {
+  const [details, setDetails] = useState(null);
+  const [livePeople, setLivePeople] = useState([]);
+  const [author, setAuthor] = useState(linked ? String(aid) : String(people[0]?.authorId || ""));
+  const [query, setQuery] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(null);
+  const [error, setError] = useState("");
+  const panel = useRef(null);
+  const selected = choices.selectedPapers || [];
+  const selectedKeys = new Set(selected.map(key));
+  const pickerAuthor = String(page?.author_id || author);
+  const authors = [...(linked ? [{ authorId: String(aid), name: details?.name || authorInfo?.name || seekerName || "Your profile" }] : []), ...people]
+    .filter((p, i, all) => all.findIndex(other => String(other.authorId) === String(p.authorId)) === i);
 
   useEffect(() => {
-    if (!linked || !aid) return undefined;
-    const controller = new AbortController();
-    let current = true;
-    fetchAuthorDetails(aid, controller.signal)
-      .then((details) => {
-        if (current) setRecord({ aid, details });
-      })
-      .catch((error) => {
-        if (current && error?.name !== "AbortError") setFailedAid(aid);
-      });
-    return () => {
-      current = false;
-      controller.abort();
+    const previous = document.activeElement;
+    panel.current?.querySelector("button")?.focus();
+    const close = event => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "Tab" && window.innerWidth <= 960) {
+        const controls = [...panel.current.querySelectorAll('button:not(:disabled),input,select,[tabindex="0"]')];
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
     };
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("keydown", close); previous?.focus?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!linked) return;
+    const controller = new AbortController();
+    fetchAuthorDetails(aid, controller.signal).then(setDetails).catch(() => setError("Profile could not be loaded."));
+    return () => controller.abort();
   }, [aid, linked]);
 
-  const fresh = record && String(record.aid) === String(aid) ? record : null;
-  const failed = failedAid !== null && String(failedAid) === String(aid) && !fresh;
-  const details = fresh?.details || null;
-  const papers = paperEntries(details?.papers);
-  const authorMatches = authorInfo && (authorInfo.author_id === undefined || String(authorInfo.author_id) === String(aid));
-  const info = authorMatches ? authorInfo : null;
-  const name = (linked && ((details?.name && details.name !== "Unknown" ? details.name : info?.name))) || seekerName || "";
-  const affiliation = linked ? shownAffiliation(details?.affiliation) || shownAffiliation(info?.affiliation) : "";
-  const summary = fresh ? sentSummary(details, papers, choices.paperScope, choices.paperTitles) : "";
-  const topics = [...new Set((Array.isArray(details?.topics) ? details.topics : []).map(String).filter(Boolean))].slice(0, 6);
-  const terms = [...new Set((Array.isArray(details?.mesh) ? details.mesh : []).map(String).filter(Boolean))].slice(0, 8);
-  const requirements = Array.isArray(workingContext.requirements) ? workingContext.requirements.filter(Boolean) : [];
-  const overview = [linked ? "Your profile" : "", people.length ? `${people.length} ${people.length === 1 ? "person" : "people"}` : "", attachments.length ? `${attachments.length} ${attachments.length === 1 ? "file" : "files"}` : ""].filter(Boolean).join(" · ");
+  const peopleKey = JSON.stringify(people.map(p => String(p.authorId)));
+  useEffect(() => {
+    const controller = new AbortController();
+    setLivePeople([]);
+    Promise.all(people.map(async person => {
+      try { const live = await fetchAuthorDetails(person.authorId, controller.signal);
+        return {...person, name: live.name, affiliation: live.affiliation || ''};
+      } catch { return {...person, affiliation: ''}; }
+    })).then(rows => {if(!controller.signal.aborted) setLivePeople(rows);});
+    return () => controller.abort();
+  }, [peopleKey]);
 
-  function setScope(paperScope) {
-    if (paperScope === "chosen" && choices.paperTitles.length === 0) {
-      onChoices({ ...choices, paperScope, paperTitles: recentPapers(papers).slice(0, 3).map((paper) => paper.title) });
-      return;
-    }
-    onChoices({ ...choices, paperScope });
-  }
+  useEffect(() => {
+    if (!author) { setPage(null); return; }
+    const controller = new AbortController();
+    setPage(null); setError("");
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ q: query, offset: String(offset), limit: "20" });
+        const response = await fetch(matrixApiPath(`/api/author/${encodeURIComponent(author)}/publications?${params}`), { signal: controller.signal, cache: "no-store" });
+        if (!response.ok) throw new Error("Publications could not be loaded.");
+        setPage(await response.json());
+      } catch (e) { if (e.name !== "AbortError") setError(e.message); }
+    }, 180);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [author, query, offset]);
 
-  function togglePaper(title) {
-    const key = title.toLowerCase();
-    const has = choices.paperTitles.some((item) => item.toLowerCase() === key);
-    const paperTitles = has ? choices.paperTitles.filter((item) => item.toLowerCase() !== key) : [...choices.paperTitles, title].slice(0, 8);
-    onChoices({ ...choices, paperScope: "chosen", paperTitles });
-  }
-
-  return (
-    <details className="you-card context-disclosure" aria-label="Chat context">
-      <summary className="context-summary">
-        <span>Context</span>
-        {overview && <small>{overview}</small>}
-      </summary>
+  const toggle = paper => {
+    const ref = { author_id: pickerAuthor, work_id: paper.work_id, title: paper.title, year: paper.year };
+    const next = selectedKeys.has(key(ref)) ? selected.filter(p => key(p) !== key(ref)) : [...selected, ref].slice(0, 8);
+    onChoices({ ...choices, version: 2, paperScope: "chosen", paperTitles: [], selectedPapers: next });
+  };
+  return <>
+    <button className="context-scrim" type="button" aria-label="Close context panel" onClick={onClose} />
+    <aside ref={panel} className="conversation-context" aria-label="Conversation context">
+      <div className="context-panel-head"><h2>Conversation context</h2><button type="button" className="ghost-btn" onClick={onClose} aria-label="Close context">×</button></div>
       <div className="you-edit-body">
-        {name && (
-          <div>
-            <h2 className="context-section-label">You</h2>
-            {linked ? <button type="button" className="you-name" onClick={() => onOpenProfile(aid)}>{name}</button> : <p className="you-name">{name}</p>}
-            {affiliation && <p className="you-affiliation">{affiliation}</p>}
-          </div>
-        )}
-        {linked && (failed ? <p className="you-note">Profile could not be loaded.</p> : !fresh ? (
-          <div className="you-loading" aria-label="Loading profile"><span /><span /></div>
-        ) : summary && <p className="you-summary">{summary}</p>)}
-          {fresh && (
-            <>
-              <h2 className="context-section-label">Papers</h2>
-              <div className="you-seg" role="group" aria-label="Papers sent with your question">
-                {SCOPE_OPTIONS.map((option) => <button key={option.id} type="button" className={choices.paperScope === option.id ? "is-active" : ""} aria-pressed={choices.paperScope === option.id} onClick={() => setScope(option.id)}>{option.label}</button>)}
-              </div>
-              <PaperChoices key={choices.paperScope} papers={papers} scope={choices.paperScope} selectedTitles={choices.paperTitles} onToggle={togglePaper} />
-              {choices.paperScope !== "papers" && topics.length > 0 && <div><h2 className="context-section-label">Topics</h2><p className="you-note">{topics.join(" · ")}</p></div>}
-              {choices.paperScope !== "papers" && terms.length > 0 && <div><h2 className="context-section-label">Research terms</h2><p className="you-note">{terms.join(" · ")}</p></div>}
-            </>
-          )}
-        {people.length > 0 && <div><h2 className="context-section-label">People in this chat</h2><ul className="context-people">{people.map((person) => <li key={person.authorId}><button type="button" className="you-name" onClick={() => onOpenProfile(person.authorId)}>{person.name}</button>{shownAffiliation(person.affiliation) && <p className="you-affiliation">{shownAffiliation(person.affiliation)}</p>}</li>)}</ul></div>}
-        {(workingContext.goal || requirements.length > 0) && <div><h2 className="context-section-label">Current focus</h2>{workingContext.goal && <p className="you-note">{workingContext.goal}</p>}{requirements.length > 0 && <ul className="context-requirements">{requirements.map((item, index) => <li key={index}>{item}</li>)}</ul>}</div>}
-        {attachments.length > 0 && <div><h2 className="context-section-label">For the next question</h2><ul className="context-requirements">{attachments.map((file) => <li key={file.id}>{file.title || file.filename}</li>)}</ul></div>}
-        {!linked && people.length === 0 && !workingContext.goal && requirements.length === 0 && attachments.length === 0 && <p className="you-note">Add people or a document in the message box, or describe your research in chat.</p>}
-        {!signedIn && !linked && <p className="you-note">Sign in on the graph to use your profile.</p>}
+        {(details?.name || authorInfo?.name || seekerName) && <section><h3 className="context-section-label">Profile</h3>
+          <button className="you-name" type="button" onClick={() => onOpenProfile(aid)}>{details?.name || authorInfo?.name || seekerName}</button>
+          {affiliation(details?.affiliation) && <p className="you-affiliation">{details.affiliation}</p>}
+        </section>}
+        {!!details?.topics?.length && <section><h3 className="context-section-label">Topics</h3><p className="you-note">{details.topics.join(" · ")}</p></section>}
+        {!!livePeople.length && <section><h3 className="context-section-label">Selected people</h3><ul className="context-people">{livePeople.map(p => <li key={p.authorId}><button className="you-name" onClick={() => onOpenProfile(p.authorId)}>{p.name}</button>{affiliation(p.affiliation) && <p className="you-affiliation">{p.affiliation}</p>}</li>)}</ul></section>}
+        <section><h3 className="context-section-label">Selected publications</h3>
+          {selected.length ? <ul className="you-papers">{selected.map(p => <li className="you-paper-block" key={key(p)}><span className="you-paper-line">{p.title}{p.year && <small>{p.year}</small>}</span><button type="button" className="you-more" aria-label={`Remove ${p.title}`} onClick={() => onChoices({ ...choices, selectedPapers: selected.filter(other => key(other) !== key(p)) })}>Remove</button></li>)}</ul> : <p className="you-note">No publications selected.</p>}
+        </section>
+        {!!authors.length && <section><h3 className="context-section-label">Choose publications</h3>
+          <label className="context-picker-label">Researcher<select aria-label="Publication researcher" value={author} onChange={e => { setAuthor(e.target.value); setOffset(0); }}>{authors.map(p => <option key={p.authorId} value={String(p.authorId)}>{p.name}</option>)}</select></label>
+          <label className="context-picker-label">Search publications<input type="search" value={query} onChange={e => { setQuery(e.target.value); setOffset(0); }} /></label>
+          <ul className="you-papers">{page?.papers?.map(p => <li key={p.work_id}><label className="you-paper-choice"><input type="checkbox" checked={selectedKeys.has(`${pickerAuthor}:${p.work_id}`)} disabled={selected.length >= 8 && !selectedKeys.has(`${pickerAuthor}:${p.work_id}`)} onChange={() => toggle(p)} /><span>{p.title}{p.year && <small>{p.year}</small>}</span></label></li>)}</ul>
+          {page && <div className="context-pagination"><button className="you-more" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</button><span>{selected.length}/8 selected</span><button className="you-more" disabled={offset + 20 >= page.total} onClick={() => setOffset(offset + 20)}>Next</button></div>}
+        </section>}
+        {(workingContext.goal || workingContext.requirements?.length > 0) && <section><h3 className="context-section-label">Current focus</h3><p className="you-note">{workingContext.goal}</p><ul className="context-requirements">{workingContext.requirements?.map((r, i) => <li key={i}>{r}</li>)}</ul></section>}
+        {!!attachments.length && <section><h3 className="context-section-label">Pending attachments</h3><ul className="context-requirements">{attachments.map(p => <li key={p.id}>{p.title || p.filename}</li>)}</ul></section>}
+        {error && <p role="alert" className="you-note">{error}</p>}
       </div>
-    </details>
-  );
+    </aside>
+  </>;
 }
