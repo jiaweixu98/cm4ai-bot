@@ -10,6 +10,8 @@ export default function FocalAuthorBar({
   onOpenFocal,
   onToggleSidebar,
   onReturnToGraph,
+  onManageContext,
+  contextOpen,
 }) {
   const name = authorInfo?.name || seekerName || "";
   const saving = sessionStatus.saving;
@@ -44,6 +46,7 @@ export default function FocalAuthorBar({
       )}
 
       <div className="focal-actions">
+        <button type="button" className="ghost-btn" aria-expanded={contextOpen} onClick={onManageContext}>Manage context</button>
         {statusLabel && (
           <span className={`save-status ${sessionStatus.error ? "is-error" : ""}`} title={sessionStatus.error || undefined}>
             {statusLabel}

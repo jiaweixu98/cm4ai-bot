@@ -65,6 +65,8 @@ class PaperLibrary:
     def __init__(self, path: str):
         self.path = path
         self._local = threading.local()
+        self._explore_cache = OrderedDict()
+        self._explore_lock = threading.RLock()
         manifest = os.path.join(os.path.dirname(path), 'snapshot_manifest.json')
         import json
         self.snapshot_version = ''
@@ -85,8 +87,15 @@ class PaperLibrary:
             conn.execute('CREATE TEMP VIEW visible_paper_authors AS SELECT * FROM main.paper_authors')
             self._local.conn = conn
         # A Graph review may create the decision store after this process starts.
+        if self.snapshot_version and getattr(self._local, 'attached_decisions', False):
+            try:
+                identity=os.stat(decisions_path())
+                if (identity.st_dev,identity.st_ino)!=self._local.decisions_identity:
+                    raise OSError('Publication review state was replaced')
+            except OSError as exc:
+                raise PublicationDecisionsUnavailable('Publication corrections are temporarily unavailable') from exc
         if self.snapshot_version and not getattr(self._local, 'attached_decisions', False):
-            required = bool(os.environ.get('PROFILE_DECISIONS_DB', '').strip())
+            required = True
             if time.monotonic() >= getattr(self._local, 'decisions_retry_at', 0):
                 path = decisions_path()
                 if os.path.isfile(path):
@@ -105,17 +114,22 @@ class PaperLibrary:
         attached = False
         version = self.snapshot_version.replace("'", "''")
         try:
+            identity=os.stat(path)
             conn.execute('ATTACH DATABASE ? AS corrections', ('file:' + urllib.parse.quote(path) + '?mode=ro',))
             attached = True
             conn.execute('SELECT snapshot_version, author_id, work_id FROM corrections.excluded_links LIMIT 1').fetchall()
             conn.execute('SELECT author_id FROM corrections.decisions LIMIT 1').fetchall()
             conn.execute('SELECT revision FROM corrections.decision_events LIMIT 1').fetchall()
+            current=os.stat(path)
+            if (identity.st_dev,identity.st_ino)!=(current.st_dev,current.st_ino):
+                raise sqlite3.OperationalError('Publication review state changed during attachment')
             conn.execute('DROP VIEW visible_paper_authors')
             conn.execute(f'''CREATE TEMP VIEW visible_paper_authors AS SELECT pa.* FROM main.paper_authors pa
                 WHERE NOT EXISTS (SELECT 1 FROM corrections.excluded_links x
                 WHERE x.snapshot_version='{version}' AND x.author_id=pa.author_id AND x.work_id=pa.work_id)''')
             self._local.attached_decisions = True
-        except sqlite3.Error as exc:
+            self._local.decisions_identity=(identity.st_dev,identity.st_ino)
+        except (sqlite3.Error,OSError) as exc:
             if attached:
                 try:
                     conn.execute('DETACH DATABASE corrections')
@@ -146,6 +160,64 @@ class PaperLibrary:
         return [dict(r) for r in self._db().execute('''SELECT p.*
             FROM visible_paper_authors pa JOIN papers p USING(work_id) WHERE pa.author_id=?
             ORDER BY p.year DESC,p.cited_by DESC,p.work_id''', (int(author_id),))]
+
+    def correction_revision(self):
+        db = self._db()
+        if not getattr(self._local, 'attached_decisions', False): return 0
+        return int(db.execute('SELECT COALESCE(MAX(revision),0) FROM corrections.decision_events').fetchone()[0])
+
+    def affiliations(self, author_id, source=()):
+        from tkg_publications import displayable_affiliations, institution_key
+        import json
+        db = self._db()
+        reviews = []
+        if getattr(self._local, 'attached_decisions', False):
+            has_table = db.execute("SELECT 1 FROM corrections.sqlite_master WHERE name='affiliation_reviews'").fetchone()
+            if has_table:
+                reviews = [{**dict(r), 'override': json.loads(r['override_json']) if r['override_json'] else None}
+                           for r in db.execute('SELECT * FROM corrections.affiliation_reviews WHERE author_id=?', (int(author_id),))]
+            else:
+                reviews = [{'group_id': r['group_id'], 'state': 'rejected' if r['rejected'] else 'pending'}
+                           for r in db.execute('SELECT * FROM corrections.decisions WHERE author_id=?', (int(author_id),))]
+        rows = list(source)
+        try:
+            groups = [dict(g) for g in db.execute("SELECT * FROM publication_groups WHERE author_id=? AND status!='unknown'", (int(author_id),))]
+            rows = [{**a, 'ror_id': next(iter(rors))} if not a.get('ror_id') and len(rors := {
+                g['ror_id'] for g in groups if g.get('ror_id') and institution_key(g['institution']) == institution_key(a['institution'])}) == 1 else a for a in rows]
+            source_keys = {institution_key(a.get('institution'), a.get('ror_id')) for a in rows}
+            rows += [{**dict(g), 'source': 'publication', 'is_current': False}
+                     for g in groups if g['group_id'] not in source_keys]
+        except sqlite3.OperationalError:
+            pass  # Older fixture catalogs have no printed affiliation table.
+        return displayable_affiliations({'affiliations': rows}, reviews)
+
+    def topics(self, author_id, limit=6):
+        return [r[0] for r in self._db().execute('''SELECT p.primary_topic,COUNT(*) n FROM visible_paper_authors pa
+            JOIN papers p USING(work_id) WHERE pa.author_id=? AND COALESCE(p.primary_topic,'')!=''
+            GROUP BY p.primary_topic ORDER BY n DESC,p.primary_topic LIMIT ?''', (int(author_id), limit))]
+
+    def selected_publications(self, references):
+        """Browser references only identify papers; live ownership supplies the evidence."""
+        selected, seen = [], set()
+        for ref in references[:8]:
+            aid = self.canonical_author(str(ref.get('author_id') or ''))
+            work = work_key(ref.get('work_id'))
+            if not aid.isdigit() or (aid, work) in seen: continue
+            if self.owns(aid, work) and (paper := self.work(work)):
+                seen.add((aid, work)); selected.append({'author_id': aid, **paper})
+        return selected
+
+    def publication_page(self, author_id, query='', offset=0, limit=20):
+        args = [int(author_id)]
+        where = 'pa.author_id=?'
+        if query:
+            where += ' AND p.title LIKE ?'; args.append('%' + query + '%')
+        db = self._db()
+        total = db.execute(f'SELECT COUNT(*) FROM visible_paper_authors pa JOIN papers p USING(work_id) WHERE {where}', args).fetchone()[0]
+        papers = [dict(r) for r in db.execute(f'''SELECT p.work_id,p.title,p.year,p.doi,p.pmid FROM visible_paper_authors pa
+            JOIN papers p USING(work_id) WHERE {where} ORDER BY p.year DESC,p.cited_by DESC,p.work_id LIMIT ? OFFSET ?''', [*args,limit,offset])]
+        return dict(author_id=str(author_id),papers=papers,total=total,offset=offset,limit=limit,
+                    snapshot_version=self.snapshot_version,revision=self.correction_revision())
 
     def _one(self, where: str, value) -> dict | None:
         row = self._db().execute(f"SELECT rowid, * FROM papers WHERE {where} = ? LIMIT 1", (value,)).fetchone()

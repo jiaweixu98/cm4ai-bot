@@ -82,8 +82,10 @@ try {
   page.on('request', request => { if (new URL(request.url()).port === '8100') directBackend.push(new URL(request.url()).pathname); });
   await page.goto(`${base}/?fresh=1&seeker_name=History+test`, {waitUntil: 'networkidle'});
   const rail = page.getByRole('complementary', {name: 'Chat history'});
-  await rail.getByText('Context', {exact: true}).click();
-  await rail.getByText('History test', {exact: true}).waitFor();
+  await page.getByRole('button', {name: 'Manage context', exact: true}).click();
+  const panel=page.getByRole('complementary',{name:'Conversation context'});
+  await panel.getByText('History test', {exact: true}).waitFor();
+  await panel.getByRole('button',{name:'Close context'}).click();
   assert.equal(await rail.getByText('Same institution', {exact: true}).count(), 0);
   const toggle = rail.getByRole('button', {name: 'Close sidebar', exact: true});
   const bounds = await toggle.boundingBox();
@@ -93,8 +95,9 @@ try {
   await page.getByRole('button', {name: 'Add people to this chat', exact: true}).click();
   await page.getByPlaceholder('Search by name').fill('Jake Chen');
   await page.locator('.people-picker-option').filter({hasText: /jake y\. chen/i}).getByRole('button', {name: 'Add', exact: true}).click();
-  await rail.getByText('People in this chat', {exact: true}).waitFor();
-  await rail.getByRole('button', {name: /jake y\. chen/i}).waitFor();
+  await page.getByRole('button',{name:'Manage context'}).click();
+  await panel.getByRole('button', {name: /jake y\. chen/i}).waitFor();
+  await panel.getByRole('button',{name:'Close context'}).click();
 
   const question = 'Keep this clinical data quality conversation';
   await send(page, question);
@@ -103,7 +106,9 @@ try {
   await rail.getByText(question, {exact: true}).click();
   await page.getByText(reply, {exact: true}).waitFor();
   await page.getByRole('link', {name: citation.title, exact: true}).waitFor();
-  await rail.getByText('Study clinical data quality', {exact: true}).waitFor();
+  await page.getByRole('button',{name:'Manage context'}).click();
+  await panel.getByText('Study clinical data quality', {exact: true}).waitFor();
+  await panel.getByRole('button',{name:'Close context'}).click();
   let rows = await sql`SELECT id, messages, state FROM matrix_chat_sessions WHERE owner_orcid=${owner} ORDER BY created_at`;
   assert.equal(rows.length, 1, 'A first message creates one durable chat');
   assert.equal(rows[0].messages.length, 2);
@@ -138,8 +143,7 @@ try {
   if (!await otherPage.getByRole('complementary', {name: 'Chat history'}).count()) await otherPage.getByRole('button', {name: 'Open sidebar', exact: true}).click();
   await otherPage.getByText(question, {exact: true}).click();
   await otherPage.getByText('Continue with published methods', {exact: true}).waitFor();
-  await otherPage.getByRole('button', {name: 'Open sidebar', exact: true}).click();
-  await otherPage.getByText('Context', {exact: true}).click();
+  await otherPage.getByRole('button', {name: 'Manage context', exact: true}).click();
   await otherPage.getByText('Study clinical data quality', {exact: true}).waitFor();
   assert.ok(await otherPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
   if (process.env.MATRIX_SHOTS) await otherPage.screenshot({path: `${process.env.MATRIX_SHOTS}/matrix-durable-history-mobile.png`});

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   fetchAuthor,
+  fetchAuthorDetails,
   chatMessage,
   createChatSession,
   getChatSession,
@@ -29,6 +30,8 @@ import {
 import { MAX_ATTACHED_FILES, readAttachedFiles } from "./lib/attachedPapers";
 import FocalAuthorBar from "./components/FocalAuthorBar";
 import HistorySidebar from "./components/HistorySidebar";
+import YouCard from "./components/YouCard";
+import { matrixApiPath } from "./lib/apiPath.mjs";
 import ChatPane from "./components/ChatPane";
 import ResultsWorkspace from "./components/ResultsWorkspace";
 import ConfirmPopover from "./components/ConfirmPopover";
@@ -79,11 +82,14 @@ export default function Home() {
   const [profileNotice, setProfileNotice] = useState("");
   const [railOpen, setRailOpen] = useState(true);
   const [narrowLayout, setNarrowLayout] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [correctionRefresh, setCorrectionRefresh] = useState(0);
+  const [exploreFilters, setExploreFilters] = useState(null);
   const [contextChoices, setContextChoices] = useState({
     samePlace: false,
     recentYears: 0,
-    paperScope: "profile",
-    paperTitles: [],
+    version: 2, paperScope: "chosen",
+    paperTitles: [], selectedPapers: [],
   });
   const [queuedFollowUp, setQueuedFollowUp] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState(null);
@@ -169,10 +175,37 @@ export default function Home() {
     };
   }, []);
 
+  const contextReferenceKey = JSON.stringify({ papers: contextChoices.selectedPapers || [], legacy: contextChoices.paperTitles || [] });
+  useEffect(() => {
+    const controller = new AbortController();
+    const resolve = async () => {
+      const response = await fetch(matrixApiPath('/api/context-publications/resolve'), { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+        body: JSON.stringify({ author_id: String(aid), references: (contextChoices.selectedPapers || []).map(p => ({ author_id: String(p.author_id), work_id: p.work_id })),
+          legacy_titles: contextChoices.paperTitles || [] }) });
+      if (!response.ok) return;
+      const result = await response.json();
+      if(controller.signal.aborted) return;
+      const selected = result.selected_publications || [];
+      setContextChoices(current => {
+        if (JSON.stringify({papers:current.selectedPapers || [],legacy:current.paperTitles || []}) !== contextReferenceKey) return current;
+        return JSON.stringify(current.selectedPapers || []) === JSON.stringify(selected) && !(current.paperTitles || []).length
+          ? current : { ...current, version: 2, selectedPapers: selected, paperTitles: [], paperScope: 'chosen' };
+      });
+    };
+    if ((contextChoices.selectedPapers || []).length || (contextChoices.paperTitles || []).length) resolve().catch(() => {});
+    const refresh = () => resolve().catch(() => {});
+    window.addEventListener('focus', refresh);
+    return () => { controller.abort(); window.removeEventListener('focus', refresh); };
+  }, [aid, currentSessionId, contextReferenceKey, contextOpen]);
+
   const resetWorkflowState = useCallback(() => {
     savedFingerprintRef.current = "";
     baselineSessionRef.current = null;
     setContextPersonIds([]);
+    setContextOpen(false);
+    setExploreFilters(null);
+    setContextChoices({ version: 2, samePlace: false, recentYears: 0, paperScope: "chosen", paperTitles: [], selectedPapers: [] });
     setAttachedPapers([]);
     setGraphHandoffPersonId(null);
     setMessages([]);
@@ -222,9 +255,9 @@ export default function Home() {
       workingContext,
       shortlistKind,
       candidatesReviewed,
-      contextChoices,
+      contextChoices, exploreFilters,
     }),
-    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed, contextChoices]
+    [phase, currentQuery, researchPlan, pastQueries, priorInputs, candidates, rerankedMap, rerankProgress, expandedCards, intent, searchIntent, contextPersonIds, graphContextPeople, workingContext, shortlistKind, candidatesReviewed, contextChoices, exploreFilters]
   );
 
   sessionSnapshotRef.current = { aid, focalName, matrixUserToken, messages, state: buildSessionStateSnapshot() };
@@ -284,12 +317,14 @@ export default function Home() {
     setExpandedCards(
       snapshot.expandedCards && typeof snapshot.expandedCards === "object" ? snapshot.expandedCards : {}
     );
+    setExploreFilters(snapshot.exploreFilters || null);
     const restoredChoices = snapshot.contextChoices && typeof snapshot.contextChoices === "object" ? snapshot.contextChoices : {};
     setContextChoices({
       samePlace: false,
       recentYears: 0,
-      paperScope: ["profile", "papers", "chosen"].includes(restoredChoices.paperScope) ? restoredChoices.paperScope : "profile",
-      paperTitles: Array.isArray(restoredChoices.paperTitles) ? restoredChoices.paperTitles.map(String).slice(0, 8) : [],
+      version: 2, paperScope: "chosen",
+      selectedPapers: Array.isArray(restoredChoices.selectedPapers) ? restoredChoices.selectedPapers.slice(0,8) : [],
+      paperTitles: restoredChoices.paperScope === "chosen" && Array.isArray(restoredChoices.paperTitles) ? restoredChoices.paperTitles.map(String).slice(0,8) : [],
     });
     if (snapshot.searchIntent === "mentor" || snapshot.searchIntent === "collaborator") {
       setSearchIntent(snapshot.searchIntent);
@@ -483,6 +518,11 @@ export default function Home() {
         setSavedPeople(data.people);
         setSavedPeopleReady(true);
       }
+      if (data.type === BRIDGE_MSG.PROFILE_UPDATED) {
+        window.dispatchEvent(new Event("focus"));
+        setContextOpen(false);
+        setCorrectionRefresh(value => value + 1);
+      }
       if (data.type === BRIDGE_MSG.OPEN_PERSON_RESULT) {
         if (!data.ok) {
           setProfileNotice("That researcher is not on the loaded map.");
@@ -519,6 +559,36 @@ export default function Home() {
       .map((authorId) => byId.get(Number(authorId)))
       .filter(Boolean);
   }, [contextPersonIds, graphContextPeople, savedPeople]);
+
+  const candidateReferenceKey = JSON.stringify(candidates.map(p => [String(p.author_id), (p.papers || []).map(w => w.work_id || w.OpenAlexWork || w.title)]));
+  useEffect(() => {
+    if (!candidates.length) return;
+    const controller = new AbortController();
+    const original = candidates;
+    Promise.all(original.map(async person => {
+      const details = await fetchAuthorDetails(person.author_id, controller.signal);
+      const references = (person.papers || []).filter(p => p.work_id || p.OpenAlexWork)
+        .map(p => ({author_id:String(person.author_id),work_id:p.work_id || p.OpenAlexWork}));
+      const response = await fetch(matrixApiPath('/api/context-publications/resolve'), {method:'POST',
+        headers:{'Content-Type':'application/json'},signal:controller.signal,
+        body:JSON.stringify({author_id:String(person.author_id),references,
+          legacy_titles:(person.papers || []).filter(p => !p.work_id && !p.OpenAlexWork).map(p => p.title || p.Title)})});
+      if(!response.ok) throw new Error('Publication validation failed');
+      const live=(await response.json()).selected_publications || [];
+      const papers=(person.papers || []).flatMap(p => {
+        const match=live.find(w => w.work_id===(p.work_id || p.OpenAlexWork) || (!p.work_id && !p.OpenAlexWork && w.title===(p.title || p.Title)));
+        return match ? [{...p,work_id:match.work_id,title:match.title,year:match.year}] : [];
+      });
+      return papers.length ? {...person,name:details.name,affiliation:details.affiliation || '',papers} : null;
+    })).then(rows => {
+      if(controller.signal.aborted) return;
+      setCandidates(current => JSON.stringify(current.map(p => [String(p.author_id),(p.papers || []).map(w => w.work_id || w.OpenAlexWork || w.title)]))===candidateReferenceKey ? rows.filter(Boolean) : current);
+      const changed=original.filter((person,i) => !rows[i] || rows[i].papers.length!==(person.papers || []).length);
+      if(changed.length) setRerankedMap(current => Object.fromEntries(Object.entries(current).map(([id,value]) =>
+        [id,changed.some(p => String(p.author_id)===id) ? {...value,explanation:'',justification:''} : value])));
+    }).catch(() => {if(!controller.signal.aborted) setCandidates([]);});
+    return () => controller.abort();
+  }, [candidateReferenceKey,currentSessionId,correctionRefresh]);
 
   const addMessage = useCallback((role, content, extra = {}) => {
     setMessages((prev) => [
@@ -943,6 +1013,7 @@ export default function Home() {
     setPhase(PHASE.GENERATING);
     const chatController = new AbortController();
     chatAbortRef.current = chatController;
+    const submittedAttachmentIds = new Set(attachedPapers.map(paper => paper.id));
 
     try {
       const result = await chatMessage({
@@ -961,7 +1032,8 @@ export default function Home() {
           same_place: contextChoices.samePlace,
           recent_years: contextChoices.recentYears,
           paper_scope: contextChoices.paperScope,
-          paper_titles: contextChoices.paperScope === "chosen" ? contextChoices.paperTitles.slice(0, 8) : [],
+          paper_titles: [],
+          selected_publications: (contextChoices.selectedPapers || []).slice(0,8).map(p => ({ author_id: String(p.author_id), work_id: p.work_id })),
         },
         workingContext,
         chatSessionId: currentSessionIdRef.current,
@@ -983,6 +1055,9 @@ export default function Home() {
       }
 
       if (result.action === "agent") {
+        setAttachedPapers(current => current.filter(paper => !submittedAttachmentIds.has(paper.id)));
+        if (result.explore_filters) setExploreFilters(result.explore_filters);
+        else if (result.result_update !== "keep") setExploreFilters(null);
         setAgentStatus("");
         const newResults = Array.isArray(result.shortlist) && result.shortlist.length > 0
           && result.result_update !== "keep" && result.result_update !== "clear";
@@ -1360,19 +1435,6 @@ export default function Home() {
           onToggle={() => persistRail(!railOpen)}
           onNewSession={handleNewSession}
           onRetry={retrySession}
-          you={{
-            signedIn: Boolean(matrixUserToken),
-            linked,
-            aid,
-            authorInfo,
-            seekerName,
-            choices: contextChoices,
-            onChoices: setContextChoices,
-            onOpenProfile: openProfile,
-            people: contextPeople,
-            workingContext,
-            attachments: attachedPapers,
-          }}
           onSelectSession={(sessionId) => {
             if (narrowLayout) persistRail(false);
             handleSelectSession(sessionId);
@@ -1383,7 +1445,7 @@ export default function Home() {
         <button type="button" className="rail-scrim" aria-label="Close sidebar" onClick={() => persistRail(false)} />
       )}
 
-      <div className="matrix-stage">
+      <div className={`matrix-stage ${contextOpen && !narrowLayout ? "has-context" : ""}`}>
       <FocalAuthorBar
         authorInfo={authorInfo}
         seekerName={seekerName}
@@ -1393,8 +1455,15 @@ export default function Home() {
         showSidebarToggle={narrowLayout && !railOpen}
         onOpenFocal={() => openProfile(aid)}
         onToggleSidebar={() => persistRail(true)}
+        contextOpen={contextOpen}
+        onManageContext={() => setContextOpen(open => !open)}
         onReturnToGraph={inIframe ? returnToGraph : undefined}
       />
+
+      {contextOpen && <YouCard
+        signedIn={Boolean(matrixUserToken)} linked={linked} aid={aid} authorInfo={authorInfo} seekerName={seekerName}
+        choices={contextChoices} onChoices={setContextChoices} onOpenProfile={openProfile} people={contextPeople}
+        workingContext={workingContext} attachments={attachedPapers} onClose={() => setContextOpen(false)} />}
 
       <div className={`workspace ${workspaceClass}`}>
         <ChatPane

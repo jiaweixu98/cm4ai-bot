@@ -1,9 +1,8 @@
 """Deterministic paper-audience and recorded-coauthor discovery.
 
 People are ordered by retrieved publication evidence, never by the language model.
-Geography refers to the institution printed on the shared publication (resolved
-through its ROR id from the offline locations table), not a guess about someone's
-present location.
+Geography uses current ORCID or owner-approved affiliations, resolved through
+sourced ROR locations.
 """
 import geography as geo
 from paper_library import title_key
@@ -46,7 +45,7 @@ def audience(library, vectors, identifier='', title='', abstract='', exclude_ids
         source = library.by_title(title)
         if source and not abstract.strip():
             abstract = source.get('abstract') or ''
-    if not title.strip():
+    if not title.strip() and not abstract.strip():
         return {'status': 'needs_paper', 'people': []}
     query = f'{title.strip()} {abstract.strip()}'[:12000]
     excluded = {int(x) for x in exclude_ids if str(x).isdigit()}
@@ -134,70 +133,108 @@ def _affiliations(library, pairs):
     return found
 
 
-def explore(library, author_id, specialty='', institution='', geography='', from_year=None, to_year=None,
-            limit=8, locations=None):
-    """Recorded coauthors of a person, filtered on their shared papers.
-
-    `locations` is a geography.Geography (default: the offline ROR table, with a
-    bounded live fallback for ids it lacks).
-    """
-    if from_year and to_year and from_year > to_year:
+def explore_people(library, author_id='', topics=(), specialty='', institution='', geography='',
+                   from_year=None, to_year=None, coauthors_only=False, offset=0, limit=500,
+                   locations=None, affiliation_lookup=None):
+    """One filtering contract for the Graph and MATRIX. All publication constraints
+    apply to the same retained paper; geography uses current trusted affiliations."""
+    if from_year is not None and to_year is not None and from_year > to_year:
         raise ValueError('The start year must be before the end year')
-    conditions, args = ['a.author_id=?'], [int(author_id)]
-    if from_year: conditions.append('p.year>=?'); args.append(int(from_year))
-    if to_year: conditions.append('p.year<=?'); args.append(int(to_year))
-    rows = library._db().execute(f'''SELECT b.author_id,p.* FROM visible_paper_authors a
-        JOIN visible_paper_authors b ON b.work_id=a.work_id AND b.author_id!=a.author_id
-        JOIN papers p ON p.work_id=a.work_id WHERE {' AND '.join(conditions)}
-        ORDER BY p.year DESC,p.work_id,b.author_id''', args).fetchall()
+    revision = library.correction_revision()
+    cache_key = (revision,str(author_id),tuple(topics),specialty,institution,geography,from_year,to_year,coauthors_only,locations,affiliation_lookup)
+    with library._explore_lock:
+        cached = library._explore_cache.get(cache_key)
+        if cached is not None:
+            library._explore_cache.move_to_end(cache_key)
+            return {**cached, 'people':cached['people'][offset:offset+limit], 'offset':offset, 'limit':limit, 'has_more':offset+limit<cached['total']}
+    conditions, args = [], []
+    if coauthors_only:
+        if not str(author_id).isdigit(): raise ValueError('Choose a focal researcher for recorded coauthors')
+        conditions.append('EXISTS (SELECT 1 FROM visible_paper_authors a WHERE a.work_id=b.work_id AND a.author_id=?)')
+        args.append(int(author_id))
+        conditions.append('b.author_id!=?'); args.append(int(author_id))
+    if from_year is not None: conditions.append('p.year>=?'); args.append(int(from_year))
+    if to_year is not None: conditions.append('p.year<=?'); args.append(int(to_year))
+    terms, weights = [], {}
     matched_works = None
-    terms, weights, weight_total = [], {}, 1
     if specialty.strip():
-        matches = library.score_query(specialty)
-        keys = list(matches)  # hoisted: one copy, not one per chunk
-        matched_works = {work for work in _work_ids_for_rowids(library, keys).values()}
+        scores = library.score_query(specialty)
+        matched_works = set(_work_ids_for_rowids(library, scores).values())
         terms = library.query_terms(specialty)
         weights = {term: library.term_weight(term) for term in terms}
-        weight_total = sum(weights.values()) or 1
-    kept = []
+    wanted_topics = [str(t).strip().casefold() for t in topics if str(t).strip()]
+    if wanted_topics:
+        conditions.append('lower(p.primary_topic) IN (' + ','.join('?' for _ in wanted_topics) + ')'); args.extend(wanted_topics)
+    scope_sql, scope_args = ' AND '.join(conditions) or '1', list(args)
+    if terms:
+        expression = ' OR '.join('"' + t.replace('"','') + '"' for t in terms)
+        conditions.append('p.rowid IN (SELECT rowid FROM papers_fts WHERE papers_fts MATCH ?)'); args.append(expression)
+    clauses = ' AND '.join(conditions) or '1'
+    columns = 'p.*' if terms else 'p.work_id,p.title,p.year,p.venue,p.doi,p.pmid,p.cited_by,p.primary_topic,NULL AS abstract'
+    people = {}
+    rows = library._db().execute(f"""SELECT b.author_id,{columns} FROM visible_paper_authors b
+        JOIN papers p USING(work_id) WHERE {clauses} ORDER BY p.year DESC,p.work_id,b.author_id""", args)
     for record in rows:
         paper = dict(record); aid = int(paper.pop('author_id'))
         if matched_works is not None and paper['work_id'] not in matched_works: continue
+        text = paper['title'] + ' ' + (paper.get('abstract') or '')
         if terms:
-            covered = library._covered(terms, paper['title'] + ' ' + (paper.get('abstract') or ''))
-            if len(covered) < min(2, len(terms)) or sum(weights[t] for t in covered) / weight_total < 0.5:
-                continue
-        kept.append((aid, paper))
-    # Only the institutions printed on the kept shared papers are read, in one pass.
-    affiliations = _affiliations(library, [(aid, paper['work_id']) for aid, paper in kept])
-    people = {}
-    for aid, paper in kept:
-        printed = affiliations.get((aid, paper['work_id']), [])
-        if institution and not any(_institution_matches(institution, a['institution']) for a in printed): continue
-        person = people.setdefault(aid, {'author_id': str(aid), 'matched_papers': [], 'institutions': []})
-        person['matched_papers'].append(paper)
-        person['institutions'].extend(printed)
-    ordered = sorted(people.values(), key=lambda p: (-len(p['matched_papers']), -(p['matched_papers'][0]['year'] or 0), int(p['author_id'])))
+            covered = set(library._covered(terms, text))
+            ranked = sorted(terms, key=lambda term: weights[term], reverse=True)
+            needed = ranked[:max(1, (len(ranked) + 1) // 2)]
+            if any(term not in covered for term in needed): continue
+        person = people.setdefault(aid, {'author_id': str(aid), 'matched_papers': [], 'matching_paper_count': 0})
+        person['matching_paper_count'] += 1
+        if len(person['matched_papers']) < 3: person['matched_papers'].append(paper)
+    ordered = sorted(people.values(), key=lambda p: (-p['matching_paper_count'], -(p['matched_papers'][0]['year'] or 0), int(p['author_id'])))
+    nearby_topics = []
+    if specialty.strip() and not ordered:
+        nearby_topics = [row[0] for row in library._db().execute(
+            f"""SELECT p.primary_topic FROM visible_paper_authors b JOIN papers p USING(work_id)
+                WHERE {scope_sql} AND COALESCE(p.primary_topic,'')!=''
+                GROUP BY p.primary_topic ORDER BY COUNT(DISTINCT b.author_id) DESC, p.primary_topic LIMIT 3""",
+            scope_args)]
+    if institution or geography:
+        for person in ordered:
+            affiliations = affiliation_lookup(person['author_id']) if affiliation_lookup else library.affiliations(person['author_id'])
+            person['institutions'] = [a for a in affiliations if a.get('trusted') and a.get('is_current') and not a.get('end_year')]
+        if institution:
+            ordered = [p for p in ordered if any(_institution_matches(institution, a['institution']) for a in p['institutions'])]
     report = {}
     if geography.strip():
         ordered, report = _filter_geography(ordered, geography, locations if locations is not None else geo.default())
     for person in ordered:
-        person['shared_paper_count'] = len(person['matched_papers'])
-        person['matched_papers'] = person['matched_papers'][:3]
+        if coauthors_only: person['shared_paper_count'] = person['matching_paper_count']
         person.pop('institutions', None)
-    return {'status': 'ok' if ordered else 'empty', 'people': ordered[:max(1, min(limit, 20))],
-            'filters': dict(specialty=specialty, institution=institution, geography=geography, from_year=from_year, to_year=to_year),
-            'geography_basis': 'institution_on_shared_paper',
-            'geography_complete': report.get('complete', True),
-            'geography_checked_people': report.get('checked', 0),
+    total = len(ordered)
+    result = {'status': 'ok' if ordered else 'empty', 'people': ordered, 'total': total,
+            'offset': offset, 'limit': limit, 'has_more': offset+limit < total,
+            'filters': dict(author_id=author_id,topics=list(topics),specialty=specialty,institution=institution,geography=geography,
+                            from_year=from_year,to_year=to_year,coauthors_only=coauthors_only),
+            'nearby_topics': nearby_topics,
+            'geography_basis': 'current_trusted_affiliations',
+            'geography_complete': report.get('complete', True), 'geography_checked_people': report.get('checked', 0),
             'geography_unresolved_people': report.get('unresolved', 0),
-            **({'geography_matched_people': len(ordered), 'geography_interpretation': report['interpretation'],
+            **({'geography_matched_people': total, 'geography_interpretation': report['interpretation'],
                 'geography_locations_version': report['version']} if report else {}),
-            'snapshot_version': library.snapshot_version}
+            'snapshot_version': library.snapshot_version,
+            'revision': revision}
+    if library.correction_revision() != revision: raise ValueError('The review state changed; try the filters again')
+    with library._explore_lock:
+        library._explore_cache[cache_key] = result
+        while len(library._explore_cache)>3: library._explore_cache.popitem(last=False)
+    return {**result,'people':ordered[offset:offset+limit]}
+
+
+def explore(library, author_id, specialty='', institution='', geography='', from_year=None, to_year=None,
+            limit=8, locations=None, affiliation_lookup=None):
+    return explore_people(library,author_id,specialty=specialty,institution=institution,geography=geography,
+                          from_year=from_year,to_year=to_year,coauthors_only=True,limit=max(1,min(limit,20)),
+                          locations=locations,affiliation_lookup=affiliation_lookup)
 
 
 def _filter_geography(ordered, typed, places):
-    """Keep people whose printed institution (by ROR location) matches the typed place."""
+    """Keep people whose current trusted institution (by ROR location) matches the typed place."""
     parts = places.parse(typed)
     if not parts:
         return ordered, {}

@@ -29,6 +29,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from context_selection import revalidate_session, resolve_references
 from sse_starlette.sse import EventSourceResponse
 
 load_dotenv()
@@ -887,20 +888,9 @@ def _build_catalog_author_details(author: dict) -> dict:
 def _get_user_background(user_id: str) -> str:
     if not _is_linked_author_id(user_id):
         return UNLINKED_BACKGROUND
-    nodes = load_author_nodes()
-    user = nodes.get(user_id, {})
-    features = user.get("features", {})
-    if not features:
-        catalog_author = _get_catalog_author(user_id)
-        if catalog_author:
-            return _build_catalog_user_background(catalog_author)
-    name = features.get("FullName", user.get("title", "Unknown"))
-    affiliation = features.get("Affiliation", "Unknown")
-    papers = features.get("Top Cited or Most Recent Papers", [])
-    bg = f"Name: {name}\nAffiliation: {affiliation}\nTop Cited or Most Recent Papers:\n"
-    for p in papers:
-        bg += f"- {p.get('Title', 'Untitled')} ({p.get('Venue', '')}, {p.get('PubYear', '')}) - Cited {p.get('CitedCount', 0)} times\n"
-    return bg
+    details = _get_author_details(user_id)
+    return json.dumps({'name':details.get('name',''), 'affiliation':details.get('affiliation',''),
+                       'topics':details.get('topics') or []},ensure_ascii=False)
 
 
 def _get_user_name(user_id: str) -> str:
@@ -926,21 +916,29 @@ def _get_author_details(author_id: str) -> dict:
     if not features:
         catalog_author = _get_catalog_author(author_id)
         if catalog_author:
-            return _build_catalog_author_details(catalog_author)
+            details = _build_catalog_author_details(catalog_author)
+            if library is not None:
+                from research_tools import library_paper
+                affiliations = library.affiliations(author_id,catalog_author.get('affiliations') or [])
+                details.update(affiliations=affiliations,affiliation='; '.join(dict.fromkeys(a['institution'] for a in affiliations)),
+                               topics=library.topics(author_id),papers=[library_paper(p) for p in library.author_works(author_id)[:24]])
+            return details
     library = load_paper_library()
     visible_papers = features.get("Top Cited or Most Recent Papers", [])
     if library is not None and author_id.isdigit():
         from research_tools import library_paper
         visible_papers = [library_paper(p) for p in library.author_works(author_id)[:24]]
+    affiliations = library.affiliations(author_id, features.get('affiliations') or []) if library is not None and author_id.isdigit() else []
     return {
         "name": features.get("FullName", info.get("title", "Unknown")),
-        "affiliation": features.get("Affiliation", "Unknown"),
+        "affiliation": '; '.join(dict.fromkeys(a['institution'] for a in affiliations)) if library is not None else features.get("Affiliation", ""),
+        "affiliations": affiliations,
         "papers": visible_papers,
         "recent_year": max((p.get('PubYear') or 0 for p in visible_papers),default=0) if library is not None else features.get("RecentYear") or "",
         "is_bridge2ai_member": bool(features.get('Bridge2AISeedAuthor')),
         "orcid": features.get("ORCID") or "",
         "openalex_id": features.get("OpenAlexId") or "",
-        "topics": features.get("topics") or [],
+        "topics": library.topics(author_id) if library is not None and author_id.isdigit() else features.get("topics") or [],
         "mesh": features.get("mesh") or [],
     }
 
@@ -997,7 +995,7 @@ def _find_people_by_name(name: str, limit: int = 8) -> list[dict]:
         {
             "author_id": author_id,
             "name": full_name,
-            "affiliation": affiliation,
+            "affiliation": _get_author_details(author_id).get("affiliation", ""),
             "is_bridge2ai_member": is_bridge2ai_member,
         }
         for _, full_name, author_id, affiliation, is_bridge2ai_member in matches[:max(1, min(limit, 8))]
@@ -1960,6 +1958,11 @@ class AgentWorkingContext(BaseModel):
     requirements: list[str] = Field(default_factory=list, max_length=8)
 
 
+class SelectedPublication(BaseModel):
+    author_id: str = Field(max_length=20)
+    work_id: str = Field(max_length=100)
+
+
 class ContextChoices(BaseModel):
     """What the context panel sends into this chat, and how recommendations are limited."""
 
@@ -1970,6 +1973,7 @@ class ContextChoices(BaseModel):
     recent_years: Literal[0, 5, 10] = 0
     paper_scope: Literal["profile", "papers", "chosen"] = "profile"
     paper_titles: list[str] = Field(default_factory=list, max_length=8)
+    selected_publications: list[SelectedPublication] = Field(default_factory=list,max_length=8)
 
 
 class ChatRequest(BaseModel):
@@ -2036,6 +2040,15 @@ def _resolve_chat_intent(user_text: str, fallback: str | None) -> str:
     if collaborator_score > mentor_score:
         return "collaborator"
     return "mentor" if fallback == "mentor" else "collaborator"
+
+
+def _conversation_background(req):
+    details = _get_author_details(req.aid) if _is_linked_author_id(req.aid) else {}
+    choices = req.context_choices
+    refs = [p.model_dump() for p in (choices.selected_publications if choices else [])]
+    selected = resolve_references(load_paper_library(),refs,[],req.aid)
+    return json.dumps({'name':details.get('name',''), 'affiliation':details.get('affiliation',''),
+                       'topics':details.get('topics') or [], 'papers':selected},ensure_ascii=False)
 
 
 @app.post("/api/chat")
@@ -2132,7 +2145,7 @@ async def chat(req: ChatRequest, request: Request):
                         pass
     async with llm_request_slot("chat"):
         resolved_intent = _resolve_chat_intent(req.user_input, req.intent)
-        user_bg = UNLINKED_BACKGROUND if resolved_intent == 'mentor' else _get_user_background(req.aid)
+        user_bg = _conversation_background(req)
         if req.attached_context:
             attachment_text = '\n\n'.join(
                 f'Attachment {index + 1}: {text[:1200]}'
@@ -2285,7 +2298,7 @@ async def get_session(session_id: str, request: Request):
     session = get_chat_session(session_id, identity["orcid"])
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return {"session": session}
+    return {"session": revalidate_session(session,load_paper_library())}
 
 
 @app.post("/api/chat-sessions")
@@ -2298,9 +2311,9 @@ async def create_session(req: ChatSessionUpsertRequest, request: Request):
         focal_author_id=req.aid,
         focal_author_name=focal_author_name,
         messages=[message.model_dump() for message in req.messages],
-        state=req.state or {},
+        state=revalidate_session({"aid":req.aid,"state":req.state},load_paper_library())["state"],
     )
-    return {"session": session}
+    return {"session": revalidate_session(session,load_paper_library())}
 
 
 @app.put("/api/chat-sessions/{session_id}")
@@ -2315,11 +2328,11 @@ async def save_session(session_id: str, req: ChatSessionUpsertRequest, request: 
             focal_author_id=req.aid,
             focal_author_name=focal_author_name,
             messages=[message.model_dump() for message in req.messages],
-            state=req.state or {},
+            state=revalidate_session({"aid":req.aid,"state":req.state},load_paper_library())["state"],
         )
     except PermissionError:
         raise HTTPException(status_code=403, detail="Forbidden")
-    return {"session": session}
+    return {"session": revalidate_session(session,load_paper_library())}
 
 
 MATCHED_PAPER_PEOPLE = 25
@@ -2602,6 +2615,65 @@ async def author_similar_work(aid: str):
         "author_id": author_id,
         "people": [{key: person.get(key) for key in _SIMILAR_PUBLIC} for person in people],
     }
+
+
+class ResolvePublicationsRequest(BaseModel):
+    author_id: str = ''
+    references: list[SelectedPublication] = Field(default_factory=list,max_length=8)
+    legacy_titles: list[str] = Field(default_factory=list,max_length=8)
+
+
+@app.post('/api/context-publications/resolve')
+async def resolve_context_publications(req: ResolvePublicationsRequest):
+    from context_selection import resolve_references
+    library = load_paper_library()
+    selected = await asyncio.to_thread(resolve_references,library,[r.model_dump() for r in req.references],req.legacy_titles,req.author_id)
+    return {'selected_publications': selected, 'snapshot_version': library.snapshot_version if library else '',
+            'revision': library.correction_revision() if library else 0}
+
+
+@app.get('/api/author/{aid}/publications')
+async def author_publications(aid: str, q: str = '', offset: int = 0, limit: int = 20):
+    library = load_paper_library()
+    if library is None: raise HTTPException(status_code=503,detail='Publication catalog is unavailable')
+    aid = library.canonical_author(aid)
+    if not aid.isdigit() or offset < 0 or not 1 <= limit <= 100 or len(q)>200:
+        raise HTTPException(status_code=400,detail='Invalid publication request')
+    return await asyncio.to_thread(library.publication_page,aid,q,offset,limit)
+
+
+class ExploreRequest(BaseModel):
+    author_id: str = ''
+    topics: list[str] = Field(default_factory=list,max_length=8)
+    specialty: str = Field(default='',max_length=200)
+    institution: str = Field(default='',max_length=200)
+    geography: str = Field(default='',max_length=200)
+    from_year: int | None = Field(default=None,ge=1800,le=2100)
+    to_year: int | None = Field(default=None,ge=1800,le=2100)
+    coauthors_only: bool = False
+    offset: int = Field(default=0,ge=0)
+    limit: int = Field(default=500,ge=1,le=1000)
+
+
+def _trusted_affiliations(other):
+    raw = load_author_nodes().get(str(other), {}).get('features', {})
+    return load_paper_library().affiliations(other,raw.get('affiliations') or [])
+
+
+@app.post('/api/explore')
+async def graph_explore(req: ExploreRequest):
+    library = load_paper_library()
+    if library is None: raise HTTPException(status_code=503,detail='Publication catalog is unavailable')
+    aid = library.canonical_author(req.author_id) if req.author_id else ''
+    if aid and not aid.isdigit(): raise HTTPException(status_code=400,detail='Invalid author ID')
+    from paper_discovery import explore_people
+    try:
+        result = await asyncio.to_thread(explore_people,library,aid,req.topics,req.specialty,req.institution,req.geography,
+                                        req.from_year,req.to_year,req.coauthors_only,req.offset,req.limit,
+                                        affiliation_lookup=_trusted_affiliations)
+        result['matching_ids'] = [p['author_id'] for p in result['people']]
+        return result
+    except ValueError as exc: raise HTTPException(status_code=400,detail=str(exc))
 
 
 @app.get("/api/author/{aid}/details")

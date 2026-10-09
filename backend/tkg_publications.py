@@ -69,9 +69,26 @@ def decisions_path() -> str:
         Path(__file__).resolve().parents[2] / "bridge2aikg/work/state/publication-decisions.sqlite")
 
 
-def displayable_affiliations(row: dict) -> list:
-    """Affiliation rows shown to people: no low-confidence OpenAlex guesses or blank institutions."""
-    return [
-        a for a in (row.get("affiliations") or [])
-        if a.get("source") != HIDDEN_AFFILIATION_SOURCE and (a.get("institution") or "").strip()
-    ]
+def displayable_affiliations(row: dict, reviews=()) -> list:
+    """Actual ORCID records take precedence; approved corrections remain separate."""
+    source = [a for a in row.get('affiliations', [])
+              if a.get('source') != HIDDEN_AFFILIATION_SOURCE and str(a.get('institution') or '').strip()]
+    by_key = {r['group_id']: r for r in reviews}
+    has_orcid = any(a.get('source') == 'orcid' for a in source)
+    selected = {}
+    for a in source:
+        key = institution_key(a.get('institution'), a.get('ror_id'))
+        review = by_key.get(key, {})
+        if review.get('state') == 'rejected': continue
+        if has_orcid and a.get('source') != 'orcid' and review.get('state') != 'approved': continue
+        override = review.get('override') if review.get('state') == 'approved' else None
+        value = {**a, **(override or {}), 'group_id': key,
+                 'trusted': a.get('source') == 'orcid' or review.get('state') == 'approved'}
+        if override: value['source'] = 'owner_approved'
+        selected[(key, value.get('role_title'), value.get('start_year'), value.get('end_year'))] = value
+    source_keys = {institution_key(a.get('institution'), a.get('ror_id')) for a in source}
+    for review in reviews:
+        if review.get('state') == 'approved' and review.get('override') and review['group_id'] not in source_keys:
+            selected[review['group_id']] = {**review['override'], 'group_id': review['group_id'],
+                                           'source': 'owner_approved', 'trusted': True}
+    return list(selected.values())
