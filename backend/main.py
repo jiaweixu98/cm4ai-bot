@@ -908,6 +908,7 @@ def _get_user_name(user_id: str) -> str:
 
 
 def _get_author_details(author_id: str) -> dict:
+    from tkg_publications import primary_affiliation
     library = load_paper_library()
     if library is not None: author_id = library.canonical_author(author_id)
     nodes = load_author_nodes()
@@ -920,18 +921,18 @@ def _get_author_details(author_id: str) -> dict:
             if library is not None:
                 from research_tools import library_paper
                 affiliations = library.affiliations(author_id,catalog_author.get('affiliations') or [])
-                details.update(affiliations=affiliations,affiliation='; '.join(dict.fromkeys(a['institution'] for a in affiliations)),
-                               topics=library.topics(author_id),papers=[library_paper(p) for p in library.author_works(author_id)[:24]])
+                details.update(affiliations=affiliations,affiliation=primary_affiliation(affiliations),
+                               topics=library.topics(author_id),papers=[library_paper(p) for p in library.publication_page(author_id,limit=24)['papers']])
             return details
     library = load_paper_library()
     visible_papers = features.get("Top Cited or Most Recent Papers", [])
     if library is not None and author_id.isdigit():
         from research_tools import library_paper
-        visible_papers = [library_paper(p) for p in library.author_works(author_id)[:24]]
+        visible_papers = [library_paper(p) for p in library.publication_page(author_id,limit=24)['papers']]
     affiliations = library.affiliations(author_id, features.get('affiliations') or []) if library is not None and author_id.isdigit() else []
     return {
         "name": features.get("FullName", info.get("title", "Unknown")),
-        "affiliation": '; '.join(dict.fromkeys(a['institution'] for a in affiliations)) if library is not None else features.get("Affiliation", ""),
+        "affiliation": primary_affiliation(affiliations) if library is not None else features.get("Affiliation", ""),
         "affiliations": affiliations,
         "papers": visible_papers,
         "recent_year": max((p.get('PubYear') or 0 for p in visible_papers),default=0) if library is not None else features.get("RecentYear") or "",
@@ -1963,6 +1964,11 @@ class SelectedPublication(BaseModel):
     work_id: str = Field(max_length=100)
 
 
+class PublicationFilter(BaseModel):
+    author_id: str = Field(max_length=20, pattern=r'^\d+$')
+    affiliation: str = Field(default='all',max_length=600)
+
+
 class ContextChoices(BaseModel):
     """What the context panel sends into this chat, and how recommendations are limited."""
 
@@ -1974,6 +1980,8 @@ class ContextChoices(BaseModel):
     paper_scope: Literal["profile", "papers", "chosen"] = "profile"
     paper_titles: list[str] = Field(default_factory=list, max_length=8)
     selected_publications: list[SelectedPublication] = Field(default_factory=list,max_length=8)
+    publication_scope: Literal['eligible','selected'] = 'eligible'
+    publication_filters: list[PublicationFilter] = Field(default_factory=list,max_length=25)
 
 
 class ChatRequest(BaseModel):
@@ -2046,7 +2054,12 @@ def _conversation_background(req):
     details = _get_author_details(req.aid) if _is_linked_author_id(req.aid) else {}
     choices = req.context_choices
     refs = [p.model_dump() for p in (choices.selected_publications if choices else [])]
-    selected = resolve_references(load_paper_library(),refs,[],req.aid)
+    filters = [f.model_dump() for f in (choices.publication_filters if choices else [])]
+    library = load_paper_library()
+    selected = resolve_references(library,refs,[],req.aid,filters)
+    if not refs and (not choices or choices.publication_scope == 'eligible') and library and _is_linked_author_id(req.aid):
+        affiliation = next((f['affiliation'] for f in filters if library.canonical_author(f['author_id']) == library.canonical_author(req.aid)),'all')
+        selected = library.publication_page(req.aid,limit=8,affiliation=affiliation)['papers']
     return json.dumps({'name':details.get('name',''), 'affiliation':details.get('affiliation',''),
                        'topics':details.get('topics') or [], 'papers':selected},ensure_ascii=False)
 
@@ -2621,25 +2634,29 @@ class ResolvePublicationsRequest(BaseModel):
     author_id: str = ''
     references: list[SelectedPublication] = Field(default_factory=list,max_length=8)
     legacy_titles: list[str] = Field(default_factory=list,max_length=8)
+    publication_filters: list[PublicationFilter] = Field(default_factory=list,max_length=25)
 
 
 @app.post('/api/context-publications/resolve')
 async def resolve_context_publications(req: ResolvePublicationsRequest):
     from context_selection import resolve_references
     library = load_paper_library()
-    selected = await asyncio.to_thread(resolve_references,library,[r.model_dump() for r in req.references],req.legacy_titles,req.author_id)
+    selected = await asyncio.to_thread(resolve_references,library,[r.model_dump() for r in req.references],req.legacy_titles,req.author_id,[f.model_dump() for f in req.publication_filters])
     return {'selected_publications': selected, 'snapshot_version': library.snapshot_version if library else '',
             'revision': library.correction_revision() if library else 0}
 
 
 @app.get('/api/author/{aid}/publications')
-async def author_publications(aid: str, q: str = '', offset: int = 0, limit: int = 20):
+async def author_publications(aid: str, q: str = '', offset: int = 0, limit: int = 20, affiliation: str = 'all'):
     library = load_paper_library()
     if library is None: raise HTTPException(status_code=503,detail='Publication catalog is unavailable')
     aid = library.canonical_author(aid)
     if not aid.isdigit() or offset < 0 or not 1 <= limit <= 100 or len(q)>200:
         raise HTTPException(status_code=400,detail='Invalid publication request')
-    return await asyncio.to_thread(library.publication_page,aid,q,offset,limit)
+    try:
+        return await asyncio.to_thread(library.publication_page,aid,q,offset,limit,affiliation)
+    except ValueError as exc:
+        raise HTTPException(status_code=400,detail=str(exc)) from exc
 
 
 class ExploreRequest(BaseModel):
@@ -2653,6 +2670,8 @@ class ExploreRequest(BaseModel):
     coauthors_only: bool = False
     offset: int = Field(default=0,ge=0)
     limit: int = Field(default=500,ge=1,le=1000)
+    work_ids: list[str] | None = Field(default=None,max_length=8)
+    publication_affiliation: str = Field(default='all',max_length=600)
 
 
 def _trusted_affiliations(other):
@@ -2670,7 +2689,7 @@ async def graph_explore(req: ExploreRequest):
     try:
         result = await asyncio.to_thread(explore_people,library,aid,req.topics,req.specialty,req.institution,req.geography,
                                         req.from_year,req.to_year,req.coauthors_only,req.offset,req.limit,
-                                        affiliation_lookup=_trusted_affiliations)
+                                        affiliation_lookup=_trusted_affiliations,work_ids=req.work_ids,publication_affiliation=req.publication_affiliation)
         result['matching_ids'] = [p['author_id'] for p in result['people']]
         return result
     except ValueError as exc: raise HTTPException(status_code=400,detail=str(exc))

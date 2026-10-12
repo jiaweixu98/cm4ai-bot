@@ -6,6 +6,7 @@ people listed as its authors. A full-text index covers titles and abstracts.
 """
 
 import math
+import json
 import os
 import re
 import sqlite3
@@ -67,6 +68,8 @@ class PaperLibrary:
         self._local = threading.local()
         self._explore_cache = OrderedDict()
         self._explore_lock = threading.RLock()
+        self._metadata_lock = threading.Lock()
+        self._source_affiliations = None
         manifest = os.path.join(os.path.dirname(path), 'snapshot_manifest.json')
         import json
         self.snapshot_version = ''
@@ -166,7 +169,22 @@ class PaperLibrary:
         if not getattr(self._local, 'attached_decisions', False): return 0
         return int(db.execute('SELECT COALESCE(MAX(revision),0) FROM corrections.decision_events').fetchone()[0])
 
-    def affiliations(self, author_id, source=()):
+    def source_affiliations(self, author_id):
+        if self._source_affiliations is None:
+            with self._metadata_lock:
+                if self._source_affiliations is None:
+                    directory = os.path.dirname(self.path)
+                    filename = next((p for p in (os.path.join(directory,'graph','author_metadata.json'),
+                        os.path.join(directory,'author_metadata.json')) if os.path.isfile(p)), None)
+                    rows = []
+                    if filename:
+                        with open(filename, encoding='utf-8') as source:
+                            rows = json.load(source)
+                    self._source_affiliations = {str(r['id']): r.get('affiliations') or []
+                        for r in (rows if isinstance(rows,list) else rows.values())}
+        return self._source_affiliations.get(str(author_id), [])
+
+    def affiliations(self, author_id, source=None):
         from tkg_publications import displayable_affiliations, institution_key
         import json
         db = self._db()
@@ -179,7 +197,7 @@ class PaperLibrary:
             else:
                 reviews = [{'group_id': r['group_id'], 'state': 'rejected' if r['rejected'] else 'pending'}
                            for r in db.execute('SELECT * FROM corrections.decisions WHERE author_id=?', (int(author_id),))]
-        rows = list(source)
+        rows = list(self.source_affiliations(author_id) if source is None else source)
         try:
             groups = [dict(g) for g in db.execute("SELECT * FROM publication_groups WHERE author_id=? AND status!='unknown'", (int(author_id),))]
             rows = [{**a, 'ror_id': next(iter(rors))} if not a.get('ror_id') and len(rors := {
@@ -191,25 +209,83 @@ class PaperLibrary:
             pass  # Older fixture catalogs have no printed affiliation table.
         return displayable_affiliations({'affiliations': rows}, reviews)
 
+    def publication_condition(self, author_id, affiliation='all', alias='pa'):
+        """Normal evidence uses ORCID-backed and approved links, with catalog fallback."""
+        from tkg_publications import same_institution
+        db = self._db()
+        source = self.source_affiliations(author_id)
+        trusted = [a for a in self.affiliations(author_id) if a.get('trusted')]
+        tables = {r[0] for r in db.execute("SELECT name FROM corrections.sqlite_master WHERE type='table'")} if getattr(self._local,'attached_decisions',False) else set()
+        confirmed = [r[0] for r in db.execute('SELECT work_id FROM corrections.paper_decisions WHERE author_id=? AND visible=1',(int(author_id),))] if 'paper_decisions' in tables else []
+        restricted = any(a.get('source')=='orcid' and str(a.get('institution') or '').strip() for a in source)
+        try:
+            groups = [dict(r) for r in db.execute('''SELECT g.group_id,g.institution,g.ror_id,COUNT(af.work_id) AS paper_count
+                FROM publication_groups g JOIN publication_affiliations af USING(author_id,group_id)
+                WHERE g.author_id=? AND g.status!='unknown' AND COALESCE(g.institution,'')!=''
+                GROUP BY g.group_id ORDER BY g.group_id''',(int(author_id),))]
+        except sqlite3.OperationalError:
+            groups = []
+        matches = lambda a,g: a.get('group_id')==g['group_id'] or same_institution(a.get('institution',''),a.get('ror_id',''),g['institution'],g.get('ror_id',''))
+        keys = sorted({g['group_id'] for a in trusted for g in groups if matches(a,g)})
+        clauses, args = [], []
+        def group_clause(keys):
+            return f"EXISTS (SELECT 1 FROM publication_affiliations af WHERE af.author_id={alias}.author_id AND af.work_id={alias}.work_id AND af.group_id IN ({','.join('?' for _ in keys)}))"
+        if restricted:
+            permitted = []
+            if keys: permitted.append(group_clause(keys)); args.extend(keys)
+            if confirmed:
+                permitted.append(f'{alias}.work_id IN (SELECT value FROM json_each(?))'); args.append(json.dumps(confirmed))
+            clauses.append('('+' OR '.join(permitted)+')' if permitted else '0')
+        if affiliation not in {'all','eligible','trusted'}:
+            pool = [a for a in [*trusted,*groups] if a['group_id']==affiliation]
+            selected = sorted({g['group_id'] for a in pool for g in groups if matches(a,g)})
+            if not pool: raise ValueError('Unknown publication affiliation')
+            clauses.append(group_clause(selected) if selected else '0'); args.extend(selected)
+        rejected = set()
+        if 'affiliation_reviews' in tables:
+            rejected = {r[0] for r in db.execute("SELECT group_id FROM corrections.affiliation_reviews WHERE author_id=? AND state='rejected'",(int(author_id),))}
+        elif 'decisions' in tables:
+            rejected = {r[0] for r in db.execute('SELECT group_id FROM corrections.decisions WHERE author_id=? AND rejected=1',(int(author_id),))}
+        # In catalog fallback, use printed paper institutions just as Graph does.
+        # Profile aliases and groups without assignments are not filter choices.
+        options = []
+        for a in trusted if restricted else [g for g in groups if g['group_id'] not in rejected]:
+            if not any(matches(a,g) for g in groups): continue
+            if not any(same_institution(a['institution'],a.get('ror_id',''),b['institution'],b.get('ror_id','')) for b in options):
+                options.append({'group_id':a['group_id'],'institution':a['institution'],'ror_id':a.get('ror_id','')})
+        return (' AND '+' AND '.join(clauses) if clauses else '', args,
+            {'publication_mode':'orcid_approved' if restricted else 'catalog','filter_options':options,'effective_affiliation':affiliation})
+
+    def eligible_work_ids(self, author_id, affiliation='all'):
+        sql,args,_ = self.publication_condition(author_id,affiliation)
+        return {r[0] for r in self._db().execute('SELECT pa.work_id FROM visible_paper_authors pa WHERE pa.author_id=?'+sql,[int(author_id),*args])}
+
     def topics(self, author_id, limit=6):
+        sql, args, _ = self.publication_condition(author_id)
         return [r[0] for r in self._db().execute('''SELECT p.primary_topic,COUNT(*) n FROM visible_paper_authors pa
             JOIN papers p USING(work_id) WHERE pa.author_id=? AND COALESCE(p.primary_topic,'')!=''
-            GROUP BY p.primary_topic ORDER BY n DESC,p.primary_topic LIMIT ?''', (int(author_id), limit))]
+            ''' + sql + ' GROUP BY p.primary_topic ORDER BY n DESC,p.primary_topic LIMIT ?', [int(author_id), *args, limit])]
 
-    def selected_publications(self, references):
+    def selected_publications(self, references, filters=()):
         """Browser references only identify papers; live ownership supplies the evidence."""
-        selected, seen = [], set()
+        selected, seen, allowed = [], set(), {}
+        affiliations = {self.canonical_author(str(f['author_id'])):f.get('affiliation','all') for f in filters}
         for ref in references[:8]:
             aid = self.canonical_author(str(ref.get('author_id') or ''))
             work = work_key(ref.get('work_id'))
             if not aid.isdigit() or (aid, work) in seen: continue
-            if self.owns(aid, work) and (paper := self.work(work)):
+            if aid not in allowed:
+                try: allowed[aid] = self.eligible_work_ids(aid,affiliations.get(aid,'all'))
+                except ValueError: allowed[aid] = set()  # A removed institution cannot broaden restored selections.
+            if work in allowed[aid] and (paper := self.work(work)):
                 seen.add((aid, work)); selected.append({'author_id': aid, **paper})
         return selected
 
-    def publication_page(self, author_id, query='', offset=0, limit=20):
+    def publication_page(self, author_id, query='', offset=0, limit=20, affiliation='all'):
         args = [int(author_id)]
         where = 'pa.author_id=?'
+        sql, policy_args, policy = self.publication_condition(author_id,affiliation)
+        where += sql; args.extend(policy_args)
         if query:
             where += ' AND p.title LIKE ?'; args.append('%' + query + '%')
         db = self._db()
@@ -217,7 +293,7 @@ class PaperLibrary:
         papers = [dict(r) for r in db.execute(f'''SELECT p.work_id,p.title,p.year,p.doi,p.pmid FROM visible_paper_authors pa
             JOIN papers p USING(work_id) WHERE {where} ORDER BY p.year DESC,p.cited_by DESC,p.work_id LIMIT ? OFFSET ?''', [*args,limit,offset])]
         return dict(author_id=str(author_id),papers=papers,total=total,offset=offset,limit=limit,
-                    snapshot_version=self.snapshot_version,revision=self.correction_revision())
+                    snapshot_version=self.snapshot_version,revision=self.correction_revision(),**policy)
 
     def _one(self, where: str, value) -> dict | None:
         row = self._db().execute(f"SELECT rowid, * FROM papers WHERE {where} = ? LIMIT 1", (value,)).fetchone()

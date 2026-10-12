@@ -41,7 +41,7 @@ class DiscoveryTests(unittest.TestCase):
         self.state = self.path / 'decisions.sqlite'
         with sqlite3.connect(self.state) as state:
             state.executescript('''CREATE TABLE excluded_links(snapshot_version TEXT,author_id INTEGER,work_id TEXT);
-                CREATE TABLE decisions(author_id INTEGER); CREATE TABLE decision_events(revision INTEGER PRIMARY KEY);''')
+                CREATE TABLE decisions(author_id INTEGER,group_id TEXT,rejected INTEGER); CREATE TABLE decision_events(revision INTEGER PRIMARY KEY);''')
         self.env = patch.dict(os.environ, {'PROFILE_DECISIONS_DB':str(self.state)})
         self.env.start()
         self.library = PaperLibrary.open(str(self.path))
@@ -55,6 +55,29 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result['people'][0]['matched_papers'][0]['work_id'],'W1002')
         self.assertEqual(result,audience(self.library,None,'W1001'))
         self.assertEqual(audience(self.library,None)['status'],'needs_paper')
+
+    def test_catalog_filters_use_printed_labels_and_legacy_rejections(self):
+        (self.path / 'author_metadata.json').write_text(json.dumps([{'id':2,'affiliations':[
+            {'institution':'Clinical Institute, imported alias','ror_id':'https://ror.org/012345678','source':'publication'}]}]))
+        with sqlite3.connect(self.path / 'papers.sqlite') as db:
+            db.execute("INSERT INTO publication_groups VALUES(2,'orphan','No assigned papers','','unrecognised')")
+        self.assertEqual(self.library.publication_condition('2')[2]['filter_options'],[
+            {'group_id':'institution','institution':'Clinical Institute','ror_id':'https://ror.org/012345678'}])
+        with sqlite3.connect(self.state) as db:
+            db.execute("INSERT INTO decisions VALUES(2,'institution',1)")
+        self.assertEqual(self.library.publication_condition('2')[2]['filter_options'],[])
+
+    def test_primary_affiliation_prefers_current_trusted_then_latest(self):
+        from tkg_publications import primary_affiliation
+        rows = [
+            {'institution':'Imported newest','is_current':True,'start_year':2026,'trusted':False},
+            {'institution':'Historical trusted','source':'orcid','start_year':2010,'end_year':2020},
+            {'institution':'Current trusted','source':'orcid','is_current':True,'start_year':2022},
+        ]
+        self.assertEqual(primary_affiliation(rows),'Current trusted')
+        self.assertEqual(primary_affiliation(rows[:2]),'Historical trusted')
+        self.assertEqual(primary_affiliation(rows[:1]),'Imported newest')
+        self.assertEqual(primary_affiliation([]),'')
 
     def test_audience_accepts_description_without_inventing_title(self):
         result = audience(self.library,None,abstract='clinical phenotyping electronic health records')
@@ -142,20 +165,89 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(resolve_references(self.library,[ref]),[])
         self.assertEqual(resolve_references(self.library,[],['Clinical phenotyping with health records'],'2'),[])
 
-    def test_read_context_has_topics_but_only_explicit_profile_papers(self):
+    def test_read_context_uses_eligible_papers_or_explicit_selection(self):
         from research_tools import ResearchTools
         tools=ResearchTools(lambda *_:[],lambda aid:{'name':f'Person {aid}',
             'topics':['clinical phenotyping'],'papers':[{'Title':'Injected browser title'}]},lambda *_:[],library=self.library)
         initial=tools.read_context('1',['2'],[])
         self.assertEqual(initial['profile_context']['topics'],['clinical phenotyping'])
-        self.assertEqual(initial['profile_context']['papers'],[])
+        self.assertEqual([p['work_id'] for p in initial['profile_context']['papers']],['W1001','W1003'])
         self.assertEqual(initial['selected_people'][0]['papers'],[])
         self.assertEqual(initial['selected_publications'],[])
         tools.selected_publication_refs=[{'author_id':'1','work_id':'W1001'}]
+        tools.publication_scope='selected'
         chosen=tools.read_context('1',[],[])
         self.assertEqual([p['work_id'] for p in chosen['profile_context']['papers']],['W1001'])
         with sqlite3.connect(self.state) as db: db.execute("INSERT INTO excluded_links VALUES('test-v1',1,'W1001')")
         self.assertEqual(tools.read_context('1',[],[])['selected_publications'],[])
+
+    def test_selected_coauthors_and_empty_restored_scope_never_broaden(self):
+        from context_selection import revalidate_session
+        from research_tools import ResearchTools
+        self.assertEqual([p['author_id'] for p in explore(self.library,'1',work_ids=['W1003'])['people']],['4'])
+        self.assertEqual([p['author_id'] for p in explore(self.library,'1',work_ids=['W1001'])['people']],['2'])
+        self.assertEqual(explore(self.library,'1',work_ids=[])['people'],[])
+        self.assertEqual(explore(self.library,'1')['total'],2)
+        session={'aid':'1','state':{'contextChoices':{'publicationScope':'selected',
+            'selectedPapers':[{'author_id':'1','work_id':'W1001'}],
+            'publicationFilters':[{'author_id':'1','affiliation':'all'}]}}}
+        with sqlite3.connect(self.state) as db: db.execute("INSERT INTO excluded_links VALUES('test-v1',1,'W1001')")
+        choices=revalidate_session(session,self.library)['state']['contextChoices']
+        self.assertEqual(choices['selectedPapers'],[])
+        self.assertEqual(choices['publicationScope'],'selected')
+        self.assertEqual(choices['publicationFilters'],session['state']['contextChoices']['publicationFilters'])
+        tools=ResearchTools(lambda *_:[],lambda aid:{'name':f'Person {aid}'},lambda *_:[],library=self.library,self_id='1')
+        tools.publication_scope='selected'; tools.selected_publication_refs=[]
+        self.assertEqual(tools.explore_coauthors('','','','',None,None,10)['status'],'needs_selection')
+
+    def test_coauthor_counts_deduplicate_authorship_links(self):
+        with sqlite3.connect(self.path/'papers.sqlite') as db:
+            db.execute("INSERT INTO paper_authors VALUES('W1001',2,2,'unrecognised')")
+        result=explore(self.library,'1',work_ids=['W1001'])
+        self.assertEqual(result['people'][0]['shared_paper_count'],1)
+        self.assertEqual(len(result['people'][0]['matched_papers']),1)
+
+    def test_obsolete_context_filter_requires_a_new_selection(self):
+        from context_selection import revalidate_session
+        session={'aid':'1','state':{'contextChoices':{'publicationScope':'eligible',
+            'publicationFilters':[{'author_id':'1','affiliation':'removed-institution'}]}}}
+        choices=revalidate_session(session,self.library)['state']['contextChoices']
+        self.assertEqual(choices['selectedPapers'],[])
+        self.assertEqual(choices['publicationScope'],'selected')
+        self.assertEqual(choices['publicationFilters'],[])
+
+    def test_approval_without_orcid_preserves_catalog_fallback(self):
+        with sqlite3.connect(self.state) as db:
+            db.executescript('''CREATE TABLE paper_decisions(author_id INTEGER,work_id TEXT,visible INTEGER);
+                CREATE TABLE affiliation_reviews(author_id INTEGER,group_id TEXT,state TEXT,override_json TEXT);
+                INSERT INTO paper_decisions VALUES(1,'W1001',1);''')
+        self.assertEqual(self.library.eligible_work_ids('1'),{'W1001','W1003'})
+        with sqlite3.connect(self.state) as db:
+            db.execute("INSERT INTO affiliation_reviews VALUES(1,'clinical','approved',?)",
+                (json.dumps({'institution':'Clinical Institute','source':'owner_approved'}),))
+        self.assertEqual(self.library.eligible_work_ids('1'),{'W1001','W1003'})
+
+    def test_actual_orcid_affiliations_filter_evidence_without_empty_fallback(self):
+        from context_selection import resolve_references
+        from research_tools import ResearchTools
+        (self.path/'author_metadata.json').write_text(json.dumps([{'id':1,'orcid':'record-id',
+            'affiliations':[{'institution':'Clinical Institute','source':'orcid','is_current':True}]}]))
+        with sqlite3.connect(self.path/'papers.sqlite') as db:
+            db.execute("INSERT INTO publication_groups VALUES(1,'clinical','Clinical Institute','','confirmed')")
+            db.execute("INSERT INTO publication_affiliations VALUES(1,'W1001','clinical')")
+        self.assertEqual(self.library.eligible_work_ids('1'),{'W1001'})
+        self.assertEqual(self.library.topics('1'),['clinical phenotyping'])
+        self.assertEqual(explore(self.library,'1')['people'][0]['author_id'],'2')
+        self.assertEqual(resolve_references(self.library,[{'author_id':'1','work_id':'W1003'}]),[])
+        self.assertEqual(resolve_references(self.library,[{'author_id':'1','work_id':'W1001'}],filters=[{'author_id':'1','affiliation':'removed'}]),[])
+        tools=ResearchTools(lambda *_:[],lambda aid:{'name':f'Person {aid}'},lambda *_:[],library=self.library,self_id='1')
+        self.assertEqual([p['work_id'] for p in tools.read_person_evidence('1','ocean')['person']['papers']],['W1001'])
+        # A real ORCID affiliation with no matching printed institution stays empty.
+        (self.path/'author_metadata.json').write_text(json.dumps([{'id':1,
+            'affiliations':[{'institution':'Unmatched University','source':'orcid','is_current':True}]}]))
+        fresh=PaperLibrary.open(str(self.path))
+        self.assertEqual(fresh.publication_page('1')['papers'],[])
+        self.assertEqual(explore(fresh,'1')['people'],[])
 
     def test_pasted_title_of_a_catalog_paper_excludes_its_authors(self):
         pasted=audience(self.library,None,'','Clinical phenotyping with health records','')

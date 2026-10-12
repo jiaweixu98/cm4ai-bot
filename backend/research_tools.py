@@ -246,12 +246,21 @@ class ResearchTools:
             return None
         terms = set(re.findall(r"\w+", question.casefold()))
         papers = [p for p in raw.get("papers", []) if paper_title(p)]
-        if self.library is not None and hasattr(self.library, 'author_works'):
+        allowed = None
+        if self.library is not None and hasattr(self.library, 'eligible_work_ids'):
+            affiliation = next((f['affiliation'] for f in getattr(self,'publication_filters',[])
+                if self.library.canonical_author(f['author_id']) == author_id),'all')
+            allowed = self.library.eligible_work_ids(author_id,affiliation)
+            if author_id == str(self.self_id) and getattr(self,'publication_scope','eligible') == 'selected':
+                allowed &= {p['work_id'] for p in getattr(self,'selected_publication_refs',[]) if p['author_id'] == author_id}
+            papers = [library_paper(p) for p in self.library.publication_page(author_id,limit=24,affiliation=affiliation)['papers'] if p['work_id'] in allowed]
+        elif self.library is not None and hasattr(self.library, 'author_works'):
             papers = [library_paper(p) for p in self.library.author_works(author_id)[:24]]
         # A lexical ordering of the available titles, not a scientific fit score.
         papers = sorted(papers, key=lambda p: -len(terms & set(re.findall(r"\w+", paper_title(p).casefold()))))
         if self.library is not None and question.strip() and limit:
-            papers = [library_paper(row) for row in _papers_for_question(self.library, author_id, question)] + papers
+            papers = [library_paper(row) for row in _papers_for_question(self.library, author_id, question)
+                      if allowed is None or row['work_id'] in allowed] + papers
         records = []
         seen = set()
         for paper in papers:
@@ -318,10 +327,17 @@ class ResearchTools:
             focal = self.library.canonical_author(focal)
         if not focal.isdigit(): return {'status':'needs_person','people':[]}
         if self.library is None: return {'status':'unavailable','people':[]}
+        filters = getattr(self,'publication_filters',[])
+        affiliation = next((f['affiliation'] for f in filters if self.library.canonical_author(f['author_id'])==focal),'all')
+        selected = getattr(self,'publication_scope','eligible') == 'selected'
+        works = [p['work_id'] for p in getattr(self,'selected_publication_refs',[]) if str(p['author_id'])==focal] if selected else None
+        if selected and not works:
+            return {'status':'needs_selection','people':[], 'message':'Select publications by this researcher, or use all eligible publications.'}
         from paper_discovery import explore
         result = explore(self.library,focal,specialty,institution,'',from_year,to_year,
                          limit=limit,
-                         affiliation_lookup=lambda aid: (self.details(aid) or {}).get("affiliations", []))
+                         affiliation_lookup=lambda aid: (self.details(aid) or {}).get("affiliations", []),
+                         work_ids=works,publication_affiliation=affiliation)
         return self._publication_results(result,'recorded coauthors matching the publication filters','explore_coauthors')
 
     def resolve_person(self, name: str) -> dict:
@@ -524,7 +540,7 @@ class ResearchTools:
                         })
                         # Saved/browser records identify a paper, but cannot supply its
                         # authorship or abstract. Live corrections still apply here.
-                        if row and self.library.owns(person['author_id'], row['work_id']):
+                        if row and row['work_id'] in self.library.eligible_work_ids(person['author_id']):
                             record = self._remember_paper(person['author_id'], library_paper(row))
                             if record and record not in papers:
                                 papers.append(record)
@@ -536,13 +552,19 @@ class ResearchTools:
         if profile:
             profile['topics'] = profile.get('research_topics') or []
             profile['papers'] = [p for p in chosen if p['author_id'] == profile['author_id']]
+            if self.library is not None and getattr(self,'publication_scope','eligible') == 'eligible':
+                affiliation = next((f['affiliation'] for f in getattr(self,'publication_filters',[])
+                    if self.library.canonical_author(f['author_id']) == profile['author_id']),'all')
+                profile['papers'] = [_with_excerpt(self._remember_paper(profile['author_id'],library_paper(p)))
+                    for p in self.library.publication_page(profile['author_id'],limit=8,affiliation=affiliation)['papers']]
         return {"profile_context": profile, "selected_publications": chosen,
+                "publication_scope": getattr(self,'publication_scope','eligible'),
                 "selected_people": read(selected_ids), "displayed_people_in_order": displayed}
 
     def context_publications(self):
         if self.library is None: return []
         records = []
-        for row in self.library.selected_publications(getattr(self,'selected_publication_refs',[])):
+        for row in self.library.selected_publications(getattr(self,'selected_publication_refs',[]),getattr(self,'publication_filters',[])):
             paper = self._remember_paper(row['author_id'],library_paper(row))
             if paper: records.append(_with_excerpt(paper))
         return records
