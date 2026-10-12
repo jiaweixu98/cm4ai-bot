@@ -88,7 +88,7 @@ export default function Home() {
   const [contextChoices, setContextChoices] = useState({
     samePlace: false,
     recentYears: 0,
-    version: 2, paperScope: "chosen",
+    version: 3, paperScope: "chosen", publicationScope: "eligible", publicationFilters: [],
     paperTitles: [], selectedPapers: [],
   });
   const [queuedFollowUp, setQueuedFollowUp] = useState("");
@@ -175,29 +175,29 @@ export default function Home() {
     };
   }, []);
 
-  const contextReferenceKey = JSON.stringify({ papers: contextChoices.selectedPapers || [], legacy: contextChoices.paperTitles || [] });
+  const contextReferenceKey = JSON.stringify({ papers: contextChoices.selectedPapers || [], legacy: contextChoices.paperTitles || [], filters:contextChoices.publicationFilters || [] });
   useEffect(() => {
     const controller = new AbortController();
     const resolve = async () => {
       const response = await fetch(matrixApiPath('/api/context-publications/resolve'), { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
         body: JSON.stringify({ author_id: String(aid), references: (contextChoices.selectedPapers || []).map(p => ({ author_id: String(p.author_id), work_id: p.work_id })),
-          legacy_titles: contextChoices.paperTitles || [] }) });
+          legacy_titles: contextChoices.paperTitles || [], publication_filters:contextChoices.publicationFilters || [] }) });
       if (!response.ok) return;
       const result = await response.json();
       if(controller.signal.aborted) return;
       const selected = result.selected_publications || [];
       setContextChoices(current => {
-        if (JSON.stringify({papers:current.selectedPapers || [],legacy:current.paperTitles || []}) !== contextReferenceKey) return current;
+        if (JSON.stringify({papers:current.selectedPapers || [],legacy:current.paperTitles || [],filters:current.publicationFilters || []}) !== contextReferenceKey) return current;
         return JSON.stringify(current.selectedPapers || []) === JSON.stringify(selected) && !(current.paperTitles || []).length
-          ? current : { ...current, version: 2, selectedPapers: selected, paperTitles: [], paperScope: 'chosen' };
+          ? current : { ...current, version: 3, selectedPapers: selected, paperTitles: [], paperScope: 'chosen' };
       });
     };
     if ((contextChoices.selectedPapers || []).length || (contextChoices.paperTitles || []).length) resolve().catch(() => {});
     const refresh = () => resolve().catch(() => {});
     window.addEventListener('focus', refresh);
     return () => { controller.abort(); window.removeEventListener('focus', refresh); };
-  }, [aid, currentSessionId, contextReferenceKey, contextOpen]);
+  }, [aid, currentSessionId, contextReferenceKey, contextOpen, correctionRefresh]);
 
   const resetWorkflowState = useCallback(() => {
     savedFingerprintRef.current = "";
@@ -205,7 +205,7 @@ export default function Home() {
     setContextPersonIds([]);
     setContextOpen(false);
     setExploreFilters(null);
-    setContextChoices({ version: 2, samePlace: false, recentYears: 0, paperScope: "chosen", paperTitles: [], selectedPapers: [] });
+    setContextChoices({ version: 3, samePlace: false, recentYears: 0, paperScope: "chosen", paperTitles: [], selectedPapers: [], publicationScope: "eligible", publicationFilters: [] });
     setAttachedPapers([]);
     setGraphHandoffPersonId(null);
     setMessages([]);
@@ -322,7 +322,7 @@ export default function Home() {
     setContextChoices({
       samePlace: false,
       recentYears: 0,
-      version: 2, paperScope: "chosen",
+      version: 3, paperScope: "chosen", publicationScope: restoredChoices.publicationScope || (restoredChoices.selectedPapers?.length ? "selected" : "eligible"), publicationFilters: restoredChoices.publicationFilters || [],
       selectedPapers: Array.isArray(restoredChoices.selectedPapers) ? restoredChoices.selectedPapers.slice(0,8) : [],
       paperTitles: restoredChoices.paperScope === "chosen" && Array.isArray(restoredChoices.paperTitles) ? restoredChoices.paperTitles.map(String).slice(0,8) : [],
     });
@@ -548,7 +548,7 @@ export default function Home() {
   }, [graphContextPeople, savedPeople, savedPeopleReady]);
 
   useEffect(() => {
-    document.title = focalName ? `MATRIX | Research guide for ${focalName}` : "MATRIX | Research guide";
+    document.title = focalName ? `TalentKG Chat | Research guide for ${focalName}` : "TalentKG Chat | Research guide";
   }, [focalName]);
 
   const contextPeople = useMemo(() => {
@@ -1032,6 +1032,8 @@ export default function Home() {
           same_place: contextChoices.samePlace,
           recent_years: contextChoices.recentYears,
           paper_scope: contextChoices.paperScope,
+          publication_scope: contextChoices.publicationScope || ((contextChoices.selectedPapers || []).length ? "selected" : "eligible"),
+          publication_filters: contextChoices.publicationFilters || [],
           paper_titles: [],
           selected_publications: (contextChoices.selectedPapers || []).slice(0,8).map(p => ({ author_id: String(p.author_id), work_id: p.work_id })),
         },
@@ -1381,14 +1383,9 @@ export default function Home() {
 
   if (!uiReady) {
     return (
-      <div className="app-container is-embedded">
-        <header className="focal-bar">
-          <div className="focal-copy">
-            <div className="focal-kicker">MATRIX</div>
-            <div className="focal-name">Loading…</div>
-          </div>
-        </header>
-      </div>
+      <main className="chat-loading" role="status" aria-live="polite">
+        <p>Loading TalentKG Chat…</p>
+      </main>
     );
   }
 
@@ -1468,6 +1465,7 @@ export default function Home() {
       <div className={`workspace ${workspaceClass}`}>
         <ChatPane
           starters={GENERAL_STARTERS}
+          profileName={matrixUserToken && linked ? authorInfo?.name || "" : ""}
           messages={messages}
           phase={phase}
           statusLabel={agentStatus}

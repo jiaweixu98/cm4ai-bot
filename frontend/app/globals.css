@@ -117,6 +117,18 @@ select:focus-visible,
     var(--matrix-bg);
 }
 
+.chat-loading {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  padding: 24px;
+  text-align: center;
+  background: var(--matrix-bg);
+  color: var(--matrix-text-2);
+}
+
 .workspace {
   min-width: 0;
   display: flex;

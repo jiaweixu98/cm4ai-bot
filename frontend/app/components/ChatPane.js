@@ -3,10 +3,11 @@ import { CHAT_WINDOW } from "../lib/matrixUi";
 import { searchPeopleByName } from "../lib/api";
 import { StarterIcon, IconClose, IconPaperclip, IconSend, IconStop, IconTeam } from "./icons";
 import MessageBubble from "./MessageBubble";
-import { SHOWCASE_STARTERS } from "../lib/personaConfig";
+import { showcaseStarters } from "../lib/personaConfig";
 
 export default function ChatPane({
   starters,
+  profileName = '',
   messages,
   phase,
   statusLabel = "",
@@ -307,7 +308,7 @@ export default function ChatPane({
         ref={inputRef}
         className="chat-input"
         aria-label="Describe the research help you need"
-        placeholder={queueable ? "Queue a follow-up" : selectedPeople.length === 1 ? `Ask about ${selectedPeople[0].name}’s research…` : selectedPeople.length > 1 ? "Ask about these researchers…" : landing ? "Work on anything" : "Message MATRIX"}
+        placeholder={queueable ? "Queue a follow-up" : selectedPeople.length === 1 ? `Ask about ${selectedPeople[0].name}’s research…` : selectedPeople.length > 1 ? "Ask about these researchers…" : landing ? "Work on anything" : "Message TalentKG Chat"}
         value={inputValue}
         onChange={(event) => setInputValue(event.target.value)}
         onKeyDown={handleKeyDown}
@@ -449,7 +450,7 @@ export default function ChatPane({
                 </button>
               ))}
             </div>
-            <details className="showcase-examples"><summary>More examples</summary><div className="starter-grid">{SHOWCASE_STARTERS.map(starter => <button type="button" className="starter-card" key={starter.label} onClick={() => onUseStarter ? onUseStarter(starter) : setInputValue(starter.prompt)}><span className="starter-copy"><span className="starter-label">{starter.label}</span><span className="starter-prompt">{starter.prompt}</span></span></button>)}</div></details>
+            <details className="showcase-examples"><summary>More examples</summary><div className="starter-grid">{showcaseStarters(profileName).map(starter => <button type="button" className="starter-card" key={starter.label} onClick={() => onUseStarter ? onUseStarter(starter) : setInputValue(starter.prompt)}><span className="starter-copy"><span className="starter-label">{starter.label}</span><span className="starter-prompt">{starter.prompt}</span></span></button>)}</div></details>
           </div>
         )}
         {visibleMessages.map((msg) => (

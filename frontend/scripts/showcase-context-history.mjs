@@ -22,12 +22,17 @@ try {
  await context.route('**/api/chat-lite',route=>route.fulfill({json:{action:'agent',reply:'Context history acceptance response.',result_update:'keep',working_context:{goal:'',requirements:[]}}}));
  const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:3100/?aid=5058469124&fresh=1',{waitUntil:'networkidle'});
+ await page.locator('.showcase-examples summary').click();
+ await page.getByRole('button',{name:/Explore Show my top 10 recorded coauthors for Jake/}).waitFor();
  const rail=page.getByRole('complementary',{name:'Chat history'});
  assert.equal(await page.getByRole('complementary',{name:'Conversation context'}).count(),0);
  assert.equal(await rail.getByText('Context',{exact:true}).count(),0);
  const open=async()=>{await page.getByRole('button',{name:'Manage context'}).click();const panel=page.getByRole('complementary',{name:'Conversation context'});await panel.locator('.you-paper-choice').first().waitFor();return panel;};
  let panel=await open();await panel.getByText('No publications selected.',{exact:true}).waitFor();
  await panel.getByText('Topics',{exact:true}).waitFor();
+ const affiliationFilter=panel.getByLabel('Publication affiliation filter');
+ const institution=await affiliationFilter.locator('option').nth(1).getAttribute('value');
+ await affiliationFilter.selectOption(institution);
  await panel.getByRole('button',{name:'Next',exact:true}).click();await panel.getByRole('button',{name:'Previous',exact:true}).click();
  await panel.getByLabel('Search publications').fill('PAGER');await panel.locator('.you-paper-choice').first().waitFor();
  const titleA=await panel.locator('.you-paper-choice span').first().innerText();await panel.locator('.you-paper-choice input').first().check();await panel.getByText('1/8 selected',{exact:true}).waitFor();
@@ -44,7 +49,10 @@ try {
  await panel.getByRole('button',{name:'Close context',exact:true}).click();await send('Showcase conversation B');
  const records=await sql`SELECT id,state FROM matrix_chat_sessions WHERE owner_orcid=${'account:'+account} OR owner_orcid=${'google:'+subject}`;
  assert.equal(records.length,2);const choices=records.map(r=>r.state.contextChoices.selectedPapers);assert.ok(choices.every(c=>c.length===1));assert.notEqual(choices[0][0].work_id,choices[1][0].work_id);
+ assert.ok(records.some(r=>r.state.contextChoices.publicationFilters?.some(f=>f.affiliation===institution)));
+ assert.ok(records.every(r=>r.state.contextChoices.publicationScope==='selected'));
  await rail.getByRole('button',{name:/Showcase conversation A/}).click();panel=await open();await panel.getByText(/PAGER/).first().waitFor();assert.equal(await panel.getByText('1/8 selected',{exact:true}).count(),1);
+ assert.equal(await panel.getByLabel('Publication affiliation filter').inputValue(),institution);
  await page.screenshot({path:'/tmp/showcase-context-desktop.png'});await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:'/tmp/showcase-context-mobile.png'});
  await page.keyboard.press('Escape');assert.equal(await page.getByRole('complementary',{name:'Conversation context'}).count(),0);
  await page.reload({waitUntil:'networkidle'});await page.getByRole('button',{name:'Manage context'}).click();await page.getByRole('complementary',{name:'Conversation context'}).getByText('1/8 selected',{exact:true}).waitFor();
