@@ -153,6 +153,11 @@ search and summarize the literature. Adapt to what the user actually asks.
   The tool returns retrieval candidates, not proof of a relevant audience. Return an
   empty shortlist when their publications do not support the paper's topic; never fill
   the list just because nearest publications were returned.
+- For "my coauthors" or "my top 10 coauthors", use explore_coauthors with an empty
+  author_id for the signed-in researcher. Its deterministic counts use the selected
+  publications when a selection is active, otherwise the eligible publication set.
+  Keep its order and requested result count. If status is needs_selection, ask them
+  to select papers or use all eligible publications; never broaden a selected scope.
 - For exploring a person's coauthors by specialty or a date range, resolve the person
   then use explore_coauthors. Pass geography as an empty string. Current affiliations do
   not support a location filter. If the user asks for a place, answer from specialty and
@@ -644,6 +649,8 @@ def _build_input(req, profile: dict | None = None, selected: list | None = None,
                "attachments_reference_only": [s[:6000] for s in req.attached_context[:5]],
                "has_profile_context": req.aid not in {"", "unlinked", "0"},
                "has_selected_people": bool(req.context_person_ids),
+               "publication_scope": getattr(req, '_publication_scope', 'eligible'),
+               "publication_filters": getattr(req, '_publication_filters', []),
                "displayed_shortlist": [{"author_id": str(p.get("author_id", "")), "name": str(p.get("name", ""))[:120]}
                                        for p in req.search_results[:8]]}
     if getattr(req, "_resolved_displayed", None):
@@ -760,7 +767,11 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
     from context_selection import resolve_references
     refs = [r.model_dump() for r in (getattr(choices,'selected_publications',None) or [])]
     legacy = (getattr(choices,'paper_titles',None) or []) if getattr(choices,'paper_scope',None) == 'chosen' else []
-    services.selected_publication_refs = await call(resolve_references, services.library, refs, legacy, req.aid)
+    services.publication_filters = [f.model_dump() for f in (getattr(choices,'publication_filters',None) or [])]
+    services.publication_scope = 'selected' if refs or legacy else getattr(choices,'publication_scope','eligible')
+    req._publication_scope = services.publication_scope
+    req._publication_filters = services.publication_filters
+    services.selected_publication_refs = await call(resolve_references, services.library, refs, legacy, req.aid, services.publication_filters)
     selected_publications = await call(services.context_publications)
     if req.search_results:
         verified = await call(services.read_context, req.aid, [], [str(p.get("author_id", "")) for p in req.search_results[:8]],req.search_results[:8])
@@ -771,6 +782,10 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
         if person:
             services.self_id = person["author_id"]
             person['papers'] = [p for p in selected_publications if p['author_id'] == person['author_id']]
+            if services.publication_scope == 'eligible' and services.library is not None:
+                affiliation = next((f['affiliation'] for f in services.publication_filters if services.library.canonical_author(f['author_id'])==person['author_id']),'all')
+                page = await call(services.library.publication_page,person['author_id'],'',0,8,affiliation)
+                person['papers'] = page['papers']
             profile = _signed_in_profile(person, {}, choices, [])
             profile['selected_publications'] = selected_publications
     place = ""

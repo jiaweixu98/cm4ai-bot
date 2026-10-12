@@ -5,6 +5,7 @@ Geography uses current ORCID or owner-approved affiliations, resolved through
 sourced ROR locations.
 """
 import geography as geo
+import json
 from paper_library import title_key
 from tkg_publications import normalise_institution
 
@@ -135,13 +136,14 @@ def _affiliations(library, pairs):
 
 def explore_people(library, author_id='', topics=(), specialty='', institution='', geography='',
                    from_year=None, to_year=None, coauthors_only=False, offset=0, limit=500,
-                   locations=None, affiliation_lookup=None):
+                   locations=None, affiliation_lookup=None, work_ids=None, publication_affiliation='all'):
     """One filtering contract for the Graph and MATRIX. All publication constraints
     apply to the same retained paper; geography uses current trusted affiliations."""
     if from_year is not None and to_year is not None and from_year > to_year:
         raise ValueError('The start year must be before the end year')
     revision = library.correction_revision()
-    cache_key = (revision,str(author_id),tuple(topics),specialty,institution,geography,from_year,to_year,coauthors_only,locations,affiliation_lookup)
+    cache_key = (revision,str(author_id),tuple(topics),specialty,institution,geography,from_year,to_year,coauthors_only,locations,affiliation_lookup,
+                 None if work_ids is None else tuple(sorted(set(work_ids))),publication_affiliation)
     with library._explore_lock:
         cached = library._explore_cache.get(cache_key)
         if cached is not None:
@@ -153,6 +155,9 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
         conditions.append('EXISTS (SELECT 1 FROM visible_paper_authors a WHERE a.work_id=b.work_id AND a.author_id=?)')
         args.append(int(author_id))
         conditions.append('b.author_id!=?'); args.append(int(author_id))
+        eligible = library.eligible_work_ids(author_id,publication_affiliation)
+        if work_ids is not None: eligible &= set(work_ids)
+        conditions.append('p.work_id IN (SELECT value FROM json_each(?))'); args.append(json.dumps(sorted(eligible)))
     if from_year is not None: conditions.append('p.year>=?'); args.append(int(from_year))
     if to_year is not None: conditions.append('p.year<=?'); args.append(int(to_year))
     terms, weights = [], {}
@@ -172,7 +177,7 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
     clauses = ' AND '.join(conditions) or '1'
     columns = 'p.*' if terms else 'p.work_id,p.title,p.year,p.venue,p.doi,p.pmid,p.cited_by,p.primary_topic,NULL AS abstract'
     people = {}
-    rows = library._db().execute(f"""SELECT b.author_id,{columns} FROM visible_paper_authors b
+    rows = library._db().execute(f"""SELECT DISTINCT b.author_id,{columns} FROM visible_paper_authors b
         JOIN papers p USING(work_id) WHERE {clauses} ORDER BY p.year DESC,p.work_id,b.author_id""", args)
     for record in rows:
         paper = dict(record); aid = int(paper.pop('author_id'))
@@ -219,6 +224,8 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
                 'geography_locations_version': report['version']} if report else {}),
             'snapshot_version': library.snapshot_version,
             'revision': revision}
+    if coauthors_only:
+        result['filters'].update(publication_affiliation=publication_affiliation,work_ids=work_ids)
     if library.correction_revision() != revision: raise ValueError('The review state changed; try the filters again')
     with library._explore_lock:
         library._explore_cache[cache_key] = result
@@ -227,10 +234,10 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
 
 
 def explore(library, author_id, specialty='', institution='', geography='', from_year=None, to_year=None,
-            limit=8, locations=None, affiliation_lookup=None):
+            limit=8, locations=None, affiliation_lookup=None, work_ids=None, publication_affiliation='all'):
     return explore_people(library,author_id,specialty=specialty,institution=institution,geography=geography,
                           from_year=from_year,to_year=to_year,coauthors_only=True,limit=max(1,min(limit,20)),
-                          locations=locations,affiliation_lookup=affiliation_lookup)
+                          locations=locations,affiliation_lookup=affiliation_lookup,work_ids=work_ids,publication_affiliation=publication_affiliation)
 
 
 def _filter_geography(ordered, typed, places):

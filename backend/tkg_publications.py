@@ -10,10 +10,12 @@ STATES = ("confirmed", "in_history", "unrecognised", "unknown")
 STATE_RANK = {state: len(STATES) - i for i, state in enumerate(STATES)}
 ASSERTED = {"verified_orcid", "self_reported"}
 HIDDEN_AFFILIATION_SOURCE = "openalex_low_conf"
-GENERIC = set('''university universite universitat universidad college institute institut institution
-    school center centre hospital medical medicine health sciences science research department dept
-    faculty laboratory lab national state of the and for at in a an system systems clinic
-    foundation trust group division unit st saint'''.split())
+# Keep institution matching identical to Graph's lib/affiliationPolicy.mjs.
+# Removing additional words such as "clinic" or "system" changes ownership
+# eligibility (Mayo Clinic versus UC San Diego Health System, for example).
+GENERIC = set('''university college institute institution school center centre hospital
+    medical medicine health sciences science research department faculty laboratory lab
+    national state of the and for at in'''.split())
 
 
 def resolve_snapshot(directory: str) -> str:
@@ -30,8 +32,10 @@ def resolve_snapshot(directory: str) -> str:
     return str(target)
 
 
-def normalise_institution(value: str) -> str:
-    text = unicodedata.normalize("NFKD", str(value or "")).casefold().replace("&", " and ")
+def normalise_institution(value: str, *, expand_ampersand: bool = True) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "")).lower()
+    if expand_ampersand:
+        text = text.replace("&", " and ")
     text = "".join(c for c in text if not unicodedata.combining(c))
     return " ".join(re.findall(r"[a-z0-9]+", text))
 
@@ -41,9 +45,11 @@ def institution_key(name: str, ror: str = "") -> str:
 
 
 def same_institution(name: str, ror: str, other_name: str, other_ror: str) -> bool:
+    ror, other_ror = str(ror or '').strip(), str(other_ror or '').strip()
     if ror and other_ror:
-        return ror == other_ror
-    a, b = normalise_institution(name), normalise_institution(other_name)
+        return re.sub(r'^https?://ror.org/', '', ror) == re.sub(r'^https?://ror.org/', '', other_ror)
+    a = normalise_institution(name, expand_ampersand=False)
+    b = normalise_institution(other_name, expand_ampersand=False)
     if not a or not b:
         return False
     if a == b:
@@ -92,3 +98,16 @@ def displayable_affiliations(row: dict, reviews=()) -> list:
             selected[review['group_id']] = {**review['override'], 'group_id': review['group_id'],
                                            'source': 'owner_approved', 'trusted': True}
     return list(selected.values())
+
+
+def primary_affiliation(rows: list[dict]) -> str:
+    """Match the Graph header: one current trusted institution, else latest."""
+    rows = [r for r in rows if str(r.get('institution') or '').strip()]
+    trusted = [r for r in rows if r.get('trusted') or r.get('source') in {'orcid', 'owner_approved'}]
+    ordered = sorted(trusted or rows,
+                     key=lambda r: (bool(r.get('is_current')), r.get('end_year') or r.get('start_year') or 0),
+                     reverse=True)
+    current = [r for r in ordered if r.get('is_current') and not r.get('end_year')]
+    latest = sorted(ordered, key=lambda r: r.get('end_year') or r.get('start_year') or 0, reverse=True)
+    selected = current or latest
+    return selected[0]['institution'] if selected else ''
