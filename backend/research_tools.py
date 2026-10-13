@@ -316,7 +316,8 @@ class ResearchTools:
         from paper_discovery import audience
         from paper_vectors import load_paper_index
         result = audience(self.library,load_paper_index(),identifier,title,abstract,[self.self_id])
-        return self._publication_results(result, 'potential audience for ' + (result.get('source_paper') or {}).get('title',title),
+        source = result.get('source_paper') or {}
+        return self._publication_results(result, 'potential audience for ' + (source.get('title') or source.get('abstract') or title or abstract),
                                          'find_paper_audience')
 
     def explore_coauthors(self, author_id: str, specialty: str, institution: str, geography: str,
@@ -519,8 +520,8 @@ class ResearchTools:
         def read(ids):
             return [p for aid in ids[:8] if (p := self._person(aid, limit=0))]
         displayed = []
-        previous = {str(row.get('author_id', '')): row for row in (displayed_results or [])[:8]}
-        for author_id in displayed_ids[:8]:
+        previous = {str(row.get('author_id', '')): row for row in (displayed_results or [])[:10]}
+        for author_id in displayed_ids[:10]:
             supplied = previous.get(str(author_id))
             if self.library is None or supplied is None:
                 person = self._person(author_id, limit=3)

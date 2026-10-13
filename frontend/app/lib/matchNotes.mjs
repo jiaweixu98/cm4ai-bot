@@ -12,22 +12,15 @@ function clip(text) {
   return sentenceEnd > 80 ? clipped.slice(0, sentenceEnd + 1) : `${clipped.replace(/\s+\S*$/, '')}.`;
 }
 
-function shortenTopic(title) {
-  const cleaned = String(title || '').replace(/\s+/g, ' ').trim();
-  if (!cleaned) return '';
-  const words = cleaned.split(' ').slice(0, 8).join(' ');
-  return words.replace(/[.:;]+$/, '');
-}
-
 export function fallbackNote(candidate, options = {}) {
   const papers = Array.isArray(candidate?.papers) ? candidate.papers : [];
   const index = papers.slice(0, 3).findIndex((paper) => titleOf(paper));
-  const topic = index >= 0 ? shortenTopic(titleOf(papers[index])) : '';
+  const topic = index >= 0 ? titleOf(papers[index]) : '';
   let explanation;
   if (!topic) {
-    explanation = 'No indexed publications available.';
+    explanation = '';
   } else {
-    explanation = 'See supporting publication.';
+    explanation = `Coauthored “${topic}”.`;
   }
   return {
     author_id: String(candidate.author_id),

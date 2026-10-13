@@ -85,6 +85,102 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(result['people'])
         self.assertEqual(result['source_paper']['title'],'')
 
+    def test_audience_diversifies_before_a_large_papers_author_list_fills_the_pool(self):
+        with sqlite3.connect(self.path / 'papers.sqlite') as db:
+            db.executemany("INSERT INTO paper_authors VALUES('W1001',?,2,'unknown')", [(aid,) for aid in range(10, 70)])
+            db.execute("INSERT INTO papers SELECT 'W1004','Clinical phenotype network analysis',abstract,year,venue,doi,doi_key,pmid,cited_by,primary_topic,primary_field,'clinical phenotype network analysis' FROM papers WHERE work_id='W1002'")
+            db.execute("INSERT INTO paper_authors VALUES('W1004',100,1,'unknown')")
+            rows = dict(db.execute('SELECT work_id,rowid FROM papers'))
+        scores = {rows[work]: score for work, score in [('W1001', 3), ('W1002', 2), ('W1004', 1)]}
+        with patch.object(self.library, 'score_query', return_value=scores):
+            result = audience(self.library, None, abstract='clinical phenotyping', limit=4)
+            self.assertEqual([p['author_id'] for p in result['people']], ['1', '3', '100', '2'])
+            self.assertEqual(len({p['matched_papers'][0]['work_id'] for p in result['people'][:3]}), 3)
+            self.assertEqual(result, audience(self.library, None, abstract='clinical phenotyping', limit=4))
+            excluded = audience(self.library, None, abstract='clinical phenotyping', exclude_ids=['1'], limit=3)
+            self.assertEqual([p['author_id'] for p in excluded['people']], ['2', '3', '100'])
+
+    def test_audience_duplicate_exports_do_not_count_as_distinct_publications(self):
+        with sqlite3.connect(self.path / 'papers.sqlite') as db:
+            db.execute("INSERT INTO papers SELECT 'W1004',upper(title),abstract,year,venue,doi,doi_key,pmid,cited_by,primary_topic,primary_field,title_key FROM papers WHERE work_id='W1001'")
+            db.execute("INSERT INTO paper_authors VALUES('W1004',5,1,'unknown')")
+            rows = dict(db.execute('SELECT work_id,rowid FROM papers'))
+        scores = {rows[work]: score for work, score in [('W1001', 3), ('W1004', 2), ('W1002', 1)]}
+        with patch.object(self.library, 'score_query', return_value=scores):
+            result = audience(self.library, None, abstract='clinical phenotyping', limit=4)
+        self.assertEqual([p['author_id'] for p in result['people']], ['1', '3', '2', '5'])
+        self.assertEqual(result['people'][-1]['matched_papers'][0]['work_id'], 'W1004')
+        self.assertTrue(all(self.library.owns(p['author_id'], paper['work_id'])
+                            for p in result['people'] for paper in p['matched_papers']))
+
+    def test_audience_and_card_followups_use_the_same_eligible_publications(self):
+        (self.path / 'author_metadata.json').write_text(json.dumps([{'id': 2, 'affiliations': [
+            {'institution': 'Other Current Institution', 'source': 'orcid', 'is_current': True}]}]))
+        result = audience(self.library, None, abstract='clinical phenotyping')
+        self.assertNotIn('2', [person['author_id'] for person in result['people']])
+        self.assertEqual(explore(self.library, '1', from_year=2021)['people'], [])
+        self.assertTrue(all(paper['work_id'] in self.library.eligible_work_ids(person['author_id'])
+                            for person in result['people'] for paper in person['matched_papers']))
+        from research_tools import ResearchTools
+        tools = ResearchTools(lambda *_: [], lambda aid: {'name': f'Person {aid}'}, lambda *_: [], library=self.library)
+        supplied = [{'author_id': person['author_id'], 'papers': person['matched_papers']} for person in result['people']]
+        context = tools.read_context('', [], [p['author_id'] for p in supplied], supplied)
+        self.assertTrue(all(person['papers'] for person in context['displayed_people_in_order']))
+
+    def test_my_coauthors_use_viewer_and_combine_shared_years_with_current_institution(self):
+        from research_tools import ResearchTools
+        from research_agent import render_answer
+        tools = ResearchTools(lambda *_: [], lambda aid: {'name': f'Person {aid}',
+            'affiliations': current_affiliations(aid)}, lambda *_: [], library=self.library, self_id='1')
+        tools.read_context('1', ['4'], [])
+        result = tools.explore_coauthors('', '', 'Clinical Institute', '', 2021, 2026, limit=10)
+        self.assertEqual(result['filters']['author_id'], '1')
+        self.assertEqual([p['author_id'] for p in result['people']], ['2'])
+        self.assertTrue(all(2021 <= int(paper['year']) <= 2026 for paper in result['people'][0]['papers']))
+        rendered = render_answer(self._answer('Here are your coauthors.'), tools)
+        self.assertEqual(rendered['suggested_followups'], ['Filter by a publication year range', 'Filter by current institution'])
+        empty = tools.explore_coauthors('', '', 'Clinical Institute', '', 2000, 2020)
+        self.assertEqual(empty['people'], [])
+
+    def test_missing_audience_reason_is_concrete_and_primary_evidence_stays_first(self):
+        from research_agent import render_answer, ShortlistEntry
+        tools = self._tools()
+        with patch('paper_vectors.load_paper_index', return_value=None):
+            tools.find_paper_audience('', '', 'clinical phenotyping')
+        person = tools.result_people[0]
+        primary = person['matched_paper_evidence_id']
+        # Give the person another owned paper; model citations can be reversed.
+        secondary = tools._remember_paper(person['author_id'], {'Title': 'Other clinical methods', 'PubYear': 2024})
+        entry = ShortlistEntry(author_id=person['author_id'], why='See supporting publication.',
+                               evidence_ids=[secondary['evidence_id'], primary])
+        rendered = render_answer(self._answer('Potential audience.', shortlist=[entry]), tools)
+        card = rendered['shortlist'][0]
+        self.assertEqual(card['papers'][0]['evidence_id'], primary)
+        self.assertEqual(card['papers'][0]['work_id'], person['papers'][0]['work_id'])
+        self.assertIn(card['papers'][0]['title'], card['why'])
+        self.assertNotIn('See supporting publication', card['why'])
+
+    def test_reason_repair_uses_only_owned_cited_papers_and_the_proposed_topic(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from research_agent import _repair_reasons, ShortlistEntry
+        from research_tools import library_paper
+        tools = self._tools()
+        with patch('paper_vectors.load_paper_index', return_value=None):
+            tools.find_paper_audience('', '', 'clinical phenotyping electronic records')
+        person = tools.result_people[0]
+        foreign = tools._remember_paper('3', library_paper(self.library.work('W1002')))
+        entry = ShortlistEntry(author_id=person['author_id'], why='',
+            evidence_ids=[person['papers'][0]['evidence_id'], foreign['evidence_id']])
+        create = AsyncMock(return_value=SimpleNamespace(output_text=json.dumps({'reasons': ['Their clinical phenotyping paper addresses the proposed use of electronic records.']})))
+        asyncio.run(_repair_reasons(SimpleNamespace(responses=SimpleNamespace(create=create)), 'test',
+                                     self._answer('Audience.', shortlist=[entry]), tools))
+        sent = json.loads(create.call_args.kwargs['input'])
+        self.assertIn('clinical phenotyping electronic records', sent['request'])
+        self.assertEqual([p['title'] for p in sent['researchers'][0]['papers']], [person['papers'][0]['title']])
+        self.assertIn('electronic records', entry.why)
+
     def test_explore_dates_apply_to_joint_papers_and_geography_has_a_source(self):
         self.assertEqual(explore(self.library,1,from_year=2021)['people'][0]['author_id'],'2')
         self.assertEqual(explore(self.library,1,to_year=2021)['people'][0]['author_id'],'4')
@@ -400,6 +496,13 @@ class DiscoveryTests(unittest.TestCase):
         abstract = tools.read_abstracts([papers[0]['evidence_id']])['abstracts'][papers[0]['evidence_id']]
         self.assertEqual(abstract['abstract'], 'clinical phenotyping electronic records')
         self.assertIsNone(tools.result_people)  # Reading prior cards must not replace them.
+
+    def test_context_retains_all_ten_displayed_people_in_order(self):
+        displayed = [str(aid) for aid in range(1, 11)]
+        context = self._tools().read_context('', displayed, displayed,
+            [{'author_id': aid, 'papers': []} for aid in displayed])
+        self.assertEqual([p['author_id'] for p in context['displayed_people_in_order']], displayed)
+        self.assertEqual(len(context['selected_people']), 8)
 
     def test_context_does_not_trust_supplied_paper_authorship(self):
         result = self._tools().read_context('', [], ['3'], [{'author_id': '3', 'papers': [{

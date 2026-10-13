@@ -200,6 +200,7 @@ export async function chatMessage({
   contextMode = null,
   contextChoices = null,
   workingContext = {},
+  exploreFilters = null,
   chatSessionId = null,
   authToken,
   onStatus,
@@ -230,6 +231,7 @@ export async function chatMessage({
       context_mode: contextMode || null,
       context_choices: contextChoices && typeof contextChoices === "object" ? contextChoices : null,
       working_context: workingContext && typeof workingContext === "object" ? workingContext : {},
+      explore_filters: exploreFilters,
       pending_research_plan: pendingResearchPlan && typeof pendingResearchPlan === "object"
         ? pendingResearchPlan
         : null,
