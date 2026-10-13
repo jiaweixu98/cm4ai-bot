@@ -51,14 +51,18 @@ export const GENERAL_STARTERS = [
 ];
 
 export const SHOWCASE_STARTERS = [
-  { intent: "collaborator", icon: "sparkle", label: "Explore", prompt: "Explore a researcher’s recorded coauthors." },
+  { intent: "collaborator", icon: "sparkle", label: "Explore", prompt: "Show my top 10 recorded coauthors, with supporting shared publications. Help me narrow them by publication date or current affiliation." },
   { intent: "collaborator", icon: "team", label: "Collaborate", prompt: "Find Bridge2AI researchers for a proposed study combining clinical phenotyping and responsible AI, supported by relevant publications." },
-  { intent: "collaborator", icon: "sparkle", label: "Promote", prompt: "Find potential audience members for my paper on pathway and gene-set enrichment for molecular phenotype discovery. Use related publications to support each recommendation." },
+  { intent: "collaborator", icon: "sparkle", label: "Promote", prompt: "I’m proposing a paper combining pathway and gene-set enrichment with gene-expression networks to interpret disease-associated molecular phenotypes. Find up to four researchers whose publications make them a relevant audience. Explain each recommendation using related papers, and include different supporting publications across the recommendations where possible." },
 ];
 
-export function showcaseStarters(profileName) {
-  return SHOWCASE_STARTERS.map(starter => starter.label === 'Explore' && profileName
-    ? {...starter, prompt: `Show my top 10 recorded coauthors for ${profileName}.`} : starter);
+export function showcaseStarters(profileName, linked = Boolean(profileName)) {
+  return SHOWCASE_STARTERS.map(starter => {
+    if (starter.label !== 'Explore') return starter;
+    if (!linked) return {...starter, prompt: "Help me choose a researcher and explore their recorded coauthors, with shared publications. I’d like to filter by publication date or current affiliation."};
+    if (!profileName) return starter;
+    return {...starter, prompt: `Show my top 10 recorded coauthors for ${profileName}, with supporting shared publications. Help me narrow them by publication date or current affiliation.`};
+  });
 }
 
 export function parseAidParam(value) {

@@ -24,6 +24,7 @@ import {
 } from "./lib/personaConfig";
 import {
   RESULT_LIMIT,
+  AGENT_RESULT_LIMIT,
   followUpPrompts,
   normalizeMessage,
 } from "./lib/matrixUi";
@@ -823,7 +824,7 @@ export default function Home() {
   }, [matrixUserToken, persistSessionNow]);
 
   const shortlistForChat = useCallback((activeIntent = intent) => {
-    return candidates.slice(0, RESULT_LIMIT).map((candidate) => {
+    return candidates.slice(0, AGENT_RESULT_LIMIT).map((candidate) => {
       const ranked = rerankedMap[candidate.author_id] || {};
       return {
         author_id: candidate.author_id,
@@ -1038,6 +1039,7 @@ export default function Home() {
           selected_publications: (contextChoices.selectedPapers || []).slice(0,8).map(p => ({ author_id: String(p.author_id), work_id: p.work_id })),
         },
         workingContext,
+        exploreFilters,
         chatSessionId: currentSessionIdRef.current,
         authToken: matrixUserToken,
         pendingResearchPlan: researchPlan?.status === "needs_clarification" ? researchPlan : null,
@@ -1077,7 +1079,7 @@ export default function Home() {
               : [],
           });
         }
-        const shortlist = Array.isArray(result.shortlist) ? result.shortlist.slice(0, RESULT_LIMIT) : [];
+        const shortlist = Array.isArray(result.shortlist) ? result.shortlist.slice(0, AGENT_RESULT_LIMIT) : [];
         const resultUpdate = ["keep", "replace", "clear"].includes(result.result_update)
           ? result.result_update
           : shortlist.length > 0 ? "replace" : "keep";
@@ -1465,7 +1467,8 @@ export default function Home() {
       <div className={`workspace ${workspaceClass}`}>
         <ChatPane
           starters={GENERAL_STARTERS}
-          profileName={matrixUserToken && linked ? authorInfo?.name || "" : ""}
+          profileName={linked ? authorInfo?.name || "" : ""}
+          linkedResearcher={linked}
           messages={messages}
           phase={phase}
           statusLabel={agentStatus}

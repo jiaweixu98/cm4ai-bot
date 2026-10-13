@@ -1,4 +1,6 @@
 export const RESULT_LIMIT = 8;
+// Structured agent answers allow ten cards, including "my top 10 coauthors".
+export const AGENT_RESULT_LIMIT = 10;
 export const MAX_COMPARE = 3;
 export const CHAT_WINDOW = 80;
 

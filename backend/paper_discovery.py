@@ -11,7 +11,7 @@ from tkg_publications import normalise_institution
 
 _MARK_CHUNK = 400
 _FETCH_ROWS = 2000
-_SECOND_PAPER_WINDOW = 200
+_AUDIENCE_POOL = 40
 _INITIALISM_STOP = {'of', 'the', 'and', 'at', 'for', 'in'}
 
 
@@ -72,32 +72,50 @@ def audience(library, vectors, identifier='', title='', abstract='', exclude_ids
                 ranks[work] = ranks.get(work, 0) + 1 / (60 + rank)
         method = 'publication_rrf_bm25_specter2'
     limit = max(1, min(limit, 20))
-    people, extra = {}, 0
+    people, groups, eligible = {}, {}, {}
     source_title = title_key(title)
-    # Order is by descending fused score and a person keeps their best paper's score, so
-    # once `limit` people are collected nobody later can outrank them. Keep reading a
-    # short while only to give those people a second supporting paper.
+    # Collect distinct publications before limiting people. Otherwise a large author
+    # list on the nearest paper can occupy every slot. Duplicate exports of a title
+    # share a group, but each author retains the work that actually records them.
     for work, score in sorted(ranks.items(), key=lambda x: (-x[1], x[0])):
-        if len(people) >= limit:
-            if all(len(p['matched_papers']) >= 2 for p in people.values()) or extra >= _SECOND_PAPER_WINDOW:
-                break
-            extra += 1
         paper = library.work(work)
-        if not paper or title_key(paper['title']) == source_title:
+        if not paper or not paper['title'] or title_key(paper['title']) == source_title:
             continue
+        key = title_key(paper['title'])
+        group = groups.setdefault(key, {'score': score, 'papers_by_author': {}})
         for aid, _ in library.authors(work):
             aid = int(aid)
-            if aid in excluded:
-                continue
-            candidate = people.get(aid)
-            if candidate is None:
-                if len(people) >= limit:
+            if aid not in excluded:
+                group['papers_by_author'].setdefault(aid, paper)
+
+    # First pass: one new person per publication, in fused publication rank order.
+    # Second pass: remaining coauthors when distinct publications are exhausted.
+    # Candidate collection stays bounded; the agent still rejects irrelevant work.
+    for distinct in (True, False):
+        for group in groups.values():
+            for aid, paper in sorted(group['papers_by_author'].items()):
+                if aid in people:
                     continue
-                candidate = people[aid] = {'author_id': str(aid), 'score': score, 'matched_papers': []}
-            if len(candidate['matched_papers']) < 2 and not any(
+                if aid not in eligible:
+                    eligible[aid] = library.eligible_work_ids(aid)
+                if paper['work_id'] not in eligible[aid]:
+                    continue
+                people[aid] = {'author_id': str(aid), 'score': group['score'], 'matched_papers': [paper]}
+                if distinct or len(people) >= _AUDIENCE_POOL:
+                    break
+            if len(people) >= _AUDIENCE_POOL:
+                break
+        if len(people) >= _AUDIENCE_POOL:
+            break
+    # Keep the distinct primary paper first; enrich cards with a second real paper.
+    for group in groups.values():
+        for aid in people.keys() & group['papers_by_author'].keys():
+            candidate = people[aid]
+            paper = group['papers_by_author'][aid]
+            if paper['work_id'] in eligible[aid] and len(candidate['matched_papers']) < 2 and not any(
                     title_key(p['title']) == title_key(paper['title']) for p in candidate['matched_papers']):
                 candidate['matched_papers'].append(paper)
-    ordered = sorted(people.values(), key=lambda p: (-p['score'], int(p['author_id'])))[:limit]
+    ordered = list(people.values())[:limit]
     return {'status': 'ok' if ordered else 'empty', 'people': ordered, 'method': method,
             'source_paper': source or {'title': title, 'abstract': abstract, 'source': 'user_supplied'},
             'excluded_source_authors': sorted(excluded), 'snapshot_version': library.snapshot_version}
@@ -176,11 +194,16 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
         conditions.append('p.rowid IN (SELECT rowid FROM papers_fts WHERE papers_fts MATCH ?)'); args.append(expression)
     clauses = ' AND '.join(conditions) or '1'
     columns = 'p.*' if terms else 'p.work_id,p.title,p.year,p.venue,p.doi,p.pmid,p.cited_by,p.primary_topic,NULL AS abstract'
-    people = {}
+    people, coauthor_eligible = {}, {}
     rows = library._db().execute(f"""SELECT DISTINCT b.author_id,{columns} FROM visible_paper_authors b
         JOIN papers p USING(work_id) WHERE {clauses} ORDER BY p.year DESC,p.work_id,b.author_id""", args)
     for record in rows:
         paper = dict(record); aid = int(paper.pop('author_id'))
+        if coauthors_only:
+            if aid not in coauthor_eligible:
+                coauthor_eligible[aid] = library.eligible_work_ids(aid)
+            if paper['work_id'] not in coauthor_eligible[aid]:
+                continue
         if matched_works is not None and paper['work_id'] not in matched_works: continue
         text = paper['title'] + ' ' + (paper.get('abstract') or '')
         if terms:

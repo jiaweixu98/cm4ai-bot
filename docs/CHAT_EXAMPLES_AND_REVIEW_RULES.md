@@ -1,0 +1,227 @@
+# TalentKG Chat examples and review rules
+
+Updated: 2026-10-13. This is the inventory for the next full review of the chat examples.
+The release checks exercise the starters and shared behavior; they do not establish
+that every future model response or every aspect of every example has been reviewed.
+
+## Rules shared by every example
+
+- The request determines the task. A Mentor/Collaborator UI intent is a hint, not a
+  reason to route a paper-audience question to collaborator search.
+- The linked viewer is the source of “my” and “me.” A graph selection, saved person,
+  or person added to chat is separate context and never replaces that identity.
+- Honor the stated question first. Use the viewer's supported profile information as
+  background, and explicitly selected people/publications and attachments as context.
+  Do not invent a paper, expertise, preference, personal contribution, or identity.
+- Explicit publication selections are revalidated for ownership and eligibility.
+  ORCID-backed and approved evidence is eligible; catalog fallback applies without
+  actual ORCID affiliation records. Rejections and correction decisions remain effective.
+  A stale or empty selected scope must not silently become all publications.
+- When an attachment or selected paper is explicitly the promotion target, use it.
+  Otherwise it refines the stated topic and must not silently replace an example idea.
+- Researcher cards show supported name, affiliation, publication titles, and a specific
+  reason. Attribute methods/results to coauthored papers. Do not infer an author's role
+  in the study, willingness, availability, supervision, adoption, or clinical impact.
+- Explain only the requirements the evidence supports. Titles support topics; methods,
+  settings and findings require the available abstract or other returned source text.
+- Candidate order belongs to the retrieval code. The model can omit unsupported
+  candidates, but cannot invent people or evidence or silently reorder valid results.
+  Structured agent answers/displayed follow-up context support ten people; ordinary
+  non-agent search keeps its existing eight-result limit. Explicit selected people
+  and selected publications keep their separate eight-item limits.
+- A valid citation proves that a reference exists and belongs to the referenced person;
+  it does not automatically prove that every generated sentence follows from it.
+- Preserve displayed people for a paper/person explanation or comparison. Replace them
+  for a new search, including an empty result. Clear misleading old results after a
+  task change. Do not add extra caveat paragraphs to the product UI.
+- Examples populate the editable composer. Users can change the wording and add
+  people/papers before sending. Text attachments are read locally; PDF/Word use extraction.
+
+## Primary starters
+
+### 1. Find a mentor
+
+**Exact prompt:** “I'm a wet-lab biologist moving into AI-ready data standards. Who could I learn from?”
+
+**Show:** A clear route from the learner's wet-lab background to relevant published
+methods, standards, and data practices, with people and papers to learn from.
+
+**Rules:** Use `search_people` for the original need and distinct learning requirements.
+Use profile/selected context when present, without replacing the stated learning goal.
+Return mentor cards in service order. Reasons explain what a cited paper could help
+the user learn. Do not assert that a person teaches, supervises or accepts mentees.
+
+**Review:** Does each paper support the learning need? Are standards and AI readiness
+distinguished from general biology? Are suggested reading/learning steps practical?
+
+### 2. Build a team
+
+**Exact prompt:** “Build a team to deploy a sepsis early-warning model across hospitals: clinical, ML and implementation expertise”
+
+**Show:** Complementary capabilities for a proposed study, with the relevant evidence
+visible for each role, rather than several people with the same general topic.
+
+**Rules:** Use `assemble_team`; decompose the request into clinical sepsis research,
+ML prediction, and hospital implementation roles. Account for explicitly supplied
+team members and covered capabilities. Keep service role order. A paper on clinical
+NLP alone must not be described as proving prospective, cross-hospital deployment,
+federated learning, or implementation expertise. State a missing role when relevant.
+
+**Review:** Are role assignments grounded? Does the team add distinct capabilities?
+Are deployment goals treated as the user's proposal rather than demonstrated outcomes?
+
+### 3. Find a niche
+
+**Exact prompt:** “I work on federated learning with EHR data. Where is a less crowded niche I could move into?”
+
+**Show:** Two or three research directions that extend the stated strengths, with
+literature evidence and suitable papers/people when available.
+
+**Rules:** Use `analyze_niche` for two or three intersections of short concepts.
+“Less crowded” and “growing” require returned counts/trends. A partial result without
+counts supports proposed directions and publication overlap, not claims about crowding,
+growth or novelty. Never say a field is unexplored. Distinguish people whose papers
+cover the full intersection from people whose work covers one component.
+
+**Review:** Are intersections coherent and useful? Are comparisons backed by real
+counts when shown? Does the partial-data response still offer useful next steps?
+
+### 4. Explore
+
+**Linked prompt:** “Show my top 10 recorded coauthors, with supporting shared publications.
+Help me narrow them by publication date or current affiliation.”
+
+When the profile name is available, the first sentence includes “for {viewer name}.”
+When the name is unavailable, retain “my” using the linked viewer ID.
+
+**Unlinked prompt:** “Help me choose a researcher and explore their recorded coauthors,
+with shared publications. I’d like to filter by publication date or current affiliation.”
+
+**Show:** The viewer's recorded coauthors immediately, with shared publications, then
+offer chat filters. An unlinked account first needs a researcher selection.
+
+**Rules:** Use `explore_coauthors` with empty `author_id` for “my.” Explicitly named
+other researchers use their resolved canonical IDs. Respect the requested count and
+deterministic shared-publication order. Inclusive year bounds and specialty constrain
+shared papers; institution constrains the coauthor's current trusted affiliation.
+Publication eligibility applies to the focal researcher and the displayed coauthor.
+Retain active author, specialty, institution and dates on follow-ups unless changed.
+Current institution is independent of the institution printed on a historical paper.
+Geography is not a chat coauthor filter in this release; do not imply it was applied.
+
+**Review:** Two viewers; another selected graph person; name loading/failure; unlinked
+account; selected papers; positive, combined and empty filters; removal of a filter;
+whether workshop/proceedings coauthorship is described accurately without implying
+an individual research contribution or a close personal working relationship.
+
+### 5. Collaborate
+
+**Exact prompt:** “Find Bridge2AI researchers for a proposed study combining clinical
+phenotyping and responsible AI, supported by relevant publications.”
+
+**Show:** Bridge2AI researchers whose published work supports parts of the proposed
+study, and a concise scientific reason for considering each person.
+
+**Rules:** Use `search_people` with Bridge2AI scope and distinct requirements for
+clinical phenotyping and responsible AI. Scope membership comes from the catalog,
+not model inference. Use the current viewer and explicit team/context appropriately.
+Do not imply that phenotyping research establishes fairness, ethics or governance.
+Recommendations are based on publications, with no invented availability or endorsement.
+
+**Review:** Does each recommendation identify its supported part of the proposal?
+Are responsible-AI claims actually backed by the cited papers? Are missing facets clear?
+
+### 6. Promote
+
+**Exact prompt:** “I’m proposing a paper combining pathway and gene-set enrichment
+with gene-expression networks to interpret disease-associated molecular phenotypes.
+Find up to four researchers whose publications make them a relevant audience.
+Explain each recommendation using related papers, and include different supporting
+publications across the recommendations where possible.”
+
+**Show:** A useful audience for a text-only proposed paper, with several relevant
+people and distinct supporting publications. No existing paper is required.
+
+**Rules:** Use `find_paper_audience`; supplied topic text is sufficient as the abstract,
+with no invented source title, DOI, authors or results. Accept an explicit title/DOI/work
+ID or an attached/selected promotion target when supplied. Exclude the viewer and known
+source-paper authors. Retrieve publications with existing BM25/SPECTER2 rank fusion.
+Collect a bounded pool of 40 eligible people, preferring one person per normalized
+primary publication before filling from repeated groups. Preserve retrieval order,
+deduplicate titles, and retain the representative paper first when validated and cited.
+Do not substitute unrelated work to meet a requested count or diversity target.
+Keep precise work IDs for follow-ups. Return fewer people or an empty result when needed.
+Do not send outreach messages or imply that audience members will read the paper.
+
+**Review:** Scientific relevance, distinct papers and people, accurate reasons,
+source-author exclusions, text/PDF/selected-paper targets, irrelevant-topic abstention,
+and whether the displayed supporting paper remains stable during profile validation.
+
+## Other fixed examples and follow-ups
+
+Each row is a separate prompt exposed by the current UI. The same context and
+evidence rules above apply. Confirmation prompts apply when that workflow is active;
+the agent normally searches immediately for a clear discovery request.
+
+| Prompt | What it should show | Specific rule/context to check |
+| --- | --- | --- |
+| Mentor for privacy-preserving federated analysis | Publication-backed learning options | Privacy and federated methods must be supported independently. |
+| Mentor in responsible AI and clinical data governance | Relevant methods and governance papers | Clinical data alone does not prove governance or responsible-AI expertise. |
+| Mentor for multimodal clinical AI and imaging | Learning options across the stated modalities | Do not infer multimodal methods from single-modality imaging. |
+| Single-cell and spatial omics integration | Relevant collaboration capabilities | Identify which cited work supports single-cell, spatial or integration methods. |
+| Prospective clinical validation across health systems | Evidence for the requested validation setting | Retrospective studies must not be called prospective or cross-site validation. |
+| Clinical NLP and EHR phenotyping | Relevant published methods | Explain the NLP/phenotyping connection without implying unrelated capabilities. |
+| Search that | Execute the current confirmed request | Preserve its requirements, selected people and publication scope. |
+| Make it more specific | Refine the current request | Clarify or narrow a meaningful requirement; do not change the task silently. |
+| Which titles are about governance? | Inspect current displayed evidence | Read existing context; retain cards and cite the specific matching titles. |
+| Who is at a different institution? | Refine current results using supported affiliations | Use the viewer's institution when available; otherwise clarify the reference institution. |
+| Summarize the strongest publication match | Explain the leading displayed supporting paper | Preserve cards; use the exact work ID and available abstract. |
+| Which titles support the top person? | Inspect the first person's displayed evidence | Resolve “top” from display order, not a new search or prestige ranking. |
+| Who looks most complementary? | Compare relevant capabilities | Use the stated goal and explicit team context; no invented strengths. |
+| Compare the first two using their papers | Grounded side-by-side comparison | Preserve displayed order and cite each person's own papers. |
+| Filter by a publication year range | Ask for a range, then narrow shared papers | Retain focal researcher, specialty, institution and selected-paper scope. |
+| Filter by current institution | Ask for an institution, then filter coauthors | Retain years; use current trusted affiliation, not historical paper affiliation. |
+| How does {selected person} fit my research idea? | Assess explicitly selected context | Keep the selected person separate from the linked viewer. |
+| Compare the selected people using their publications | Compare selected context | Use the selected set, not arbitrary top search results. |
+| What evidence supports this person as a fit? | Explain the selected person's relevant papers | Ask for the topic when missing; do not replace identity or invent expertise. |
+| Find more mentors for my learning goal | Continue mentor discovery | Preserve the learning goal and explicit context; update results for the new search. |
+| Find another collaborator for this research idea | Continue collaboration discovery | Preserve the need/team context and avoid recommending someone already covered. |
+| What evidence supports this person’s fit for my topic? | Graph-profile handoff assessment | Use the handed-off person as context, not the viewer identity. |
+| What complementary expertise would a team around them need? | Capability gaps around the handed-off person | Assess supplied papers and distinguish proposed additions from demonstrated skills. |
+| Why is {top name} a strong option for this need? | Explain the first displayed recommendation | Use its cited work and current need; no prestige or unsupported personal claims. |
+
+Model-generated follow-ups are not a fixed inventory. They must be short, answerable
+with available tools, preserve the active task/context, and avoid invented facts.
+
+## Review and release checklist
+
+For each primary example and follow-up, record the exact input, viewer/context,
+retrieval tool and filters, displayed people/papers, and the complete reply/reasons.
+Review these aspects separately:
+
+1. User intent and useful next step.
+2. Identity and explicit context, including guest and selected-paper cases.
+3. Tool routing, scope, filters, deterministic ordering and count.
+4. Publication ownership/eligibility, distinct evidence and stable work IDs.
+5. Scientific support for every method, setting, result and numerical claim.
+6. Relevance to each requested facet, including partial matches and missing evidence.
+7. Attribution, readable wording, and absence of generic reasons or internal mechanics.
+8. Follow-ups, empty results, changed tasks, attachments and responsive rendering.
+
+The current release gate covers all six starters, the focused Explore/Promote journeys,
+backend regression tests, frontend build, and public mounted-route smoke. A later pass
+should review every row above across multiple model runs and record sentence-level
+scientific findings. Real OAuth and authenticated save/review mutations are separate
+acceptance journeys and must not be claimed from URL-identity or API fixtures.
+
+## Source of truth
+
+- `frontend/app/lib/personaConfig.js`: primary starters, persona examples and fallbacks.
+- `frontend/app/page.js`: selected-context/handoff prompts and active-filter state.
+- `frontend/app/lib/matrixUi.js`: top-result follow-up template.
+- `backend/research_agent.py` and `backend/research_skills.py`: task/wording/tool rules.
+- `backend/paper_discovery.py`, `research_tools.py`, `paper_library.py`: retrieval,
+  identity, evidence and publication eligibility.
+
+Update this inventory when prompt text or behavior changes. Product rules belong in
+the code as well as this document; the Markdown is the review guide, not enforcement.

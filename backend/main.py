@@ -1984,6 +1984,16 @@ class ContextChoices(BaseModel):
     publication_filters: list[PublicationFilter] = Field(default_factory=list,max_length=25)
 
 
+class CoauthorFilters(BaseModel):
+    """Previously applied chat filters, independently of publication selection."""
+
+    author_id: str = Field(max_length=20, pattern=r'^\d+$')
+    specialty: str = Field(default='', max_length=200)
+    institution: str = Field(default='', max_length=200)
+    from_year: int | None = Field(default=None, ge=1800, le=2100)
+    to_year: int | None = Field(default=None, ge=1800, le=2100)
+
+
 class ChatRequest(BaseModel):
     aid: str = "unlinked"
     user_input: str
@@ -2000,6 +2010,7 @@ class ChatRequest(BaseModel):
     pending_research_plan: ResearchPlan | None = None
     working_context: AgentWorkingContext = Field(default_factory=AgentWorkingContext)
     context_choices: ContextChoices | None = None
+    explore_filters: CoauthorFilters | None = None
     chat_session_id: str | None = None
 
 

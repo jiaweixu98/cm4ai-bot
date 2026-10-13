@@ -3,7 +3,7 @@ import {fallbackNote, validateNotes} from '../app/lib/matchNotes.mjs';
 
 const candidate = {author_id: '42', papers: [{Title: 'Published clinical data methods'}, {Title: 'A second publication'}]};
 const explanation = 'This study describes clinical data methods relevant to the requested research question.';
-assert.equal(fallbackNote(candidate, {teamNames: ['Avery']}).explanation, 'See supporting publication.', 'Fallback must not claim a team complement without an explanation');
+assert.equal(fallbackNote(candidate, {teamNames: ['Avery']}).explanation, 'Coauthored “Published clinical data methods”.', 'Fallback must cite real work without claiming a team complement');
 for (const index of [undefined, null, '', ' ', -1, 3, 0.5, true]) {
   const [note] = validateNotes([candidate], {results: [{author_id: '42', explanation, evidence_paper_index: index}]});
   assert.equal(note.source, 'fallback', `Invalid index ${String(index)} must withhold the generated claim`);
