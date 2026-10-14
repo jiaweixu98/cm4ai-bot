@@ -21,7 +21,6 @@ function groupSessions(sessions) {
 
 export default function HistorySidebar({
   sessions,
-  currentIntent,
   currentSessionId,
   sessionStatus,
   signedIn,
@@ -93,11 +92,7 @@ export default function HistorySidebar({
                     type="button"
                   >
                     <span className="session-chip-title">{session.title || "Untitled chat"}</span>
-                    <span className="session-chip-time">
-                      {session.intent && session.intent !== currentIntent
-                        ? `${session.intent === "mentor" ? "Mentor" : "Team"}, ${relativeTime(session.last_message_at)}`
-                        : relativeTime(session.last_message_at)}
-                    </span>
+                    <span className="session-chip-time">{relativeTime(session.last_message_at)}</span>
                   </button>
                 ))}
               </section>

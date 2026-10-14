@@ -1424,7 +1424,6 @@ export default function Home() {
       {showRail && (
         <HistorySidebar
           sessions={sessions}
-          currentIntent={intent}
           currentSessionId={currentSessionId}
           sessionStatus={sessionStatus}
           signedIn={Boolean(matrixUserToken)}
