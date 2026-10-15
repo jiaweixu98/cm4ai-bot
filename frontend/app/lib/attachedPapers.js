@@ -68,6 +68,7 @@ export async function readAttachedFiles(fileList, existingCount = 0) {
   const attached = [];
   let skippedType = 0;
   let skippedSize = 0;
+  let failedRead = 0;
   for (const file of files) {
     if (existingCount + attached.length >= MAX_ATTACHED_FILES) break;
     const extension = extensionOf(file.name);
@@ -83,7 +84,7 @@ export async function readAttachedFiles(fileList, existingCount = 0) {
     try {
       const text = isDocument ? await documentText(file) : await file.text();
       if (!text.trim()) {
-        skippedType += 1;
+        failedRead += 1;
         continue;
       }
       const title = titleFromText(text, file.name);
@@ -96,8 +97,8 @@ export async function readAttachedFiles(fileList, existingCount = 0) {
         context: contextFromText(text),
       });
     } catch {
-      skippedType += 1;
+      failedRead += 1;
     }
   }
-  return { attached, skippedType, skippedSize };
+  return { attached, skippedType, skippedSize, failedRead };
 }

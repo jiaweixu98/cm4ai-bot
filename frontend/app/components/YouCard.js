@@ -3,7 +3,7 @@ import { fetchAuthorDetails } from "../lib/api";
 import { matrixApiPath } from "../lib/apiPath.mjs";
 
 const affiliation = value => ["unknown", "affiliation unavailable"].includes(String(value || "").toLowerCase()) ? "" : value;
-const key = paper => `${paper.author_id}:${paper.work_id}`;
+import { publicationKey as key, selectPublications, removePublication, useEligiblePublications } from "../lib/contextChoices.mjs";
 
 export default function YouCard({ linked, aid, authorInfo, seekerName, choices, onChoices, onOpenProfile, people = [], workingContext = {}, attachments = [], onClose }) {
   const [details, setDetails] = useState(null);
@@ -45,7 +45,8 @@ export default function YouCard({ linked, aid, authorInfo, seekerName, choices, 
   useEffect(() => {
     if (!linked) return;
     const controller = new AbortController();
-    fetchAuthorDetails(aid, controller.signal).then(setDetails).catch(() => setError("Profile could not be loaded."));
+    setDetails(null);
+    fetchAuthorDetails(aid, controller.signal).then(value => { if (!controller.signal.aborted) setDetails(value); }).catch(() => { if (!controller.signal.aborted) setError("Profile could not be loaded."); });
     return () => controller.abort();
   }, [aid, linked]);
 
@@ -70,7 +71,8 @@ export default function YouCard({ linked, aid, authorInfo, seekerName, choices, 
         const params = new URLSearchParams({ q: query, offset: String(offset), limit: "20", affiliation: affiliationFilter });
         const response = await fetch(matrixApiPath(`/api/author/${encodeURIComponent(author)}/publications?${params}`), { signal: controller.signal, cache: "no-store" });
         if (!response.ok) throw new Error("Publications could not be loaded.");
-        setPage(await response.json());
+        const nextPage = await response.json();
+        if (!controller.signal.aborted) setPage(nextPage);
       } catch (e) { if (e.name !== "AbortError") setError(e.message); }
     }, 180);
     return () => { clearTimeout(timer); controller.abort(); };
@@ -79,7 +81,7 @@ export default function YouCard({ linked, aid, authorInfo, seekerName, choices, 
   const toggle = paper => {
     const ref = { author_id: pickerAuthor, work_id: paper.work_id, title: paper.title, year: paper.year };
     const next = selectedKeys.has(key(ref)) ? selected.filter(p => key(p) !== key(ref)) : [...selected, ref].slice(0, 8);
-    onChoices({ ...choices, version: 3, paperScope: "chosen", publicationScope: next.length ? 'selected' : 'eligible', paperTitles: [], selectedPapers: next });
+    onChoices(selectPublications(choices, next));
   };
   return <>
     <button className="context-scrim" type="button" aria-label="Close context panel" onClick={onClose} />
@@ -87,19 +89,21 @@ export default function YouCard({ linked, aid, authorInfo, seekerName, choices, 
       <div className="context-panel-head"><h2>Conversation context</h2><button type="button" className="ghost-btn" onClick={onClose} aria-label="Close context">×</button></div>
       <div className="you-edit-body">
         {(details?.name || authorInfo?.name || seekerName) && <section><h3 className="context-section-label">Profile</h3>
-          <button className="you-name" type="button" onClick={() => onOpenProfile(aid)}>{details?.name || authorInfo?.name || seekerName}</button>
+          {linked ? <button className="you-name" type="button" onClick={() => onOpenProfile(aid)}>{details?.name || authorInfo?.name || seekerName}</button>
+            : <><p className="you-name">{seekerName}</p><p className="you-note">No linked research profile. Add people to this chat to choose their publications, or describe your interests in your message.</p></>}
           {affiliation(details?.affiliation) && <p className="you-affiliation">{details.affiliation}</p>}
         </section>}
         {!!details?.topics?.length && <section><h3 className="context-section-label">Topics</h3><p className="you-note">{details.topics.join(" · ")}</p></section>}
         {!!livePeople.length && <section><h3 className="context-section-label">Selected people</h3><ul className="context-people">{livePeople.map(p => <li key={p.authorId}><button className="you-name" onClick={() => onOpenProfile(p.authorId)}>{p.name}</button>{affiliation(p.affiliation) && <p className="you-affiliation">{p.affiliation}</p>}</li>)}</ul></section>}
         <section><h3 className="context-section-label">Selected publications</h3>
-          {selected.length ? <ul className="you-papers">{selected.map(p => <li className="you-paper-block" key={key(p)}><span className="you-paper-line">{p.title}{p.year && <small>{p.year}</small>}</span><button type="button" className="you-more" aria-label={`Remove ${p.title}`} onClick={() => {const next=selected.filter(other => key(other) !== key(p));onChoices({ ...choices, selectedPapers:next,publicationScope:next.length?'selected':'eligible' });}}>Remove</button></li>)}</ul> : <p className="you-note">No publications selected.</p>}
-          {choices.publicationScope === 'selected' && <button className="you-more" onClick={() => onChoices({...choices,publicationScope:'eligible',selectedPapers:[]})}>Use all eligible publications</button>}
+          {selected.length ? <ul className="you-papers">{selected.map(p => <li className="you-paper-block" key={key(p)}><span className="you-paper-line">{p.title}{p.year && <small>{p.year}</small>}</span><button type="button" className="you-more" aria-label={`Remove ${p.title}`} onClick={() => onChoices(removePublication(choices, p))}>Remove</button></li>)}</ul> : <p className="you-note">{choices.publicationScope === "selected" ? "No publications selected. None will be supplied as selected context." : authors.length ? "Using eligible publications for the current researchers, subject to affiliation filters. Select specific papers below to narrow this context." : "No research publications in your current context. Add a person to choose publications."}</p>}
+          {choices.publicationScope === 'selected' && <button className="you-more" onClick={() => onChoices(useEligiblePublications(choices))}>Use all eligible publications</button>}
         </section>
         {!!authors.length && <section><h3 className="context-section-label">Choose publications</h3>
           <label className="context-picker-label">Researcher<select aria-label="Publication researcher" value={author} onChange={e => { setAuthor(e.target.value); setOffset(0); }}>{authors.map(p => <option key={p.authorId} value={String(p.authorId)}>{p.name}</option>)}</select></label>
           <label className="context-picker-label">Affiliation<select aria-label="Publication affiliation filter" value={affiliationFilter} onChange={e => {setOffset(0);onChoices({...choices,publicationFilters:[...publicationFilters.filter(f => String(f.author_id)!==author),{author_id:author,affiliation:e.target.value}]});}}><option value="all">All publications</option>{(page?.filter_options || []).map(f => <option key={f.group_id} value={f.group_id}>{f.institution}</option>)}</select></label>
           <label className="context-picker-label">Search publications<input type="search" value={query} onChange={e => { setQuery(e.target.value); setOffset(0); }} /></label>
+          {page && page.total === 0 && <p className="you-note">No publications match this researcher and the current filters.</p>}
           <ul className="you-papers">{page?.papers?.map(p => <li key={p.work_id}><label className="you-paper-choice"><input type="checkbox" checked={selectedKeys.has(`${pickerAuthor}:${p.work_id}`)} disabled={selected.length >= 8 && !selectedKeys.has(`${pickerAuthor}:${p.work_id}`)} onChange={() => toggle(p)} /><span>{p.title}{p.year && <small>{p.year}</small>}</span></label></li>)}</ul>
           {page && <div className="context-pagination"><button className="you-more" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 20))}>Previous</button><span>{selected.length}/8 selected</span><button className="you-more" disabled={offset + 20 >= page.total} onClick={() => setOffset(offset + 20)}>Next</button></div>}
         </section>}
