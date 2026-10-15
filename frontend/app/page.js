@@ -14,11 +14,11 @@ import {
   submitErrorReport,
 } from "./lib/api";
 import { loadResearchContext, EMPTY_RESEARCH_CONTEXT } from "./lib/researchContext.mjs";
+import { contextStarters } from "./lib/contextStarters.mjs";
 import { contextChoicesForRequest } from "./lib/contextChoices.mjs";
 import { accountSavedPeople } from "./lib/savedPeople.mjs";
 import { BRIDGE_MSG, inBridgeIframe, isBridgeOrigin, postToBridge } from "./lib/bridgeHost";
 import {
-  GENERAL_STARTERS,
   PERSONA_COPY,
   UNLINKED_AID,
   inferPersonaIntent,
@@ -1246,12 +1246,16 @@ export default function Home() {
     setInputValue(String(starter?.prompt || ""));
   }, []);
 
+  const starters = contextStarters({ choices: contextChoices, people: contextPeople, personIds: contextPersonIds, linked, profileName: authorInfo?.name || '' });
+  const suggestionContextKey = JSON.stringify({ aid, choices: contextChoices, people: contextPersonIds });
+  useEffect(() => { setFollowUps([]); }, [suggestionContextKey]);
+
   const suggestedPrompts =
     followUps.length > 0 && phase !== PHASE.AWAITING_CONFIRM
       ? followUps
       : contextPersonIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
       ? [
-          `How does ${contextPeople[0]?.name || 'the selected person'} fit my research idea?`,
+          `How does ${contextPeople.find(person => contextPersonIds.includes(Number(person.authorId)))?.name || 'the selected person'} fit my research idea?`,
           contextPersonIds.length > 1 ? 'Compare the selected people using their publications' : 'What evidence supports this person as a fit?',
           intent === 'mentor' ? 'Find more mentors for my learning goal' : 'Find another collaborator for this research idea',
         ]
@@ -1259,7 +1263,7 @@ export default function Home() {
       ? copy.promptsConfirm
       : candidates.length > 0
         ? followUpPrompts(orderedCandidates, rerankedMap, PERSONA_COPY[searchIntent] || copy)
-      : copy.promptsIdle;
+      : starters.map(starter => starter.prompt).slice(0, 3);
 
   const graphHandoffPerson = contextPeople.find(
     (person) => Number(person.authorId) === graphHandoffPersonId
@@ -1507,7 +1511,7 @@ export default function Home() {
 
       <div className={`workspace ${workspaceClass}`}>
         <ChatPane
-          starters={GENERAL_STARTERS}
+          starters={starters}
           profileName={linked ? authorInfo?.name || "" : ""}
           linkedResearcher={linked}
           messages={messages}
