@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {contextStarters} from '../app/lib/contextStarters.mjs';
 const text = opts => JSON.stringify(contextStarters(opts));
-assert.equal(contextStarters().length,3);
+assert.equal(contextStarters().length,6);
 assert.doesNotMatch(text(), /wet-lab|sepsis|federated|my top 10/);
 const personalContext={interests:'rare topic XYZ',useInterests:true,contacts:[{name:'Included Person',included:true},{name:'Excluded Person',included:false}]};
 assert.match(text({choices:{personalContext}}), /rare topic XYZ/);
@@ -19,3 +19,7 @@ assert.match(text({choices:{publicationScope:'selected',selectedPapers:[{title:'
 assert.doesNotMatch(text({choices:{publicationScope:'eligible',selectedPapers:[{title:'Stale Paper'}]}}), /Stale Paper/);
 assert.equal(contextStarters().every(s=>s.basis && s.prompt && s.label),true);
 console.log('PASS empty Google account, opted-in interests/connections, selected person identity, linked profile, empty publication scope, stale papers, source labels');
+
+const labels=['Find a mentor','Build a team','Find a niche','Explore','Collaborate','Promote'];
+for (const options of [{},{choices:{personalContext}},{linked:true,profileName:'Author'},{choices:{publicationScope:'selected',selectedPapers:[]}}]) assert.deepEqual(contextStarters(options).map(s=>s.label),labels);
+console.log('PASS all six workflows retained for empty, personalized, linked and empty-publication accounts');

@@ -426,7 +426,7 @@ export default function ChatPane({
             )}
             <p className="starter-heading">Suggested for this chat</p>
             <div className="starter-grid">
-              {starters.slice(0, 3).map((starter) => (
+              {starters.map((starter) => (
                 <button
                   key={`${starter.intent}-${starter.label}`}
                   type="button"
@@ -450,7 +450,7 @@ export default function ChatPane({
                 </button>
               ))}
             </div>
-            {starters.length > 3 && <details className="showcase-examples"><summary>More suggestions</summary><div className="starter-grid">{starters.slice(3).map(starter => <button type="button" className="starter-card" key={starter.label} onClick={() => onUseStarter ? onUseStarter(starter) : setInputValue(starter.prompt)}><span className="starter-copy"><span className="starter-label">{starter.label}</span><small>{starter.basis}</small><span className="starter-prompt">{starter.prompt}</span></span></button>)}</div></details>}
+
           </div>
         )}
         {visibleMessages.map((msg) => (

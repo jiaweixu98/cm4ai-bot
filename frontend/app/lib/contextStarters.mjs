@@ -1,32 +1,29 @@
-// Derive suggestions locally from the same opt-in context used by chat requests.
-// Never infer a user's expertise or relationships from a display name.
+// Keep all six workflows available, personalizing only from enabled chat context.
 export function contextStarters({ choices = {}, people = [], personIds = [], linked = false, profileName = '' } = {}) {
-  const starters = [];
-  const add = (label, basis, prompt, intent = 'collaborator') => starters.push({ label, basis, prompt, intent, icon: intent === 'mentor' ? 'mentor' : 'team' });
   const quote = value => JSON.stringify(String(value || '').trim());
   const personal = choices.personalContext || {};
   const interests = personal.useInterests !== false ? String(personal.interests || '').trim() : '';
-  if (interests) {
-    add('Find collaborators', 'Your enabled research interests', `My research interests are ${quote(interests)}. Help me narrow a collaboration goal, then find researchers with supporting publications.`);
-    add('Find a mentor', 'Your enabled research interests', `I want to learn more about ${quote(interests)}. Find potential mentors using their publications; do not assume they are available to mentor me.`, 'mentor');
-  }
   const selectedPeople = people.filter(p => personIds.some(id => String(id) === String(p.authorId))).slice(0, 8);
-  if (selectedPeople.length) {
-    const names = selectedPeople.map(p => quote(p.name)).join(', ');
-    add(selectedPeople.length > 1 ? 'Compare selected people' : 'Explore selected researcher', 'People selected for this chat', `Explore ${names} using the publications allowed in this chat. ${interests ? `Explain their relevance to my interests in ${quote(interests)}.` : 'Help me identify a research question to explore with this context.'} Distinguish evidence from speculation.`);
-  }
-  if (choices.publicationScope === 'selected') {
-    const papers = (choices.selectedPapers || []).filter(p => p.title).slice(0, 8);
-    if (papers.length) add('Explore selected papers', 'Papers selected for this chat', `Use only my selected papers (${papers.map(p => quote(p.title)).join('; ')}) to identify research themes and potential follow-up questions. Do not assume I authored them.`);
-  } else if (linked && profileName) {
-    add('Explore my publications', 'Your linked graph profile', `Explore the eligible publications associated with my linked graph profile, ${quote(profileName)}, respecting this chat's publication filters. Suggest research questions grounded in those papers, and tell me if none are available.`);
-  }
+  const papers = choices.publicationScope === 'selected' ? (choices.selectedPapers || []).filter(p => p.title).slice(0, 8) : [];
   const contacts = (personal.contacts || []).filter(p => p.included && p.name).slice(0, 20);
-  if (contacts.length) add('Explore my connections', 'Your enabled personal connections', `Help me plan research conversations with these people from my personal context: ${contacts.map(p => quote(p.name)).join(', ')}.${interests ? ` Focus on ${quote(interests)}.` : ' Ask me what I want to discuss first.'} Treat these connections as self-reported; do not assume collaboration, availability, or a graph identity.`);
-  if (!starters.length) {
-    add('Define a research goal', 'Start with your goals', 'Help me define a research goal. Ask about my interests and the problem I want to solve before recommending researchers.');
-    add('Find a mentor', 'Start with what you want to learn', 'Help me find a potential mentor. First ask what I want to learn and what relevant experience I have.', 'mentor');
-    add('Build a research team', 'Start with your project', 'Help me plan a research team. First ask about my project and the expertise I need before suggesting people.');
-  }
-  return starters;
+  const sources = [];
+  const context = [];
+  if (interests) { sources.push('enabled interests'); context.push(`My research interests are ${quote(interests)}.`); }
+  if (papers.length) { sources.push('selected papers'); context.push(`Use these selected papers as context: ${papers.map(p => quote(p.title)).join('; ')}. Do not assume I authored them.`); }
+  if (selectedPeople.length) { sources.push('selected people'); context.push(`The researchers selected for this chat are ${selectedPeople.map(p => quote(p.name)).join(', ')}.`); }
+  if (contacts.length) { sources.push('personal connections'); context.push(`My self-reported connections include ${contacts.map(p => quote(p.name)).join(', ')}. Do not assume collaboration, availability, or a verified graph identity.`); }
+  if (linked && profileName && choices.publicationScope !== 'selected') { sources.push('linked profile'); context.push(`My linked graph profile is ${quote(profileName)}. Use only eligible publications within this chat's filters, if available.`); }
+  if (choices.publicationScope === 'selected' && !papers.length) context.push('No publications are selected as my personal context. Do not infer my background from publications.');
+  const basis = sources.length ? `Based on ${sources.join(', ')}` : 'Start with your goals';
+  const prefix = context.length ? `${context.join(' ')}\n\n` : '';
+  const targeted = interests || papers.length;
+  const workflows = [
+    ['Find a mentor', 'mentor', 'mentor', `Help me find a potential mentor.${targeted ? ' Use my enabled research context to identify a learning direction, and ask what I want to learn if unclear.' : ' First ask what I want to learn and what relevant experience I have.'} Support recommendations with publications; do not assume availability.`],
+    ['Build a team', 'collaborator', 'team', `Help me build a research team.${targeted ? ' Use my enabled context to suggest complementary roles, then clarify the project and expertise needed.' : ' First ask about my proposed project and the expertise needed.'} Recommend people for distinct roles with supporting evidence.`],
+    ['Find a niche', 'collaborator', 'sparkle', `Help me identify a promising research niche.${targeted ? ' Start from the themes in my enabled context.' : ' First ask which topics I want to explore.'} Explain possible gaps and adjacent directions, and distinguish supported evidence from speculation about how crowded a field is.`],
+    ['Explore', 'collaborator', 'sparkle', selectedPeople.length || (linked && profileName) ? `Explore the recorded coauthor network of ${selectedPeople.length ? selectedPeople.map(p => quote(p.name)).join(', ') : quote(profileName)}. Show up to 10 coauthors with supporting shared publications, and help me filter by date or affiliation. Respect my publication-context selection.` : 'Help me choose a researcher, then explore their recorded coauthors with supporting shared publications. Let me narrow the results by date or affiliation. Do not assume I have a graph profile.'],
+    ['Collaborate', 'collaborator', 'team', `Find potential collaborators for a proposed study.${targeted ? ' Ground the search in my enabled research context and clarify the study aim if needed.' : ' First ask me for the study topic and goal.'} Explain each person’s relevance using publications rather than assuming an existing relationship.`],
+    ['Promote', 'collaborator', 'sparkle', `Help me identify a relevant research audience for a paper or project.${papers.length ? ' Start with the selected papers, then ask which work I want to share.' : ' First ask what paper or project I want to share.'} Find up to four researchers and explain their relevance with different supporting publications where possible. Do not assume I authored any selected paper or contact anyone.`],
+  ];
+  return workflows.map(([label,intent,icon,prompt])=>({label,intent,icon,basis,prompt:prefix+prompt}));
 }
