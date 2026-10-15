@@ -138,7 +138,10 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual([p['author_id'] for p in result['people']], ['2'])
         self.assertTrue(all(2021 <= int(paper['year']) <= 2026 for paper in result['people'][0]['papers']))
         rendered = render_answer(self._answer('Here are your coauthors.'), tools)
-        self.assertEqual(rendered['suggested_followups'], ['Filter by a publication year range', 'Filter by current institution'])
+        self.assertEqual(rendered['suggested_followups'], [])
+        answer = self._answer('Here are your coauthors.')
+        answer.suggested_followups = ['Compare the shared publications of these coauthors']
+        self.assertEqual(render_answer(answer, tools)['suggested_followups'], answer.suggested_followups)
         empty = tools.explore_coauthors('', '', 'Clinical Institute', '', 2000, 2020)
         self.assertEqual(empty['people'], [])
 

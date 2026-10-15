@@ -360,6 +360,13 @@ answered normally with tools as needed.
   facts about the user that are not in signed_in_researcher (e.g. do not suggest
   "people at a different institution" when the user's institution is unknown). Make
   the three meaningfully different (e.g. go deeper on one person, compare, widen).
+- Follow-up suggestions must advance the current conversation, not restart its opening
+  workflow or repeat a request already answered. Never copy profile/context preambles
+  into suggestions. If you just asked the user for their learning goal, project,
+  experience, paper, or other personal information, return suggested_followups=[]:
+  the user needs to supply that information; do not invent an answer for them.
+  After substantive results, suggest specific evidence-backed next steps from this
+  answer. Return [] whenever no useful next step is supported. Do not force three.
 - Include person_ids for every catalog researcher named, also in clarification blocks.
 - Be concise and answer the actual question in the user's language.
 
@@ -613,8 +620,6 @@ def render_answer(answer: ResearchAnswer, tools: ResearchTools) -> dict:
     if (tools.publication_search or {}).get("kind") == "explore_coauthors":
         payload["explore_filters"] = tools.publication_search["filters"]
     payload["suggested_followups"] = [q.strip()[:120] for q in answer.suggested_followups if q.strip()][:3]
-    if (tools.publication_search or {}).get('kind') == 'explore_coauthors' and cards:
-        payload['suggested_followups'] = ['Filter by a publication year range', 'Filter by current institution']
     if cards:
         if not payload['reply']:
             payload['reply'] = ('Potential audience for your paper, based on related publications:'

@@ -14,6 +14,7 @@ import {
   submitErrorReport,
 } from "./lib/api";
 import { loadResearchContext, EMPTY_RESEARCH_CONTEXT } from "./lib/researchContext.mjs";
+import { conversationFollowUps } from "./lib/conversationFollowUps.mjs";
 import { contextStarters } from "./lib/contextStarters.mjs";
 import { contextChoicesForRequest } from "./lib/contextChoices.mjs";
 import { accountSavedPeople } from "./lib/savedPeople.mjs";
@@ -28,7 +29,6 @@ import {
 import {
   RESULT_LIMIT,
   AGENT_RESULT_LIMIT,
-  followUpPrompts,
   normalizeMessage,
 } from "./lib/matrixUi";
 import { MAX_ATTACHED_FILES, readAttachedFiles } from "./lib/attachedPapers";
@@ -269,6 +269,7 @@ export default function Home() {
   sessionSnapshotRef.current = { aid, focalName, matrixUserToken, messages, state: buildSessionStateSnapshot() };
 
   const applySessionSnapshot = useCallback((session) => {
+    setFollowUps([]); // Suggestions belong to the last live response, not another chat.
     const snapshot = session?.state || {};
     const restoredMessages = (Array.isArray(session?.messages) ? session.messages : []).map(normalizeMessage);
 
@@ -1002,7 +1003,7 @@ export default function Home() {
   }, [addMessage, currentQuery, intent, phase, runSearch]);
 
   const handleSend = async (presetText, requestedIntent) => {
-    if (profileDefaultsLoading) return;
+    if (profileDefaultsLoading || phase === PHASE.GENERATING) return;
     const text = String(presetText ?? inputValue).trim();
     if (!text) return;
     let activeIntent = requestedIntent || inferPersonaIntent(text, intent);
@@ -1028,6 +1029,7 @@ export default function Home() {
     setPriorInputs((prev) => [...prev.slice(-199), text]);
 
     const previousPhase = phase;
+    setFollowUps([]);
     setPhase(PHASE.GENERATING);
     const chatController = new AbortController();
     chatAbortRef.current = chatController;
@@ -1240,20 +1242,10 @@ export default function Home() {
   const suggestionContextKey = JSON.stringify({ aid, choices: contextChoices, people: contextPersonIds });
   useEffect(() => { setFollowUps([]); }, [suggestionContextKey]);
 
-  const suggestedPrompts =
-    followUps.length > 0 && phase !== PHASE.AWAITING_CONFIRM
-      ? followUps
-      : contextPersonIds.length > 0 && phase !== PHASE.AWAITING_CONFIRM
-      ? [
-          `How does ${contextPeople.find(person => contextPersonIds.includes(Number(person.authorId)))?.name || 'the selected person'} fit my research idea?`,
-          contextPersonIds.length > 1 ? 'Compare the selected people using their publications' : 'What evidence supports this person as a fit?',
-          intent === 'mentor' ? 'Find more mentors for my learning goal' : 'Find another collaborator for this research idea',
-        ]
-      : phase === PHASE.AWAITING_CONFIRM
-      ? copy.promptsConfirm
-      : candidates.length > 0
-        ? followUpPrompts(orderedCandidates, rerankedMap, PERSONA_COPY[searchIntent] || copy)
-      : starters.map(starter => starter.prompt).slice(0, 3);
+  const suggestedPrompts = conversationFollowUps({
+    suggestions: followUps, messages, starters,
+    busy: isLoading || phase === PHASE.AWAITING_CONFIRM,
+  });
 
   const graphHandoffPerson = contextPeople.find(
     (person) => Number(person.authorId) === graphHandoffPersonId
