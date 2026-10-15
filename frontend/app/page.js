@@ -13,6 +13,7 @@ import {
   saveChatSession,
   submitErrorReport,
 } from "./lib/api";
+import { accountSavedPeople } from "./lib/savedPeople.mjs";
 import { BRIDGE_MSG, inBridgeIframe, isBridgeOrigin, postToBridge } from "./lib/bridgeHost";
 import {
   GENERAL_STARTERS,
@@ -80,6 +81,7 @@ export default function Home() {
   const [graphContextPeople, setGraphContextPeople] = useState([]);
   const [graphHandoffPersonId, setGraphHandoffPersonId] = useState(null);
   const [attachedPapers, setAttachedPapers] = useState([]);
+  const [savedSyncNotice, setSavedSyncNotice] = useState("");
   const [profileNotice, setProfileNotice] = useState("");
   const [railOpen, setRailOpen] = useState(true);
   const [narrowLayout, setNarrowLayout] = useState(false);
@@ -512,12 +514,14 @@ export default function Home() {
   useEffect(() => {
     if (!inIframe) return undefined;
     const onMessage = (event) => {
-      if (!isBridgeOrigin(event.origin)) return;
+      if (event.source !== window.parent || !isBridgeOrigin(event.origin)) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
       if (data.type === BRIDGE_MSG.SAVED_PEOPLE && Array.isArray(data.people)) {
         setSavedPeople(data.people);
         setSavedPeopleReady(true);
+        setSavedSyncNotice(['error', 'pending', 'syncing'].includes(data.syncStatus?.state)
+          ? data.syncStatus.message : '');
       }
       if (data.type === BRIDGE_MSG.PROFILE_UPDATED) {
         window.dispatchEvent(new Event("focus"));
@@ -536,6 +540,15 @@ export default function Home() {
   }, [inIframe]);
 
   useEffect(() => {
+    if (!uiReady || inIframe) return undefined;
+    let cancelled = false;
+    accountSavedPeople().then(data => {
+      if (!cancelled) { setSavedPeople(data.people || []); setSavedPeopleReady(true); }
+    }).catch(() => { /* Anonymous visitors can still chat; saves explain the sign-in requirement. */ });
+    return () => { cancelled = true; };
+  }, [uiReady, inIframe]);
+
+  useEffect(() => {
     if (!profileNotice) return undefined;
     const timer = window.setTimeout(() => setProfileNotice(""), 4200);
     return () => window.clearTimeout(timer);
@@ -549,7 +562,7 @@ export default function Home() {
   }, [graphContextPeople, savedPeople, savedPeopleReady]);
 
   useEffect(() => {
-    document.title = focalName ? `TalentKG Chat | Research guide for ${focalName}` : "TalentKG Chat | Research guide";
+    document.title = focalName ? `Ask KG | Research guide for ${focalName}` : "Ask KG | Research guide";
   }, [focalName]);
 
   const contextPeople = useMemo(() => {
@@ -1253,14 +1266,16 @@ export default function Home() {
     : [];
 
   const handleAttachFiles = useCallback(async (fileList) => {
-    const { attached, skippedType, skippedSize } = await readAttachedFiles(fileList, attachedPapers.length);
+    const { attached, skippedType, skippedSize, failedRead } = await readAttachedFiles(fileList, attachedPapers.length);
     if (attached.length) {
       setAttachedPapers((prev) => [...prev, ...attached].slice(0, MAX_ATTACHED_FILES));
     }
+    const notices = [];
     const skipped = skippedType + skippedSize;
-    if (skipped > 0) {
-      setProfileNotice(`Skipped ${skipped} file${skipped === 1 ? "" : "s"}: use PDF or Word under 10 MB, or .txt, .md or .tex under 200 KB.`);
-    }
+    if (skipped > 0) notices.push(`Skipped ${skipped} file${skipped === 1 ? "" : "s"}: use PDF or Word under 10 MB, or .txt, .md or .tex under 200 KB.`);
+    if (failedRead > 0) notices.push(`Could not read ${failedRead} file${failedRead === 1 ? "" : "s"}. The upload or text extraction failed; retry or attach a text version.`);
+    if (notices.length) setProfileNotice(notices.join(" "));
+
   }, [attachedPapers.length]);
 
   const removeAttachment = useCallback((id) => {
@@ -1276,7 +1291,7 @@ export default function Home() {
     } catch { /* Keep the current chat open for retry. */ }
   };
 
-  const savePerson = (candidate, ranked) => {
+  const savePerson = async (candidate, ranked) => {
     const authorId = Number(candidate.author_id);
     const person = {
       authorId,
@@ -1284,14 +1299,26 @@ export default function Home() {
       affiliation: candidate.affiliation,
       intent,
       query: currentQuery,
+      savedAt: new Date().toISOString(),
+      source: "matrix",
     };
+    if (!inIframe) {
+      try {
+        await accountSavedPeople("", { method: "PUT", body: JSON.stringify(person) });
+        const data = await accountSavedPeople();
+        setSavedPeople(data.people || []);
+        setSavedPeopleReady(true);
+        setProfileNotice("Saved to your account.");
+      } catch (error) { setProfileNotice(error.message); }
+      return;
+    }
     postToBridge({
       type: BRIDGE_MSG.SAVE_PERSON,
       person,
     });
     setSavedPeople((prev) => [person, ...prev.filter((item) => Number(item.authorId) !== authorId)]);
     setSavedPeopleReady(true);
-    setProfileNotice("Saved. Use Add people in the composer when you want them in this chat.");
+    setProfileNotice("Saved on this device. Account sync status is shown below.");
   };
 
   const returnToGraph = useCallback(async () => {
@@ -1312,7 +1339,15 @@ export default function Home() {
     return () => window.removeEventListener("message", onClose);
   }, [inIframe, returnToGraph]);
 
-  const unsavePerson = (authorId) => {
+  const unsavePerson = async (authorId) => {
+    if (!inIframe) {
+      try {
+        await accountSavedPeople(`/${Number(authorId)}`, { method: "DELETE", body: JSON.stringify({ deletedAt: new Date().toISOString() }) });
+        const data = await accountSavedPeople();
+        setSavedPeople(data.people || []);
+      } catch (error) { setProfileNotice(error.message); }
+      return;
+    }
     postToBridge({ type: BRIDGE_MSG.UNSAVE_PERSON, authorId: Number(authorId) });
     setSavedPeople((prev) => prev.filter((person) => Number(person.authorId) !== Number(authorId)));
   };
@@ -1386,7 +1421,7 @@ export default function Home() {
   if (!uiReady) {
     return (
       <main className="chat-loading" role="status" aria-live="polite">
-        <p>Loading TalentKG Chat…</p>
+        <p>Loading Ask KG…</p>
       </main>
     );
   }
@@ -1488,7 +1523,7 @@ export default function Home() {
           onSavePerson={savePerson}
           onUseStarter={handleUseStarter}
           resultsWorkspace={inlineResults}
-          notice={profileNotice}
+          notice={savedSyncNotice || profileNotice}
           onDismissNotice={() => setProfileNotice("")}
           suggestedPrompts={suggestedPrompts}
           draftPrompts={graphHandoffDraftPrompts}

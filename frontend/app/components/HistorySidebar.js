@@ -52,9 +52,9 @@ export default function HistorySidebar({
           <IconSidebar />
         </button>
         {expanded && (
-          <div className="history-brand" aria-label="TalentKG chats">
+          <div className="history-brand" aria-label="Ask KG chats">
             <div className="product-mark" aria-hidden="true">T</div>
-            <span className="product-name">TalentKG Chat</span>
+            <span className="product-name">Ask KG</span>
           </div>
         )}
       </div>

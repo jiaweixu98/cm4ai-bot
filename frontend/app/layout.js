@@ -11,7 +11,7 @@ const instrumentSans = Instrument_Sans({
 const GA_ID = process.env.NEXT_PUBLIC_GA_ID;
 
 export const metadata = {
-  title: "TalentKG Chat | Bridge2AI research guide",
+  title: "Ask KG | Bridge2AI research guide",
   description: "Find mentors and collaborators using indexed publication evidence.",
 };
 
