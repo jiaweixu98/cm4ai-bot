@@ -28,5 +28,28 @@ class ContextInputTests(unittest.TestCase):
         self.assertEqual(body['selected_publication_count'], 0)
         self.assertEqual(body['publication_scope'], 'eligible')
 
+class PersonalContextTests(ContextInputTests):
+    def test_self_reported_context_is_separate_from_verified_profile(self):
+        from context_models import ContextChoices
+        req=self.request([])
+        req.context_choices=ContextChoices(research_interests='Biomedical standards',known_people=[{'name':'QA person','relationship':'met','note':'Workshop'}])
+        body=json.loads(_build_input(req)[-1]['content'])
+        self.assertEqual(body['self_reported_research_interests'],'Biomedical standards')
+        self.assertEqual(body['self_reported_connections'][0]['relationship'],'met')
+        self.assertFalse(body['has_profile_context'])
+        self.assertFalse(body['has_selected_people'])
+        self.assertFalse(body['user_publications_on_record'])
+
+    def test_current_empty_context_is_explicit(self):
+        body=json.loads(_build_input(self.request([]))[-1]['content'])
+        self.assertEqual(body['self_reported_research_interests'],'')
+        self.assertEqual(body['self_reported_connections'],[])
+
+    def test_context_limits_and_relationship_validation(self):
+        from context_models import ContextChoices
+        from pydantic import ValidationError
+        for data in [{'research_interests':'x'*2001},{'known_people':[{'name':'QA','relationship':'verified'}]},{'known_people':[{'name':'QA','relationship':'met'}]*21}]:
+            with self.assertRaises(ValidationError): ContextChoices(**data)
+
 if __name__ == '__main__':
     unittest.main()

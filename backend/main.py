@@ -1959,29 +1959,7 @@ class AgentWorkingContext(BaseModel):
     requirements: list[str] = Field(default_factory=list, max_length=8)
 
 
-class SelectedPublication(BaseModel):
-    author_id: str = Field(max_length=20)
-    work_id: str = Field(max_length=100)
-
-
-class PublicationFilter(BaseModel):
-    author_id: str = Field(max_length=20, pattern=r'^\d+$')
-    affiliation: str = Field(default='all',max_length=600)
-
-
-class ContextChoices(BaseModel):
-    """What the context panel sends into this chat, and how recommendations are limited."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    same_place: bool = False
-    recent_work: bool = False
-    recent_years: Literal[0, 5, 10] = 0
-    paper_scope: Literal["profile", "papers", "chosen"] = "profile"
-    paper_titles: list[str] = Field(default_factory=list, max_length=8)
-    selected_publications: list[SelectedPublication] = Field(default_factory=list,max_length=8)
-    publication_scope: Literal['eligible','selected'] = 'eligible'
-    publication_filters: list[PublicationFilter] = Field(default_factory=list,max_length=25)
+from context_models import ContextChoices, SelectedPublication, PublicationFilter
 
 
 class CoauthorFilters(BaseModel):

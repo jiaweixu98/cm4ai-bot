@@ -16,6 +16,8 @@ export function useEligiblePublications(choices) {
 
 export function contextChoicesForRequest(choices) {
   return {
+    research_interests: choices.personalContext?.useInterests === false ? '' : (choices.personalContext?.interests || ''),
+    known_people: (choices.personalContext?.contacts || []).filter(p => p.included).map(p => ({name:p.name, relationship:p.relationship, note:p.note, author_id:p.authorId || null})),
     same_place: choices.samePlace,
     recent_years: choices.recentYears,
     paper_scope: choices.paperScope,

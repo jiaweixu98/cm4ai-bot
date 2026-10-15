@@ -1,3 +1,4 @@
+import ResearchContextEditor from "./ResearchContextEditor";
 import { useEffect, useRef, useState } from "react";
 import { fetchAuthorDetails } from "../lib/api";
 import { matrixApiPath } from "../lib/apiPath.mjs";
@@ -5,7 +6,7 @@ import { matrixApiPath } from "../lib/apiPath.mjs";
 const affiliation = value => ["unknown", "affiliation unavailable"].includes(String(value || "").toLowerCase()) ? "" : value;
 import { publicationKey as key, selectPublications, removePublication, useEligiblePublications } from "../lib/contextChoices.mjs";
 
-export default function YouCard({ linked, aid, authorInfo, seekerName, choices, onChoices, onOpenProfile, people = [], workingContext = {}, attachments = [], onClose }) {
+export default function YouCard({ savedPeople = [], linked, aid, authorInfo, seekerName, choices, onChoices, onOpenProfile, people = [], workingContext = {}, attachments = [], onClose }) {
   const [details, setDetails] = useState(null);
   const [livePeople, setLivePeople] = useState([]);
   const [author, setAuthor] = useState(linked ? String(aid) : String(people[0]?.authorId || ""));
@@ -32,7 +33,7 @@ export default function YouCard({ linked, aid, authorInfo, seekerName, choices, 
     const close = event => {
       if (event.key === "Escape") onClose();
       if (event.key === "Tab" && window.innerWidth <= 960) {
-        const controls = [...panel.current.querySelectorAll('button:not(:disabled),input,select,[tabindex="0"]')];
+        const controls = [...panel.current.querySelectorAll('button:not(:disabled),input,textarea,select,[tabindex="0"]')];
         const first = controls[0], last = controls[controls.length - 1];
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
         if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -90,9 +91,10 @@ export default function YouCard({ linked, aid, authorInfo, seekerName, choices, 
       <div className="you-edit-body">
         {(details?.name || authorInfo?.name || seekerName) && <section><h3 className="context-section-label">Profile</h3>
           {linked ? <button className="you-name" type="button" onClick={() => onOpenProfile(aid)}>{details?.name || authorInfo?.name || seekerName}</button>
-            : <><p className="you-name">{seekerName}</p><p className="you-note">No linked research profile. Add people to this chat to choose their publications, or describe your interests in your message.</p></>}
+            : <><p className="you-name">{seekerName}</p><p className="you-note">No ORCID or publications needed. Set your interests and connections below, or add researchers to choose their papers.</p></>}
           {affiliation(details?.affiliation) && <p className="you-affiliation">{details.affiliation}</p>}
         </section>}
+        <ResearchContextEditor value={choices.personalContext} onChange={personalContext => onChoices({...choices, personalContext})} savedPeople={savedPeople} />
         {!!details?.topics?.length && <section><h3 className="context-section-label">Topics</h3><p className="you-note">{details.topics.join(" · ")}</p></section>}
         {!!livePeople.length && <section><h3 className="context-section-label">Selected people</h3><ul className="context-people">{livePeople.map(p => <li key={p.authorId}><button className="you-name" onClick={() => onOpenProfile(p.authorId)}>{p.name}</button>{affiliation(p.affiliation) && <p className="you-affiliation">{p.affiliation}</p>}</li>)}</ul></section>}
         <section><h3 className="context-section-label">Selected publications</h3>

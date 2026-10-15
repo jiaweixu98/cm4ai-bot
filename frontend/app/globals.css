@@ -3772,3 +3772,20 @@ body,
 
 .showcase-examples { margin-top: 18px; font-size: 13px; color: var(--matrix-text-2); }
 .showcase-examples summary { cursor: pointer; margin-bottom: 12px; }
+
+/* Account-owned, explicitly selected conversation context. */
+.personal-context { border-top: 1px solid var(--line, #e3e8ed); padding-top: 16px; }
+.personal-context textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 66px; padding: 9px 10px; border: 1px solid #d3dce4; border-radius: 8px; background: #fff; color: #203346; font: inherit; line-height: 1.5; }
+.personal-context textarea:focus { outline: 2px solid #47849a; outline-offset: 1px; }
+.personal-context-toggle { display:flex; gap:8px; align-items:flex-start; font-size:12px; line-height:1.5; margin:10px 0; }
+.personal-context-toggle input { margin-top:3px; flex-shrink:0; }
+.personal-context-heading,.personal-context-row { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.personal-context-heading { margin-top:20px; }
+.personal-context-heading h4 { margin:0; font-size:13px; }
+.personal-context-heading span { font-size:11px; color:#607184; }
+.personal-context-empty { font-size:12px; color:#607184; padding:12px; background:#f3f6f8; border-radius:8px; }
+.personal-context-list { list-style:none; padding:0; margin:12px 0; }
+.personal-context-list > li,.personal-context-add { padding:12px; border:1px solid #dbe3e9; border-radius:10px; margin-bottom:10px; }
+.personal-context-actions { display:flex; flex-wrap:wrap; gap:8px 16px; margin:12px 0; }
+.personal-context-storage { margin-top:18px; padding-top:12px; border-top:1px solid #e3e8ed; }
+.personal-context button:disabled { opacity:.45; cursor:not-allowed; }
