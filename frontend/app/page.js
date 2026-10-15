@@ -1070,7 +1070,9 @@ export default function Home() {
       }
 
       if (result.action === "agent") {
-        setAttachedPapers(current => current.filter(paper => !submittedAttachmentIds.has(paper.id)));
+        if (!result.recovered) {
+          setAttachedPapers(current => current.filter(paper => !submittedAttachmentIds.has(paper.id)));
+        }
         if (result.explore_filters) setExploreFilters(result.explore_filters);
         else if (result.result_update !== "keep") setExploreFilters(null);
         setAgentStatus("");
