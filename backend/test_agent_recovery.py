@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, patch
 from research_agent import (_fallback_answer, _repair_style, ResearchAnswer,
-                            render_answer, stream_research_turn)
+                            render_answer, stream_research_turn, ShortlistEntry)
 from research_tools import ResearchTools
 
 
@@ -107,3 +107,36 @@ class AgentRuntimeTests(IsolatedAsyncioTestCase):
             events = [event async for event in stream_research_turn(request(), tools(), 'test-model')]
         self.assertEqual(events[-1][1]['reply'], 'A usable answer.')
         self.assertEqual(events[-1][1]['working_context']['goal'], request().working_context.goal)
+
+
+class MultipleSearchTests(TestCase):
+    def service(self):
+        def details(aid):
+            return {'name': 'Researcher ' + aid, 'papers': [
+                {'title': 'Single-cell publication by researcher ' + aid, 'year': '2025'}]}
+        def search(query, scope, excluded):
+            ids = ['1', '2'] if query == 'first' else ['1', '3']
+            return [{'author_id': aid, 'score': 1, 'is_bridge2ai_member': True}
+                    for aid in ids if aid not in excluded]
+        return ResearchTools(lambda *_: [], details, search)
+
+    def test_two_queries_preserve_cited_candidate_from_first(self):
+        service = self.service()
+        first = service.search_people('first', [], 'all', [])
+        second = service.search_people('second', [], 'all', [])
+        answer = _fallback_answer('Two researchers.')
+        answer._is_recovery = False
+        for person in first['people']:
+            answer.shortlist.append(ShortlistEntry(author_id=person['author_id'], why='Relevant single-cell publication.',
+                evidence_ids=[person['papers'][0]['evidence_id']]))
+        payload = render_answer(answer, service)
+        self.assertEqual({p['author_id'] for p in payload['shortlist']}, {'1', '2'})
+        self.assertEqual([p['author_id'] for p in second['people']], ['1', '3'])
+        self.assertEqual([p['author_id'] for p in service.result_people], ['1', '3', '2'])
+
+    def test_hard_scope_and_exclusions_do_not_resurrect_candidates(self):
+        for scope, excluded in [('bridge2ai', []), ('all', ['2'])]:
+            service = self.service()
+            service.search_people('first', [], 'all', [])
+            service.search_people('second', [], scope, excluded)
+            self.assertNotIn('2', [p['author_id'] for p in service.result_people])

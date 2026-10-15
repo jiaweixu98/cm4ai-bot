@@ -151,6 +151,7 @@ class ResearchTools:
     place: str = ""
     from_year: int | None = None
     _niche_reviewed: set = field(default_factory=set)
+    _search_candidates: dict = field(default_factory=dict)
 
     def topic_coverage(self, author_id: str, topics: list[str]) -> dict:
         """Count a person's listed papers whose titles contain a topic's key words,
@@ -423,7 +424,15 @@ class ResearchTools:
             person["title_coverage"] = self.topic_coverage(person["author_id"], facets)
         self.candidates_reviewed = len(ranked)
         self.publication_search = None
-        self.result_people, self.result_query = people, question or "; ".join(facets)
+        # A second query may refine or complement the first. Keep verified candidates
+        # available for the model's final selection, newest ranking first. Never carry
+        # candidates across changes to hard scope or exclusions.
+        key = (scope, tuple(sorted(str(value) for value in exclude_ids)), self.place, self.from_year)
+        seen = {person["author_id"] for person in people}
+        candidates = people + [person for person in self._search_candidates.get(key, [])
+                               if person["author_id"] not in seen]
+        self._search_candidates[key] = candidates
+        self.result_people, self.result_query = candidates, question or "; ".join(facets)
         payload = {"status": "ok" if people else "empty", "question": question,
                    "requirements": facets, "scope": scope, "ranking": "rrf-v1", "people": people}
         scope_applied = _recommendation_scope(self.place, self.from_year)
