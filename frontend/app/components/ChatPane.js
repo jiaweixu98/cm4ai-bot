@@ -309,7 +309,7 @@ export default function ChatPane({
         ref={inputRef}
         className="chat-input"
         aria-label="Describe the research help you need"
-        placeholder={queueable ? "Queue a follow-up" : selectedPeople.length === 1 ? `Ask about ${selectedPeople[0].name}’s research…` : selectedPeople.length > 1 ? "Ask about these researchers…" : landing ? "Work on anything" : "Message Ask KG"}
+        placeholder={queueable ? "Queue a follow-up" : selectedPeople.length === 1 ? `Ask about ${selectedPeople[0].name}’s research…` : selectedPeople.length > 1 ? "Ask about these researchers…" : landing ? "Work on anything" : "Message Ask TalentKG"}
         value={inputValue}
         onChange={(event) => setInputValue(event.target.value)}
         onKeyDown={handleKeyDown}

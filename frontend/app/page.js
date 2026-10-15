@@ -13,6 +13,7 @@ import {
   saveChatSession,
   submitErrorReport,
 } from "./lib/api";
+import { loadResearchContext, EMPTY_RESEARCH_CONTEXT } from "./lib/researchContext.mjs";
 import { contextChoicesForRequest } from "./lib/contextChoices.mjs";
 import { accountSavedPeople } from "./lib/savedPeople.mjs";
 import { BRIDGE_MSG, inBridgeIframe, isBridgeOrigin, postToBridge } from "./lib/bridgeHost";
@@ -87,6 +88,7 @@ export default function Home() {
   const [railOpen, setRailOpen] = useState(true);
   const [narrowLayout, setNarrowLayout] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const [profileDefaultsLoading, setProfileDefaultsLoading] = useState(false);
   const [correctionRefresh, setCorrectionRefresh] = useState(0);
   const [exploreFilters, setExploreFilters] = useState(null);
   const [contextChoices, setContextChoices] = useState({
@@ -203,13 +205,13 @@ export default function Home() {
     return () => { controller.abort(); window.removeEventListener('focus', refresh); };
   }, [aid, currentSessionId, contextReferenceKey, contextOpen, correctionRefresh]);
 
-  const resetWorkflowState = useCallback(() => {
+  const resetWorkflowState = useCallback((personalContext = structuredClone(EMPTY_RESEARCH_CONTEXT)) => {
     savedFingerprintRef.current = "";
     baselineSessionRef.current = null;
     setContextPersonIds([]);
     setContextOpen(false);
     setExploreFilters(null);
-    setContextChoices({ version: 3, samePlace: false, recentYears: 0, paperScope: "chosen", paperTitles: [], selectedPapers: [], publicationScope: "eligible", publicationFilters: [] });
+    setContextChoices({ personalContext, version: 3, samePlace: false, recentYears: 0, paperScope: "chosen", paperTitles: [], selectedPapers: [], publicationScope: "eligible", publicationFilters: [] });
     setAttachedPapers([]);
     setGraphHandoffPersonId(null);
     setMessages([]);
@@ -324,6 +326,7 @@ export default function Home() {
     setExploreFilters(snapshot.exploreFilters || null);
     const restoredChoices = snapshot.contextChoices && typeof snapshot.contextChoices === "object" ? snapshot.contextChoices : {};
     setContextChoices({
+      personalContext: restoredChoices.personalContext || undefined,
       samePlace: false,
       recentYears: 0,
       version: 3, paperScope: "chosen", publicationScope: restoredChoices.publicationScope || (restoredChoices.selectedPapers?.length ? "selected" : "eligible"), publicationFilters: restoredChoices.publicationFilters || [],
@@ -439,9 +442,13 @@ export default function Home() {
         setInputValue("");
       };
 
+      let initialPersonalContext = structuredClone(EMPTY_RESEARCH_CONTEXT);
+      try { initialPersonalContext = await loadResearchContext(); }
+      catch { if (!cancelled) setProfileNotice('Your saved research context could not be loaded. Use Manage context to retry.'); }
+      if (cancelled) return;
       if (!resolvedToken) {
         if (cancelled) return;
-        resetWorkflowState();
+        resetWorkflowState(initialPersonalContext);
         applyGraphHandoff();
         setSessionStatus({ loading: false, saving: false, error: "" });
         sessionBootstrappedRef.current = true;
@@ -480,14 +487,14 @@ export default function Home() {
           if (cancelled) return;
           applySessionSnapshot(latestPayload.session);
         } else {
-          resetWorkflowState();
+          resetWorkflowState(initialPersonalContext);
         }
         applyGraphHandoff();
         setSessionStatus({ loading: false, saving: false, error: "" });
       } catch (error) {
         if (cancelled) return;
         console.error("Failed to restore chat sessions:", error);
-        resetWorkflowState();
+        resetWorkflowState(initialPersonalContext);
         applyGraphHandoff();
         setSessionStatus({
           loading: false,
@@ -563,7 +570,7 @@ export default function Home() {
   }, [graphContextPeople, savedPeople, savedPeopleReady]);
 
   useEffect(() => {
-    document.title = focalName ? `Ask KG | Research guide for ${focalName}` : "Ask KG | Research guide";
+    document.title = focalName ? `Ask TalentKG | Research guide for ${focalName}` : "Ask TalentKG | Research guide";
   }, [focalName]);
 
   const contextPeople = useMemo(() => {
@@ -690,12 +697,17 @@ export default function Home() {
     addMessage("assistant", "Stopped.", { stopped: true });
   }, [addMessage, candidates.length]);
 
-  const startNewSession = useCallback(() => {
+  const startNewSession = useCallback(async () => {
+    setProfileDefaultsLoading(true);
+    let personalContext;
+    try { personalContext = await loadResearchContext(); }
+    catch { setProfileNotice('Could not load your profile. New chat was not opened; please retry.'); setProfileDefaultsLoading(false); return; }
     savedFingerprintRef.current = "";
     baselineSessionRef.current = null;
     currentSessionIdRef.current = null;
     setCurrentSessionId(null);
-    resetWorkflowState();
+    resetWorkflowState(personalContext);
+    setProfileDefaultsLoading(false);
   }, [resetWorkflowState]);
 
   const handleNewSession = useCallback(async () => {
@@ -1000,6 +1012,7 @@ export default function Home() {
   }, [addMessage, currentQuery, intent, phase, runSearch]);
 
   const handleSend = async (presetText, requestedIntent) => {
+    if (profileDefaultsLoading) return;
     const text = String(presetText ?? inputValue).trim();
     if (!text) return;
     let activeIntent = requestedIntent || inferPersonaIntent(text, intent);
@@ -1184,8 +1197,8 @@ export default function Home() {
     void handleSendRef.current?.(text);
   }, [phase, queuedFollowUp]);
 
-  const isLoading = phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING;
-  const canStop = isLoading;
+  const isLoading = profileDefaultsLoading || phase === PHASE.GENERATING || phase === PHASE.SEARCHING || phase === PHASE.RERANKING;
+  const canStop = isLoading && !profileDefaultsLoading;
 
   const orderedCandidates = useMemo(() => {
     return candidates;
@@ -1414,7 +1427,7 @@ export default function Home() {
   if (!uiReady) {
     return (
       <main className="chat-loading" role="status" aria-live="polite">
-        <p>Loading Ask KG…</p>
+        <p>Loading Ask TalentKG…</p>
       </main>
     );
   }
@@ -1489,7 +1502,7 @@ export default function Home() {
 
       {contextOpen && <YouCard
         signedIn={Boolean(matrixUserToken)} linked={linked} aid={aid} authorInfo={authorInfo} seekerName={seekerName}
-        choices={contextChoices} onChoices={setContextChoices} onOpenProfile={openProfile} people={contextPeople}
+        savedPeople={savedPeople} choices={contextChoices} onChoices={setContextChoices} onOpenProfile={openProfile} people={contextPeople}
         workingContext={workingContext} attachments={attachedPapers} onClose={() => setContextOpen(false)} />}
 
       <div className={`workspace ${workspaceClass}`}>

@@ -18,3 +18,13 @@ assert.equal(selectPublications(original,Array.from({length:10},(_,i)=>({...pape
 assert.deepEqual(contextChoicesForRequest(selected).selected_publications,[{author_id:'123',work_id:'W1'}]);
 assert.equal(removePublication(selectPublications(original,[paper,{...paper,author_id:'456'}]),paper).selectedPapers[0].author_id,'456');
 console.log('PASS explicit empty selection through removal, serialization and restore; explicit eligible reset; filters, author-specific keys, eight-paper limit');
+
+const personal={interests:'data standards',useInterests:true,contacts:[{id:'1',name:'Known researcher',relationship:'met',note:'Workshop',authorId:'123',included:true},{id:'2',name:'Excluded person',relationship:'know',note:'not sent',included:false}]};
+const withPersonal={...removed,personalContext:personal};
+assert.equal(contextChoicesForRequest(withPersonal).research_interests,'data standards');
+assert.deepEqual(contextChoicesForRequest(withPersonal).known_people,[{name:'Known researcher',relationship:'met',note:'Workshop',author_id:'123'}]);
+assert.equal(contextChoicesForRequest({...withPersonal,personalContext:{...personal,useInterests:false}}).research_interests,'');
+assert.deepEqual(contextChoicesForRequest(JSON.parse(JSON.stringify(withPersonal))).known_people,contextChoicesForRequest(withPersonal).known_people);
+assert.deepEqual(contextChoicesForRequest({}).known_people,[]);
+assert.equal(contextChoicesForRequest(removePublication(withPersonal,paper)).research_interests,'data standards');
+console.log('PASS personal context survives history and paper edits; excluded interests/connections never serialized');

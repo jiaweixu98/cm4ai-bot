@@ -1,4 +1,4 @@
-/** Standalone Ask KG uses the same signed-in account API as the graph. */
+/** Standalone Ask TalentKG uses the same signed-in account API as the graph. */
 export async function accountSavedPeople(path = '', options = {}) {
   const response = await fetch(`/api/saved-people${path}`, {
     cache: 'no-store', ...options,
