@@ -394,34 +394,21 @@ export default function Home() {
       setEmbedded(isEmbedded);
       setMatrixUserToken(resolvedToken);
 
-      let fetchedAuthor = null;
-      if (aidParam !== UNLINKED_AID) {
-        try {
-          fetchedAuthor = await fetchAuthor(aidParam);
-          if (cancelled) return;
-          setAuthorInfo(fetchedAuthor);
-        } catch {
-          if (cancelled) return;
-          setAuthorInfo(null);
-        }
-      } else {
-        setAuthorInfo(null);
-      }
-      let fetchedGraphPerson = null;
-      if (graphHandoff && Number.isInteger(graphContextNumber)) {
-        try {
-          fetchedGraphPerson = await fetchAuthor(graphContextId);
-          if (cancelled) return;
-        } catch {
-          if (cancelled) return;
-          setGraphContextPeople([]);
-          setGraphHandoffPersonId(null);
-        }
-      } else if (!graphHandoff) {
+      // Independent reads start together; preserve each request's failure behavior.
+      const personalContextPromise = loadResearchContext().then(profile => ({profile}), () => ({error:true}));
+      const historyPromise = resolvedToken
+        ? listChatSessions({authToken:resolvedToken}).then(payload=>({payload}), error=>({error}))
+        : Promise.resolve(null);
+      const [fetchedAuthor, fetchedGraphPerson] = await Promise.all([
+        aidParam !== UNLINKED_AID ? fetchAuthor(aidParam).catch(()=>null) : null,
+        graphHandoff && Number.isInteger(graphContextNumber) ? fetchAuthor(graphContextId).catch(()=>null) : null,
+      ]);
+      if (cancelled) return;
+      setAuthorInfo(fetchedAuthor);
+      if (!graphHandoff || !fetchedGraphPerson) {
         setGraphContextPeople([]);
         setGraphHandoffPersonId(null);
       }
-      if (cancelled) return;
 
       const applyGraphHandoff = () => {
         if (!graphHandoff || !Number.isInteger(graphContextNumber)) return;
@@ -443,8 +430,9 @@ export default function Home() {
       };
 
       let initialPersonalContext = structuredClone(EMPTY_RESEARCH_CONTEXT);
-      try { initialPersonalContext = await loadResearchContext(); }
-      catch { if (!cancelled) setProfileNotice('Your saved research context could not be loaded. Use Manage context to retry.'); }
+      const personalResult = await personalContextPromise;
+      if (personalResult.error) { if (!cancelled) setProfileNotice('Your saved research context could not be loaded. Use Manage context to retry.'); }
+      else initialPersonalContext = personalResult.profile;
       if (cancelled) return;
       if (!resolvedToken) {
         if (cancelled) return;
@@ -457,7 +445,9 @@ export default function Home() {
       }
 
       try {
-        const historyPayload = await listChatSessions({ authToken: resolvedToken });
+        const historyResult = await historyPromise;
+        if (historyResult.error) throw historyResult.error;
+        const historyPayload = historyResult.payload;
         if (cancelled) return;
         const mergedSessions = (Array.isArray(historyPayload.sessions) ? historyPayload.sessions : [])
           .sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
