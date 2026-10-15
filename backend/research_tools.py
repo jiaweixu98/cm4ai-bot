@@ -392,7 +392,7 @@ class ResearchTools:
         return True
 
     def search_people(self, question: str, requirements: list[str], scope: str,
-                      exclude_ids: list[str]) -> dict:
+                      exclude_ids: list[str], append_results: bool = False) -> dict:
         self._charge("search_people")
         if scope not in {"all", "bridge2ai"}:
             raise ValueError("Scope must be all or bridge2ai")
@@ -424,14 +424,14 @@ class ResearchTools:
             person["title_coverage"] = self.topic_coverage(person["author_id"], facets)
         self.candidates_reviewed = len(ranked)
         self.publication_search = None
-        # A second query may refine or complement the first. Keep verified candidates
-        # available for the model's final selection, newest ranking first. Never carry
-        # candidates across changes to hard scope or exclusions.
-        key = (scope, tuple(sorted(str(value) for value in exclude_ids)), self.place, self.from_year)
+        # Exclusions apply to this lookup: a complementary query may exclude the
+        # first selected person to find a second. Explicitly distinguish that from
+        # replacing results after the user narrows or changes requirements.
+        key = (scope, self.place, self.from_year)
         seen = {person["author_id"] for person in people}
-        candidates = people + [person for person in self._search_candidates.get(key, [])
-                               if person["author_id"] not in seen]
-        self._search_candidates[key] = candidates
+        previous = self._search_candidates.get(key, []) if append_results else []
+        candidates = people + [person for person in previous if person["author_id"] not in seen]
+        self._search_candidates = {key: candidates}
         self.result_people, self.result_query = candidates, question or "; ".join(facets)
         payload = {"status": "ok" if people else "empty", "question": question,
                    "requirements": facets, "scope": scope, "ranking": "rrf-v1", "people": people}

@@ -123,7 +123,7 @@ class MultipleSearchTests(TestCase):
     def test_two_queries_preserve_cited_candidate_from_first(self):
         service = self.service()
         first = service.search_people('first', [], 'all', [])
-        second = service.search_people('second', [], 'all', [])
+        second = service.search_people('second', [], 'all', [], append_results=True)
         answer = _fallback_answer('Two researchers.')
         answer._is_recovery = False
         for person in first['people']:
@@ -140,3 +140,15 @@ class MultipleSearchTests(TestCase):
             service.search_people('first', [], 'all', [])
             service.search_people('second', [], scope, excluded)
             self.assertNotIn('2', [p['author_id'] for p in service.result_people])
+
+    def test_complementary_lookup_can_exclude_already_found_person_without_losing_them(self):
+        service = self.service()
+        service.search_people('first', [], 'all', [])
+        service.search_people('second', [], 'all', ['1', '2'], append_results=True)
+        self.assertEqual([p['author_id'] for p in service.result_people], ['3', '1', '2'])
+
+    def test_append_cannot_cross_hard_scope(self):
+        service = self.service()
+        service.search_people('first', [], 'all', [])
+        service.search_people('second', [], 'bridge2ai', [], append_results=True)
+        self.assertNotIn('2', [p['author_id'] for p in service.result_people])

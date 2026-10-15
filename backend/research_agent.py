@@ -166,6 +166,11 @@ search and summarize the literature. Adapt to what the user actually asks.
 - For discovery requests, search immediately. Ask only clarifications that would
   materially change the result. Pass the original question and up to three distinct,
   concrete requirements to one search_people call; it performs deterministic facet fusion.
+  Start with append_results=false. If a complementary lookup is needed to fill another
+  recommendation, use append_results=true; exclude_ids may omit already-found people
+  from that lookup without removing them from the final candidate pool. Use false when
+  replacing results or applying a user's exclusions or narrower requirements. Do not
+  claim more recommendations than you can include with valid publication evidence.
 - find_similar_work lists people whose papers are close to one person's and who have
   never written with them. Use it for "who works on things like mine", "similar to my
   papers", or "has not written with me". Pass "" for the signed-in researcher, or a
@@ -788,9 +793,9 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
 
     @function_tool(failure_error_function=_tool_error)
     async def search_people(question: str, requirements: list[str], scope: Literal["all", "bridge2ai"],
-                            exclude_ids: list[str]) -> dict:
-        """Find local-catalog researchers. Give the original question and up to 3 distinct requirements."""
-        return await call(services.search_people, question, requirements, scope, exclude_ids)
+                            exclude_ids: list[str], append_results: bool) -> dict:
+        """Find catalog researchers. Set append_results true only for a complementary lookup retaining earlier candidates; false for a fresh or narrowed search. Exclusions affect this lookup."""
+        return await call(services.search_people, question, requirements, scope, exclude_ids, append_results)
 
     @function_tool(failure_error_function=_tool_error)
     async def find_similar_work(author_id: str) -> dict:
