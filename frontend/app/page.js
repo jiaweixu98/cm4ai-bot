@@ -13,6 +13,7 @@ import {
   saveChatSession,
   submitErrorReport,
 } from "./lib/api";
+import { contextChoicesForRequest } from "./lib/contextChoices.mjs";
 import { accountSavedPeople } from "./lib/savedPeople.mjs";
 import { BRIDGE_MSG, inBridgeIframe, isBridgeOrigin, postToBridge } from "./lib/bridgeHost";
 import {
@@ -1042,15 +1043,7 @@ export default function Home() {
         searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
         intent: activeIntent,
-        contextChoices: {
-          same_place: contextChoices.samePlace,
-          recent_years: contextChoices.recentYears,
-          paper_scope: contextChoices.paperScope,
-          publication_scope: contextChoices.publicationScope || ((contextChoices.selectedPapers || []).length ? "selected" : "eligible"),
-          publication_filters: contextChoices.publicationFilters || [],
-          paper_titles: [],
-          selected_publications: (contextChoices.selectedPapers || []).slice(0,8).map(p => ({ author_id: String(p.author_id), work_id: p.work_id })),
-        },
+        contextChoices: contextChoicesForRequest(contextChoices),
         workingContext,
         exploreFilters,
         chatSessionId: currentSessionIdRef.current,
