@@ -425,6 +425,7 @@ export default function ChatPane({
               </div>
             )}
             <p className="starter-heading">Suggested for this chat</p>
+            {starters[0]?.basis?.startsWith("Based on ") && <p className="starter-context-basis">{starters[0].basis}</p>}
             <div className="starter-grid">
               {starters.map((starter) => (
                 <button
@@ -444,7 +445,7 @@ export default function ChatPane({
                     <StarterIcon name={starter.icon} />
                   </span>
                   <span className="starter-copy">
-                    <span className="starter-label">{starter.label}</span><small>{starter.basis}</small>
+                    <span className="starter-label">{starter.label}</span>
                     <span className="starter-prompt">{starter.prompt}</span>
                   </span>
                 </button>
