@@ -8,7 +8,9 @@ const nextConfig = {
       process.env.MATRIX_BACKEND_URL ||
       "http://127.0.0.1:8100"
     ).replace(/\/$/, "");
+    const graphUrl = (process.env.GRAPH_BACKEND_URL || "http://127.0.0.1:4173").replace(/\/$/, "");
     return [
+      ...["research-interests", "research-topics", "saved-people", "saved-people/:authorId"].map(path => ({source:`/api/${path}`,destination:`${graphUrl}/api/${path}`})),
       {
         source: "/api/:path*",
         destination: `${backendUrl}/api/:path*`,

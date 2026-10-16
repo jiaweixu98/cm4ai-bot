@@ -470,7 +470,7 @@ export default function ChatPane({
         {!resultsAnchorId && resultsWorkspace}
         {isLoading && (
           <div className="message message-assistant">
-            <div className="message-avatar message-avatar-assistant">M</div>
+            <div className="message-avatar message-avatar-assistant" aria-hidden="true">KG</div>
             <div className="message-bubble message-bubble-assistant">
               <div className="typing-row">
                 <div className="typing-indicator" aria-hidden="true">

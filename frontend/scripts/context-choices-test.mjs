@@ -22,9 +22,21 @@ console.log('PASS explicit empty selection through removal, serialization and re
 const personal={interests:'data standards',useInterests:true,contacts:[{id:'1',name:'Known researcher',relationship:'met',note:'Workshop',authorId:'123',included:true},{id:'2',name:'Excluded person',relationship:'know',note:'not sent',included:false}]};
 const withPersonal={...removed,personalContext:personal};
 assert.equal(contextChoicesForRequest(withPersonal).research_interests,'data standards');
-assert.deepEqual(contextChoicesForRequest(withPersonal).known_people,[{name:'Known researcher',relationship:'met',note:'Workshop',author_id:'123'}]);
+assert.deepEqual(contextChoicesForRequest(withPersonal).known_people,[]);
 assert.equal(contextChoicesForRequest({...withPersonal,personalContext:{...personal,useInterests:false}}).research_interests,'');
 assert.deepEqual(contextChoicesForRequest(JSON.parse(JSON.stringify(withPersonal))).known_people,contextChoicesForRequest(withPersonal).known_people);
 assert.deepEqual(contextChoicesForRequest({}).known_people,[]);
 assert.equal(contextChoicesForRequest(removePublication(withPersonal,paper)).research_interests,'data standards');
 console.log('PASS personal context survives history and paper edits; excluded interests/connections never serialized');
+
+const {ownPublicationChoices}=await import('../app/lib/contextChoices.mjs');
+const {topicContext}=await import('../app/lib/researchContext.mjs');
+const mixed={publicationScope:'selected',selectedPapers:[paper,{...paper,author_id:'456'}],publicationFilters:[{author_id:'123',affiliation:'A'},{author_id:'456',affiliation:'B'}]};
+assert.deepEqual(ownPublicationChoices(mixed,'123').selectedPapers,[paper]);
+assert.deepEqual(contextChoicesForRequest(mixed,'123').publication_filters,[{author_id:'123',affiliation:'A'}]);
+assert.deepEqual(contextChoicesForRequest(mixed,'unlinked').selected_publications,[]);
+assert.equal(contextChoicesForRequest(mixed,'unlinked').publication_scope,'selected');
+assert.deepEqual(topicContext(['one','one','two']).topics,['one','two']);
+assert.equal(topicContext(['one','two']).interests,'one; two');
+assert.deepEqual(topicContext(['one']).contacts,[]);
+console.log('PASS own publication controls, added-person filter removal, explicit empty scope and structured interests');

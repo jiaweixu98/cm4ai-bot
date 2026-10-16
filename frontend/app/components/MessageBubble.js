@@ -27,7 +27,7 @@ export default function MessageBubble({
   return (
     <div className={`message message-${message.role} ${message.stopped ? "is-stopped" : ""}`}>
       <div className={`message-avatar message-avatar-${message.role}`} aria-hidden="true">
-        {message.role === "assistant" ? "M" : "You"}
+        {message.role === "assistant" ? "KG" : "You"}
       </div>
       <div className="message-stack">
         <div className={`message-bubble message-bubble-${message.role}`}>

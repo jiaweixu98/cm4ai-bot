@@ -4,6 +4,8 @@ export const BRIDGE_MSG = {
   OPEN_PERSON: "bridge2ai-open-person",
   SAVE_PERSON: "bridge2ai-save-person",
   UNSAVE_PERSON: "bridge2ai-unsave-person",
+  RESEARCH_INTERESTS: "bridge2ai-research-interests",
+  EDIT_INTERESTS: "bridge2ai-edit-interests",
   REQUEST_SAVED: "bridge2ai-request-saved",
   SAVED_PEOPLE: "bridge2ai-saved-people",
   OPEN_PERSON_RESULT: "bridge2ai-open-person-result",
@@ -23,6 +25,15 @@ export function inBridgeIframe() {
 export function postToBridge(payload) {
   if (!inBridgeIframe()) return;
   window.parent.postMessage(payload, "*");
+}
+
+export function graphPagePath(path) {
+  if (typeof window !== 'undefined' && window.location.port === '3100') {
+    const url=new URL(path,window.location.origin);
+    url.port='4173';
+    return url.toString();
+  }
+  return path;
 }
 
 export function isBridgeOrigin(origin) {

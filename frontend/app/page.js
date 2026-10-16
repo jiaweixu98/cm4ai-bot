@@ -11,12 +11,13 @@ import {
   searchCandidates,
   explainCandidates,
   saveChatSession,
+  removeChatSession,
   submitErrorReport,
 } from "./lib/api";
-import { loadResearchContext, EMPTY_RESEARCH_CONTEXT } from "./lib/researchContext.mjs";
+import { loadResearchContext, EMPTY_RESEARCH_CONTEXT, topicContext } from "./lib/researchContext.mjs";
 import { conversationFollowUps } from "./lib/conversationFollowUps.mjs";
 import { contextStarters } from "./lib/contextStarters.mjs";
-import { contextChoicesForRequest } from "./lib/contextChoices.mjs";
+import { contextChoicesForRequest, ownPublicationChoices } from "./lib/contextChoices.mjs";
 import { accountSavedPeople } from "./lib/savedPeople.mjs";
 import { BRIDGE_MSG, inBridgeIframe, isBridgeOrigin, postToBridge } from "./lib/bridgeHost";
 import {
@@ -126,6 +127,7 @@ export default function Home() {
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [reportStatus, setReportStatus] = useState("");
 
+  const hiddenSessionIdsRef = useRef(new Set());
   const sessionHydratingRef = useRef(false);
   const sessionBootstrappedRef = useRef(false);
   const sessionSaveTimerRef = useRef(null);
@@ -232,7 +234,7 @@ export default function Home() {
   }, []);
 
   const upsertSessionSummary = useCallback((session) => {
-    if (!session) return;
+    if (!session || hiddenSessionIdsRef.current.has(session.id)) return;
     setSessions((prev) => {
       const tagged = session.intent === "mentor" || session.intent === "collaborator"
         ? session
@@ -327,11 +329,14 @@ export default function Home() {
     setExploreFilters(snapshot.exploreFilters || null);
     const restoredChoices = snapshot.contextChoices && typeof snapshot.contextChoices === "object" ? snapshot.contextChoices : {};
     setContextChoices({
-      personalContext: restoredChoices.personalContext || undefined,
+      personalContext: topicContext(restoredChoices.personalContext?.topics, restoredChoices.personalContext?.useInterests !== false),
+      legacyPersonalContext: restoredChoices.legacyPersonalContext || (
+        restoredChoices.personalContext && !Array.isArray(restoredChoices.personalContext.topics)
+          ? restoredChoices.personalContext : undefined),
       samePlace: false,
       recentYears: 0,
-      version: 3, paperScope: "chosen", publicationScope: restoredChoices.publicationScope || (restoredChoices.selectedPapers?.length ? "selected" : "eligible"), publicationFilters: restoredChoices.publicationFilters || [],
-      selectedPapers: Array.isArray(restoredChoices.selectedPapers) ? restoredChoices.selectedPapers.slice(0,8) : [],
+      version: 3, paperScope: "chosen", publicationScope: restoredChoices.publicationScope || (restoredChoices.selectedPapers?.length ? "selected" : "eligible"), publicationFilters: (restoredChoices.publicationFilters || []).filter(f=>String(f.author_id)===String(session?.focal_author_id || session?.aid || aid)),
+      selectedPapers: ownPublicationChoices(restoredChoices,session?.focal_author_id || session?.aid || aid).selectedPapers.slice(0,8),
       paperTitles: restoredChoices.paperScope === "chosen" && Array.isArray(restoredChoices.paperTitles) ? restoredChoices.paperTitles.map(String).slice(0,8) : [],
     });
     if (snapshot.searchIntent === "mentor" || snapshot.searchIntent === "collaborator") {
@@ -516,6 +521,10 @@ export default function Home() {
       if (event.source !== window.parent || !isBridgeOrigin(event.origin)) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
+      if (data.type === BRIDGE_MSG.RESEARCH_INTERESTS && data.applyToConversation === true && Array.isArray(data.topics)) {
+        setContextChoices(current => ({...current,personalContext:topicContext(data.topics)}));
+        return;
+      }
       if (data.type === BRIDGE_MSG.SAVED_PEOPLE && Array.isArray(data.people)) {
         setSavedPeople(data.people);
         setSavedPeopleReady(true);
@@ -639,9 +648,11 @@ export default function Home() {
     const targetId = currentSessionIdRef.current;
     const fingerprint = sessionFingerprint(snapshot.messages, snapshot.state);
     const write = async () => {
+      if (hiddenSessionIdsRef.current.has(targetId)) return targetId;
       if (targetId === currentSessionIdRef.current && targetId && fingerprint === savedFingerprintRef.current) return targetId;
       setSessionStatus((prev) => ({ ...prev, saving: true, error: "" }));
       const sessionId = targetId || await ensureCurrentSession(snapshot.messages);
+      if (hiddenSessionIdsRef.current.has(sessionId)) return sessionId;
       const { session } = await saveChatSession({
         sessionId,
         aid: snapshot.aid,
@@ -761,10 +772,41 @@ export default function Home() {
     [applySessionSnapshot, intent, matrixUserToken, navigateToSession, persistSessionNow, phase, sessions]
   );
 
+  const requestRemoveSession = useCallback((sessionId) => {
+    if (matrixUserToken && sessionId) setPendingConfirm({type:'remove',sessionId});
+  }, [matrixUserToken]);
+
+  const handleRemoveSession = useCallback(async (sessionId) => {
+    if (!matrixUserToken) return;
+    hiddenSessionIdsRef.current.add(sessionId);
+    const active = sessionId === currentSessionIdRef.current;
+    const snapshot = sessionSnapshotRef.current;
+    if (active) {
+      if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
+      handleStop();
+    }
+    setSessionStatus(prev => ({ ...prev, loading: true, error: "" }));
+    try {
+      await sessionWriteQueueRef.current.catch(() => {});
+      if (active && hasUserMessage(snapshot.messages)) {
+        await saveChatSession({sessionId,aid:snapshot.aid,focalAuthorName:snapshot.focalName || "",
+          messages:snapshot.messages,state:snapshot.state,authToken:matrixUserToken});
+      }
+      await removeChatSession({ sessionId, authToken: matrixUserToken });
+      setSessions(prev => prev.filter(session => session.id !== sessionId));
+      if (active) startNewSession();
+      setSessionStatus(prev => ({ ...prev, loading: false, saving: false }));
+    } catch (error) {
+      hiddenSessionIdsRef.current.delete(sessionId);
+      setSessionStatus(prev => ({ ...prev, loading: false, saving: false, error: error.message }));
+    }
+  }, [matrixUserToken, handleStop, startNewSession]);
+
   const confirmPending = useCallback(async () => {
     const pending = pendingConfirm;
     setPendingConfirm(null);
     if (!pending) return;
+    if (pending.type === 'remove') {await handleRemoveSession(pending.sessionId);return;}
     handleStop();
     try { await persistSessionNow(); } catch { return; }
     if (pending.type === "new") {
@@ -790,7 +832,7 @@ export default function Home() {
         }));
       }
     }
-  }, [applySessionSnapshot, handleStop, intent, matrixUserToken, navigateToSession, pendingConfirm, persistSessionNow, startNewSession]);
+  }, [applySessionSnapshot, handleRemoveSession, handleStop, intent, matrixUserToken, navigateToSession, pendingConfirm, persistSessionNow, startNewSession]);
 
   useEffect(() => {
     if (!sessionBootstrappedRef.current) return;
@@ -1048,7 +1090,7 @@ export default function Home() {
         searchResults: shortlistForChat(activeIntent),
         searchPhase: previousPhase,
         intent: activeIntent,
-        contextChoices: contextChoicesForRequest(contextChoices),
+        contextChoices: contextChoicesForRequest(contextChoices, aid),
         workingContext,
         exploreFilters,
         chatSessionId: currentSessionIdRef.current,
@@ -1453,7 +1495,6 @@ export default function Home() {
       {showRail && (
         <HistorySidebar
           sessions={sessions}
-          currentIntent={intent}
           currentSessionId={currentSessionId}
           sessionStatus={sessionStatus}
           signedIn={Boolean(matrixUserToken)}
@@ -1463,6 +1504,7 @@ export default function Home() {
           onToggle={() => persistRail(!railOpen)}
           onNewSession={handleNewSession}
           onRetry={retrySession}
+          onRemoveSession={requestRemoveSession}
           onSelectSession={(sessionId) => {
             if (narrowLayout) persistRail(false);
             handleSelectSession(sessionId);
@@ -1544,9 +1586,10 @@ export default function Home() {
 
       <ConfirmPopover
         open={Boolean(pendingConfirm)}
-        title={pendingConfirm?.type === "switch" ? "Switch sessions?" : "Start a new session?"}
-        body="This stops the current search."
-        confirmLabel={pendingConfirm?.type === "switch" ? "Switch" : "Start new"}
+        title={pendingConfirm?.type === "remove" ? "Remove this chat?" : pendingConfirm?.type === "switch" ? "Switch sessions?" : "Start a new session?"}
+        body={pendingConfirm?.type === "remove" ? "It will no longer appear in your chat history." : "This stops the current search."}
+        confirmLabel={pendingConfirm?.type === "remove" ? "Remove" : pendingConfirm?.type === "switch" ? "Switch" : "Start new"}
+        cancelLabel={pendingConfirm?.type === "remove" ? "Cancel" : "Keep going"}
         onConfirm={confirmPending}
         onCancel={() => setPendingConfirm(null)}
       />
