@@ -250,7 +250,7 @@ class ResearchTools:
         allowed = None
         if self.library is not None and hasattr(self.library, 'eligible_work_ids'):
             affiliation = next((f['affiliation'] for f in getattr(self,'publication_filters',[])
-                if self.library.canonical_author(f['author_id']) == author_id),'all')
+                if author_id == str(self.self_id) and self.library.canonical_author(f['author_id']) == author_id),'all')
             allowed = self.library.eligible_work_ids(author_id,affiliation)
             if author_id == str(self.self_id) and getattr(self,'publication_scope','eligible') == 'selected':
                 allowed &= {p['work_id'] for p in getattr(self,'selected_publication_refs',[]) if p['author_id'] == author_id}
@@ -330,8 +330,8 @@ class ResearchTools:
         if not focal.isdigit(): return {'status':'needs_person','people':[]}
         if self.library is None: return {'status':'unavailable','people':[]}
         filters = getattr(self,'publication_filters',[])
-        affiliation = next((f['affiliation'] for f in filters if self.library.canonical_author(f['author_id'])==focal),'all')
-        selected = getattr(self,'publication_scope','eligible') == 'selected'
+        affiliation = next((f['affiliation'] for f in filters if focal == str(self.self_id) and self.library.canonical_author(f['author_id'])==focal),'all')
+        selected = focal == str(self.self_id) and getattr(self,'publication_scope','eligible') == 'selected'
         works = [p['work_id'] for p in getattr(self,'selected_publication_refs',[]) if str(p['author_id'])==focal] if selected else None
         if selected and not works:
             return {'status':'needs_selection','people':[], 'message':'Select publications by this researcher, or use all eligible publications.'}
@@ -527,7 +527,8 @@ class ResearchTools:
                      displayed_results: list[dict] | None = None) -> dict:
         self._charge("read_context")
         def read(ids):
-            return [p for aid in ids[:8] if (p := self._person(aid, limit=0))]
+            return [p for aid in ids[:8] if str(aid) != str(self.self_id) and
+                    (p := self._person(aid, getattr(self,'context_question',''), limit=3))]
         displayed = []
         previous = {str(row.get('author_id', '')): row for row in (displayed_results or [])[:10]}
         for author_id in displayed_ids[:10]:

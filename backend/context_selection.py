@@ -22,11 +22,15 @@ def revalidate_session(session, library):
     if not session: return session
     state = dict(session.get('state') or {})
     choices = dict(state.get('contextChoices') or {})
+    owner = str(session.get('aid') or session.get('focal_author_id') or '')
+    if library is not None: owner = library.canonical_author(owner)
+    own_filters = [f for f in (choices.get('publicationFilters') or []) if isinstance(f,dict) and
+        (library.canonical_author(str(f.get('author_id',''))) if library is not None else str(f.get('author_id',''))) == owner]
     filters = [{'author_id':str(f['author_id']),'affiliation':f.get('affiliation','all')}
-        for f in (choices.get('publicationFilters') or [])[:25]
+        for f in own_filters[:25]
         if isinstance(f,dict) and str(f.get('author_id','')).isdigit() and len(str(f['author_id']))<=20
         and isinstance(f.get('affiliation','all'),str) and len(f.get('affiliation','all'))<=600]
-    discarded_filter = len(filters) != len(choices.get('publicationFilters') or [])
+    discarded_filter = len(filters) != len(own_filters)
     valid_filters = []
     for item in filters:
         try:
@@ -35,14 +39,26 @@ def revalidate_session(session, library):
             valid_filters.append(item)
         except ValueError:
             discarded_filter = True
-    selected = resolve_references(library,choices.get('selectedPapers') or [],
+    own_refs = [p for p in (choices.get('selectedPapers') or []) if isinstance(p,dict) and
+        (library.canonical_author(str(p.get('author_id',''))) if library is not None else str(p.get('author_id',''))) == owner]
+    selected = resolve_references(library,own_refs,
                                   choices.get('paperTitles') or [] if choices.get('paperScope') == 'chosen' else [],
                                   str(session.get('aid') or session.get('focal_author_id') or ''),filters)
     scope = choices.get('publicationScope') or ('selected' if choices.get('selectedPapers') or choices.get('paperTitles') else 'eligible')
     if scope not in {'eligible','selected'}: scope = 'selected' if selected else 'eligible'
     if discarded_filter:
         selected, scope = [], 'selected'
-    state['contextChoices'] = {'version': 3, 'samePlace': False, 'recentYears': 0,
+    personal = choices.get('personalContext') or {}
+    topics = list(dict.fromkeys(t for t in personal.get('topics',[]) if isinstance(t,str) and t.strip() and len(t)<=200))[:8]
+    state['contextChoices'] = {'personalContext': {'topics':topics,'interests':'; '.join(topics),
+                                'useInterests':personal.get('useInterests') is not False,'contacts':[]},'version': 3, 'samePlace': False, 'recentYears': 0,
                                'paperScope': 'chosen', 'paperTitles': [], 'selectedPapers': selected,
                                'publicationScope':scope,'publicationFilters':valid_filters}
+    # Keep historical conversation-only notes available for analysis without
+    # making them active interests or editable connections in the new UI.
+    legacy = choices.get('legacyPersonalContext')
+    if legacy is None and 'topics' not in personal and (personal.get('interests') or personal.get('contacts')):
+        legacy = personal
+    if legacy is not None:
+        state['contextChoices']['legacyPersonalContext'] = legacy
     return {**session, 'state': state}

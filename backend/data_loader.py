@@ -69,6 +69,21 @@ def load_author_nodes() -> dict:
     with open(local_nodes, "r") as f:
         _author_nodes = json.load(f)
     _assert_author_nodes_schema(_author_nodes)
+    # The roster controls display names; OpenAlex names are search aliases on the
+    # same identity, never additional people or a reason to merge identities.
+    metadata_file = os.path.join(LOCAL_DATA_DIR, "graph", "author_metadata.json")
+    if os.path.exists(metadata_file):
+        with open(metadata_file, encoding="utf-8") as source:
+            metadata = json.load(source)
+        for row in metadata:
+            if not row.get("is_core"):
+                continue
+            node = _author_nodes.get(str(row["id"]))
+            if node:
+                features = node["features"]
+                features["FullName"] = row.get("FullName") or features["FullName"]
+                features["name_aliases"] = list(dict.fromkeys(name for name in
+                    [row.get("openalex_name"), *(row.get("name_aliases") or [])] if name))
     return _author_nodes
 
 

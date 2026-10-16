@@ -864,9 +864,13 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
     profile = None
     choices = getattr(req, "context_choices", None)
     from context_selection import resolve_references
-    refs = [r.model_dump() for r in (getattr(choices,'selected_publications',None) or [])]
+    own_id = services.library.canonical_author(req.aid) if services.library is not None else req.aid
+    refs = [r.model_dump() for r in (getattr(choices,'selected_publications',None) or [])
+            if (services.library.canonical_author(r.author_id) if services.library is not None else r.author_id) == own_id]
     legacy = (getattr(choices,'paper_titles',None) or []) if getattr(choices,'paper_scope',None) == 'chosen' else []
-    services.publication_filters = [f.model_dump() for f in (getattr(choices,'publication_filters',None) or [])]
+    services.publication_filters = [f.model_dump() for f in (getattr(choices,'publication_filters',None) or [])
+        if (services.library.canonical_author(f.author_id) if services.library is not None else f.author_id) == own_id]
+    services.context_question = req.user_input
     services.publication_scope = 'selected' if refs or legacy else getattr(choices,'publication_scope','eligible')
     req._publication_scope = services.publication_scope
     req._publication_filters = services.publication_filters
@@ -910,11 +914,11 @@ async def stream_research_turn(req, services: ResearchTools, model: str) -> Asyn
         recommendation_scope["from_year"] = from_year
     selected = []
     for pid in list(dict.fromkeys(str(p) for p in req.context_person_ids))[:8]:
-        if pid != services.self_id and (person := await call(services._person, pid, "", 0)):
+        if pid != services.self_id and (person := await call(services._person, pid, req.user_input, 3)):
             selected.append({"author_id": person["author_id"], "name": person["name"],
                              "affiliation": person.get("affiliation", ""),
                              "topics": person.get("research_topics") or [],
-                             "papers": [p for p in selected_publications if p["author_id"] == person["author_id"]]})
+                             "papers": person.get("papers") or []})
     tools = [resolve_person, read_person_evidence, search_people, find_similar_work, find_paper_audience, explore_coauthors, assemble_team, read_context]
     if services.path is not None:
         tools.append(get_connection)
