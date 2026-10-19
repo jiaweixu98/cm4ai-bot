@@ -2278,10 +2278,11 @@ async def attachment_text(req: AttachmentTextRequest):
     try:
         data = attachments.decode(req.data_base64)
         if suffix == ".docx":
-            text = attachments.docx_text(data)
+            text = await asyncio.to_thread(attachments.docx_text, data)
         else:
-            text = await asyncio.to_thread(attachments.pdf_text, _get_openai_client(),
-                                           [MODEL_NAME_CHAT, _CHAT_FALLBACK_MODEL], data, req.filename)
+            async with llm_request_slot("attachment-extraction"):
+                text = await asyncio.to_thread(attachments.pdf_text, _get_openai_client(),
+                                               [MODEL_NAME_CHAT, _CHAT_FALLBACK_MODEL], data, req.filename)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         logger.warning("Attachment not readable: %s", type(exc).__name__)
         raise HTTPException(status_code=422, detail="Could not read this document") from None
@@ -2291,14 +2292,14 @@ async def attachment_text(req: AttachmentTextRequest):
 
 
 @app.get("/api/chat-sessions")
-async def list_sessions(request: Request, aid: str | None = None, intent: str | None = None):
+def list_sessions(request: Request, aid: str | None = None, intent: str | None = None):
     identity = _require_matrix_session_identity(request)
     sessions = list_chat_sessions(identity["orcid"], aid, intent)
     return {"sessions": sessions}
 
 
 @app.get("/api/chat-sessions/{session_id}")
-async def get_session(session_id: str, request: Request):
+def get_session(session_id: str, request: Request):
     identity = _require_matrix_session_identity(request)
     session = get_chat_session(session_id, identity["orcid"])
     if not session:
@@ -2307,7 +2308,7 @@ async def get_session(session_id: str, request: Request):
 
 
 @app.delete("/api/chat-sessions/{session_id}")
-async def remove_session(session_id: str, request: Request):
+def remove_session(session_id: str, request: Request):
     identity = _require_matrix_session_identity(request)
     try:
         uuid.UUID(session_id)
@@ -2319,7 +2320,7 @@ async def remove_session(session_id: str, request: Request):
 
 
 @app.post("/api/chat-sessions")
-async def create_session(req: ChatSessionUpsertRequest, request: Request):
+def create_session(req: ChatSessionUpsertRequest, request: Request):
     identity = _require_matrix_session_identity(request)
     focal_author_name = (req.focal_author_name or "").strip() or _get_user_name(req.aid)
     session = create_chat_session(
@@ -2334,7 +2335,7 @@ async def create_session(req: ChatSessionUpsertRequest, request: Request):
 
 
 @app.put("/api/chat-sessions/{session_id}")
-async def save_session(session_id: str, req: ChatSessionUpsertRequest, request: Request):
+def save_session(session_id: str, req: ChatSessionUpsertRequest, request: Request):
     identity = _require_matrix_session_identity(request)
     focal_author_name = (req.focal_author_name or "").strip() or _get_user_name(req.aid)
     try:
