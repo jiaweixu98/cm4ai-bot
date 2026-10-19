@@ -21,7 +21,6 @@ function groupSessions(sessions) {
 
 export default function HistorySidebar({
   sessions,
-  currentIntent,
   currentSessionId,
   sessionStatus,
   signedIn,
@@ -31,6 +30,7 @@ export default function HistorySidebar({
   onToggle,
   onNewSession,
   onSelectSession,
+  onRemoveSession,
   onRetry,
   you,
 }) {
@@ -53,7 +53,7 @@ export default function HistorySidebar({
         </button>
         {expanded && (
           <div className="history-brand" aria-label="Ask TalentKG chats">
-            <div className="product-mark" aria-hidden="true">T</div>
+            <div className="product-mark" aria-hidden="true">KG</div>
             <span className="product-name">Ask TalentKG</span>
           </div>
         )}
@@ -86,19 +86,17 @@ export default function HistorySidebar({
               <section key={group.id} className="history-group" aria-label={group.label}>
                 <h2 className="history-group-label">{group.label}</h2>
                 {group.items.map((session) => (
+                  <div className="history-session-row" key={session.id}>
                   <button
-                    key={session.id}
                     className={`session-chip ${session.id === currentSessionId ? "active" : ""}`}
                     onClick={() => onSelectSession(session.id)}
                     type="button"
                   >
                     <span className="session-chip-title">{session.title || "Untitled chat"}</span>
-                    <span className="session-chip-time">
-                      {session.intent && session.intent !== currentIntent
-                        ? `${session.intent === "mentor" ? "Mentor" : "Team"}, ${relativeTime(session.last_message_at)}`
-                        : relativeTime(session.last_message_at)}
-                    </span>
+                    <span className="session-chip-time">{relativeTime(session.last_message_at)}</span>
                   </button>
+                  <button className="session-remove" type="button" aria-label={`Remove chat ${session.title || "Untitled chat"}`} title="Remove from history" disabled={sessionStatus.loading || sessionStatus.saving} onClick={() => onRemoveSession(session.id)}>×</button>
+                  </div>
                 ))}
               </section>
             ))

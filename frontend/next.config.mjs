@@ -8,12 +8,16 @@ const nextConfig = {
       process.env.MATRIX_BACKEND_URL ||
       "http://127.0.0.1:8100"
     ).replace(/\/$/, "");
-    return [
+    const graphUrl = (process.env.GRAPH_BACKEND_URL || "http://127.0.0.1:4173").replace(/\/$/, "");
+    // Account handlers (including dynamic researcher IDs) must run before the
+    // generic backend proxy. Array rewrites run before dynamic filesystem routes.
+    return {fallback:[
+      ...["research-interests", "research-topics"].map(path => ({source:`/api/${path}`,destination:`${graphUrl}/api/${path}`})),
       {
         source: "/api/:path*",
         destination: `${backendUrl}/api/:path*`,
       },
-    ];
+    ]};
   },
 };
 

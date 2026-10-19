@@ -74,6 +74,7 @@ def ensure_session_store() -> None:
                     ON matrix_chat_sessions (owner_orcid, focal_author_id, last_message_at DESC)
                     """
                 )
+                cur.execute("ALTER TABLE matrix_chat_sessions ADD COLUMN IF NOT EXISTS hidden_at TIMESTAMPTZ")
             conn.commit()
 
         _SESSION_STORE_READY = True
@@ -201,7 +202,7 @@ def list_chat_sessions(
     ensure_session_store()
     intent_key = str(intent or "").strip().lower()
     focal_key = str(focal_author_id or "").strip()
-    conditions = ["owner_orcid = %s", "jsonb_array_length(messages) > 0"]
+    conditions = ["owner_orcid = %s", "hidden_at IS NULL", "jsonb_array_length(messages) > 0"]
     params: list[Any] = [owner_orcid]
     if focal_key:
         conditions.append("focal_author_id = %s")
@@ -257,7 +258,7 @@ def get_chat_session(session_id: str, owner_orcid: str) -> dict[str, Any] | None
                     updated_at,
                     last_message_at
                 FROM matrix_chat_sessions
-                WHERE id = %s AND owner_orcid = %s
+                WHERE id = %s AND owner_orcid = %s AND hidden_at IS NULL
                 """,
                 (session_id, owner_orcid),
             )
@@ -376,6 +377,7 @@ def save_chat_session(
                         ELSE matrix_chat_sessions.last_message_at
                     END
                 WHERE matrix_chat_sessions.owner_orcid = EXCLUDED.owner_orcid
+                  AND matrix_chat_sessions.hidden_at IS NULL
                   AND jsonb_array_length(EXCLUDED.messages) >= jsonb_array_length(matrix_chat_sessions.messages)
                 RETURNING
                     id,
@@ -414,3 +416,19 @@ def save_chat_session(
             return current
         raise PermissionError("Session does not belong to the authenticated user")
     return _serialize_session_row(row, include_full=True)
+
+
+def hide_chat_session(session_id: str, owner_orcid: str) -> bool:
+    """Remove from owner-facing history while retaining messages for analysis.
+
+    The timestamp is a tombstone: late autosaves cannot unhide or overwrite it.
+    """
+    ensure_session_store()
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE matrix_chat_sessions
+                SET hidden_at = COALESCE(hidden_at, NOW())
+                WHERE id = %s AND owner_orcid = %s RETURNING id""", (session_id, owner_orcid))
+            found = cur.fetchone() is not None
+        conn.commit()
+    return found

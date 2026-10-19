@@ -368,3 +368,11 @@ export async function submitErrorReport({
   if (response.ok) return response.json();
   throw new Error(`Error report submission failed (${response.status})`);
 }
+
+export async function removeChatSession({ sessionId, authToken }) {
+  const response = await fetch(matrixApiPath(`/api/chat-sessions/${encodeURIComponent(sessionId)}`), {
+    method: "DELETE", headers: withMatrixAuth({}, authToken), signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw new Error("Could not remove this chat.");
+  return response.json();
+}

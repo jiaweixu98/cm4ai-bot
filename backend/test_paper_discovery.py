@@ -252,6 +252,55 @@ class DiscoveryTests(unittest.TestCase):
         exact=explore_people(self.library,'1',topics=['clinical phenotyping'],from_year=2025,to_year=2025,coauthors_only=True)
         self.assertEqual([p['author_id'] for p in exact['people']],['2'])
 
+    def test_all_topics_intersect_researchers_across_eligible_papers(self):
+        topics=['clinical phenotyping','ocean']
+        any_result=explore_people(self.library,topics=topics)
+        self.assertEqual({p['author_id'] for p in any_result['people']},{'1','2','3','4'})
+        both=explore_people(self.library,topics=topics,topic_match='all',limit=1)
+        self.assertEqual([p['author_id'] for p in both['people']],['1'])
+        self.assertEqual(both['total'],1)
+        self.assertFalse(both['has_more'])
+        self.assertEqual(explore_people(self.library,topics=topics,topic_match='all',offset=1)['people'],[])
+        self.assertEqual(explore_people(self.library,topics=topics,topic_match='all',from_year=2024)['people'],[])
+        self.assertEqual(explore_people(self.library,topics=['ocean','ocean'],topic_match='all')['total'],2)
+        self.assertEqual(explore_people(self.library,topic_match='all')['total'],4)
+        self.assertEqual(explore_people(self.library,topics=topics,topic_match='all',coauthors_only=True,author_id='1')['total'],0)
+        with sqlite3.connect(self.state) as db:
+            db.execute("INSERT INTO excluded_links VALUES('test-v1',1,'W1003')")
+        self.assertEqual(explore_people(self.library,topics=topics,topic_match='all')['people'],[])
+
+    def test_legacy_personal_notes_survive_without_becoming_active_context(self):
+        from context_selection import revalidate_session
+        personal={'interests':'Historical note','contacts':[{'name':'Prior connection'}],'useInterests':True}
+        state=revalidate_session({'aid':'1','state':{'contextChoices':{'personalContext':personal}}},self.library)['state']
+        self.assertEqual(state['contextChoices']['legacyPersonalContext'],personal)
+        self.assertEqual(state['contextChoices']['personalContext']['interests'],'')
+        self.assertEqual(state['contextChoices']['personalContext']['contacts'],[])
+        restored=revalidate_session({'aid':'1','state':state},self.library)
+        self.assertEqual(restored['state']['contextChoices']['legacyPersonalContext'],personal)
+
+    def test_added_people_ignore_legacy_filters_and_use_live_evidence(self):
+        from research_tools import ResearchTools
+        from context_selection import revalidate_session
+        tools=ResearchTools(lambda *_:[],lambda aid:{'name':f'Person {aid}'},lambda *_:[],library=self.library,self_id='3')
+        tools.publication_scope='selected';tools.selected_publication_refs=[]
+        tools.publication_filters=[{'author_id':'1','affiliation':'invalid-old-filter'}]
+        person=tools.read_context('3',['1'],[])['selected_people'][0]
+        self.assertEqual({p['work_id'] for p in person['papers']},{'W1001','W1003'})
+        self.assertEqual(tools.explore_coauthors('1','','','',None,None)['status'],'ok')
+        choices=revalidate_session({'aid':'3','state':{'contextChoices':{
+            'publicationScope':'selected','selectedPapers':[{'author_id':'1','work_id':'W1001'}],
+            'publicationFilters':[{'author_id':'1','affiliation':'invalid-old-filter'}],
+            'personalContext':{'topics':['clinical phenotyping'],'useInterests':True,'contacts':[]}
+        }}},self.library)['state']['contextChoices']
+        self.assertEqual(choices['selectedPapers'],[])
+        self.assertEqual(choices['publicationFilters'],[])
+        self.assertEqual(choices['publicationScope'],'selected')
+        self.assertEqual(choices['personalContext']['topics'],['clinical phenotyping'])
+        with sqlite3.connect(self.state) as db:
+            db.execute("INSERT INTO excluded_links VALUES('test-v1',1,'W1003')")
+        self.assertEqual([p['work_id'] for p in tools.read_context('3',['1'],[])['selected_people'][0]['papers']],['W1001'])
+
     def test_selected_context_is_live_and_automatic_papers_do_not_migrate(self):
         from context_selection import resolve_references, revalidate_session
         ref={'author_id':'2','work_id':'W1001'}
@@ -271,7 +320,7 @@ class DiscoveryTests(unittest.TestCase):
         initial=tools.read_context('1',['2'],[])
         self.assertEqual(initial['profile_context']['topics'],['clinical phenotyping'])
         self.assertEqual([p['work_id'] for p in initial['profile_context']['papers']],['W1001','W1003'])
-        self.assertEqual(initial['selected_people'][0]['papers'],[])
+        self.assertEqual([p['work_id'] for p in initial['selected_people'][0]['papers']],['W1001'])
         self.assertEqual(initial['selected_publications'],[])
         tools.selected_publication_refs=[{'author_id':'1','work_id':'W1001'}]
         tools.publication_scope='selected'

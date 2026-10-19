@@ -3789,3 +3789,11 @@ body,
 .personal-context-actions { display:flex; flex-wrap:wrap; gap:8px 16px; margin:12px 0; }
 .personal-context-storage { margin-top:18px; padding-top:12px; border-top:1px solid #e3e8ed; }
 .personal-context button:disabled { opacity:.45; cursor:not-allowed; }
+.history-session-row { display:flex; align-items:center; gap:4px; min-width:0; }
+.history-session-row .session-chip { flex:1; min-width:0; }
+.session-remove { flex-shrink:0; border:0; border-radius:6px; width:28px; height:32px; background:transparent; color:var(--matrix-text-3); cursor:pointer; font-size:18px; }
+.session-remove:hover { background:var(--matrix-bg-muted); color:var(--matrix-text); }
+
+.product-mark, .message-avatar-assistant {font-size:12px;font-weight:700;letter-spacing:-.04em;flex-shrink:0;}
+.session-remove {display:grid;place-items:center;}
+.session-remove:focus-visible {outline:2px solid var(--matrix-text-2);outline-offset:2px;}

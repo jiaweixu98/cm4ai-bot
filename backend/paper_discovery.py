@@ -154,14 +154,16 @@ def _affiliations(library, pairs):
 
 def explore_people(library, author_id='', topics=(), specialty='', institution='', geography='',
                    from_year=None, to_year=None, coauthors_only=False, offset=0, limit=500,
-                   locations=None, affiliation_lookup=None, work_ids=None, publication_affiliation='all'):
-    """One filtering contract for the Graph and MATRIX. All publication constraints
-    apply to the same retained paper; geography uses current trusted affiliations."""
+                   locations=None, affiliation_lookup=None, work_ids=None, publication_affiliation='all', topic_match='any'):
+    """Apply publication constraints before counting researchers. In all-topic mode,
+    different eligible papers may cover each topic. Geography uses current trusted affiliations."""
     if from_year is not None and to_year is not None and from_year > to_year:
         raise ValueError('The start year must be before the end year')
+    if topic_match not in {'any', 'all'}:
+        raise ValueError('Invalid topic match mode')
     revision = library.correction_revision()
     cache_key = (revision,str(author_id),tuple(topics),specialty,institution,geography,from_year,to_year,coauthors_only,locations,affiliation_lookup,
-                 None if work_ids is None else tuple(sorted(set(work_ids))),publication_affiliation)
+                 None if work_ids is None else tuple(sorted(set(work_ids))),publication_affiliation,topic_match)
     with library._explore_lock:
         cached = library._explore_cache.get(cache_key)
         if cached is not None:
@@ -185,7 +187,7 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
         matched_works = set(_work_ids_for_rowids(library, scores).values())
         terms = library.query_terms(specialty)
         weights = {term: library.term_weight(term) for term in terms}
-    wanted_topics = [str(t).strip().casefold() for t in topics if str(t).strip()]
+    wanted_topics = sorted({str(t).strip().casefold() for t in topics if str(t).strip()})
     if wanted_topics:
         conditions.append('lower(p.primary_topic) IN (' + ','.join('?' for _ in wanted_topics) + ')'); args.extend(wanted_topics)
     scope_sql, scope_args = ' AND '.join(conditions) or '1', list(args)
@@ -194,7 +196,7 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
         conditions.append('p.rowid IN (SELECT rowid FROM papers_fts WHERE papers_fts MATCH ?)'); args.append(expression)
     clauses = ' AND '.join(conditions) or '1'
     columns = 'p.*' if terms else 'p.work_id,p.title,p.year,p.venue,p.doi,p.pmid,p.cited_by,p.primary_topic,NULL AS abstract'
-    people, coauthor_eligible = {}, {}
+    people, coauthor_eligible, covered_topics = {}, {}, {}
     rows = library._db().execute(f"""SELECT DISTINCT b.author_id,{columns} FROM visible_paper_authors b
         JOIN papers p USING(work_id) WHERE {clauses} ORDER BY p.year DESC,p.work_id,b.author_id""", args)
     for record in rows:
@@ -212,8 +214,11 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
             needed = ranked[:max(1, (len(ranked) + 1) // 2)]
             if any(term not in covered for term in needed): continue
         person = people.setdefault(aid, {'author_id': str(aid), 'matched_papers': [], 'matching_paper_count': 0})
+        covered_topics.setdefault(aid, set()).add(str(paper.get('primary_topic') or '').casefold())
         person['matching_paper_count'] += 1
         if len(person['matched_papers']) < 3: person['matched_papers'].append(paper)
+    if wanted_topics and topic_match == 'all':
+        people = {aid: person for aid, person in people.items() if set(wanted_topics) <= covered_topics[aid]}
     ordered = sorted(people.values(), key=lambda p: (-p['matching_paper_count'], -(p['matched_papers'][0]['year'] or 0), int(p['author_id'])))
     nearby_topics = []
     if specialty.strip() and not ordered:
@@ -237,7 +242,7 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
     total = len(ordered)
     result = {'status': 'ok' if ordered else 'empty', 'people': ordered, 'total': total,
             'offset': offset, 'limit': limit, 'has_more': offset+limit < total,
-            'filters': dict(author_id=author_id,topics=list(topics),specialty=specialty,institution=institution,geography=geography,
+            'filters': dict(author_id=author_id,topics=list(topics),topic_match=topic_match,specialty=specialty,institution=institution,geography=geography,
                             from_year=from_year,to_year=to_year,coauthors_only=coauthors_only),
             'nearby_topics': nearby_topics,
             'geography_basis': 'current_trusted_affiliations',

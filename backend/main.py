@@ -51,6 +51,7 @@ from retriever import Retriever
 from session_store import (
     create_chat_session,
     get_chat_session,
+    hide_chat_session,
     list_chat_sessions,
     save_chat_session,
     validate_matrix_user_token,
@@ -961,13 +962,12 @@ def _author_name_records() -> list[tuple[str, str, str, str, bool]]:
         normalized_name = _normalize_person_name(name)
         if not normalized_name:
             continue
-        records.append((
-            normalized_name,
-            name,
-            str(features.get("Affiliation") or "").strip(),
-            str(author_id),
-            bool(features.get("Bridge2AISeedAuthor")),
-        ))
+        for search_name in dict.fromkeys([name, *(features.get("name_aliases") or [])]):
+            records.append((
+                _normalize_person_name(search_name), name,
+                str(features.get("Affiliation") or "").strip(), str(author_id),
+                bool(features.get("Bridge2AISeedAuthor")),
+            ))
     _author_name_index = records
     return records
 
@@ -990,8 +990,11 @@ def _find_people_by_name(name: str, limit: int = 8) -> list[dict]:
             match_rank = 3
         else:
             continue
-        matches.append((match_rank, full_name.casefold(), author_id, affiliation, is_bridge2ai_member))
-    matches.sort(key=lambda row: (row[0], row[1], row[2]))
+        matches.append((match_rank, not is_bridge2ai_member, full_name, author_id, affiliation, is_bridge2ai_member))
+    matches.sort(key=lambda row: (row[0], row[1], row[2].casefold(), row[3]))
+    unique = {}
+    for row in matches:
+        unique.setdefault(row[3], row)
     return [
         {
             "author_id": author_id,
@@ -999,7 +1002,7 @@ def _find_people_by_name(name: str, limit: int = 8) -> list[dict]:
             "affiliation": _get_author_details(author_id).get("affiliation", ""),
             "is_bridge2ai_member": is_bridge2ai_member,
         }
-        for _, full_name, author_id, affiliation, is_bridge2ai_member in matches[:max(1, min(limit, 8))]
+        for _, _, full_name, author_id, affiliation, is_bridge2ai_member in list(unique.values())[:max(1, min(limit, 8))]
     ]
 
 
@@ -2275,10 +2278,11 @@ async def attachment_text(req: AttachmentTextRequest):
     try:
         data = attachments.decode(req.data_base64)
         if suffix == ".docx":
-            text = attachments.docx_text(data)
+            text = await asyncio.to_thread(attachments.docx_text, data)
         else:
-            text = await asyncio.to_thread(attachments.pdf_text, _get_openai_client(),
-                                           [MODEL_NAME_CHAT, _CHAT_FALLBACK_MODEL], data, req.filename)
+            async with llm_request_slot("attachment-extraction"):
+                text = await asyncio.to_thread(attachments.pdf_text, _get_openai_client(),
+                                               [MODEL_NAME_CHAT, _CHAT_FALLBACK_MODEL], data, req.filename)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         logger.warning("Attachment not readable: %s", type(exc).__name__)
         raise HTTPException(status_code=422, detail="Could not read this document") from None
@@ -2288,14 +2292,14 @@ async def attachment_text(req: AttachmentTextRequest):
 
 
 @app.get("/api/chat-sessions")
-async def list_sessions(request: Request, aid: str | None = None, intent: str | None = None):
+def list_sessions(request: Request, aid: str | None = None, intent: str | None = None):
     identity = _require_matrix_session_identity(request)
     sessions = list_chat_sessions(identity["orcid"], aid, intent)
     return {"sessions": sessions}
 
 
 @app.get("/api/chat-sessions/{session_id}")
-async def get_session(session_id: str, request: Request):
+def get_session(session_id: str, request: Request):
     identity = _require_matrix_session_identity(request)
     session = get_chat_session(session_id, identity["orcid"])
     if not session:
@@ -2303,8 +2307,20 @@ async def get_session(session_id: str, request: Request):
     return {"session": revalidate_session(session,load_paper_library())}
 
 
+@app.delete("/api/chat-sessions/{session_id}")
+def remove_session(session_id: str, request: Request):
+    identity = _require_matrix_session_identity(request)
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session id") from None
+    if not hide_chat_session(session_id, identity["orcid"]):
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
+
+
 @app.post("/api/chat-sessions")
-async def create_session(req: ChatSessionUpsertRequest, request: Request):
+def create_session(req: ChatSessionUpsertRequest, request: Request):
     identity = _require_matrix_session_identity(request)
     focal_author_name = (req.focal_author_name or "").strip() or _get_user_name(req.aid)
     session = create_chat_session(
@@ -2319,7 +2335,7 @@ async def create_session(req: ChatSessionUpsertRequest, request: Request):
 
 
 @app.put("/api/chat-sessions/{session_id}")
-async def save_session(session_id: str, req: ChatSessionUpsertRequest, request: Request):
+def save_session(session_id: str, req: ChatSessionUpsertRequest, request: Request):
     identity = _require_matrix_session_identity(request)
     focal_author_name = (req.focal_author_name or "").strip() or _get_user_name(req.aid)
     try:
@@ -2651,6 +2667,7 @@ async def author_publications(aid: str, q: str = '', offset: int = 0, limit: int
 class ExploreRequest(BaseModel):
     author_id: str = ''
     topics: list[str] = Field(default_factory=list,max_length=8)
+    topic_match: Literal['any', 'all'] = 'any'
     specialty: str = Field(default='',max_length=200)
     institution: str = Field(default='',max_length=200)
     geography: str = Field(default='',max_length=200)
@@ -2678,7 +2695,7 @@ async def graph_explore(req: ExploreRequest):
     try:
         result = await asyncio.to_thread(explore_people,library,aid,req.topics,req.specialty,req.institution,req.geography,
                                         req.from_year,req.to_year,req.coauthors_only,req.offset,req.limit,
-                                        affiliation_lookup=_trusted_affiliations,work_ids=req.work_ids,publication_affiliation=req.publication_affiliation)
+                                        affiliation_lookup=_trusted_affiliations,work_ids=req.work_ids,publication_affiliation=req.publication_affiliation,topic_match=req.topic_match)
         result['matching_ids'] = [p['author_id'] for p in result['people']]
         return result
     except ValueError as exc: raise HTTPException(status_code=400,detail=str(exc))
