@@ -16,6 +16,8 @@ const account=randomUUID(),subject='conference-chat-'+randomUUID(),owner='google
 const values=new Map(),cookies={get:k=>values.get(k),set:(k,v)=>values.set(k,v),delete:k=>values.delete(k)};
 let auth,sql,browser,page;
 const errors=[],requests=[];
+let replyMode='normal',releaseReply;
+let cardPaper;
 const base='http://127.0.0.1:3100';
 try {
   auth=await server.ssrLoadModule('/src/lib/server/authSession.ts');
@@ -27,12 +29,28 @@ try {
   await auth.createSession(cookies,new URL('http://127.0.0.1:4173'),{provider:'google',subject,name:'Chat browser test',accountId:account});
   const tokenResponse=await fetch('http://127.0.0.1:4173/api/matrix/session-auth',{headers:{Cookie:`bridge_session=${values.get('bridge_session')}`}});
   assert.equal(tokenResponse.status,200);const {token}=await tokenResponse.json();
+  cardPaper=(await (await fetch(base+'/api/author/5106027423/publications?limit=1')).json()).papers[0];
   browser=await chromium.launch({headless:true,args:['--disable-dev-shm-usage']});
   const context=await browser.newContext({viewport:{width:1440,height:1000}});
   await context.addCookies([{name:'bridge_session',value:values.get('bridge_session'),url:base}]);
   await context.addInitScript(value=>sessionStorage.setItem('matrix_user_token',value),token);
   await context.route('**/api/chat-lite',async route=>{
     requests.push(route.request().postDataJSON());
+    if(replyMode==='busy') {
+      await route.fulfill({status:200,contentType:'text/event-stream',body:'event: error\ndata: {"error":"Server is busy; please retry shortly."}\n\n'});
+      return;
+    }
+    if(replyMode==='delayed') {
+      await new Promise(resolve=>{releaseReply=resolve;});
+      await route.fulfill({json:{action:'agent',reply:'Late response must stay hidden.',result_update:'keep'}}).catch(()=>{});
+      return;
+    }
+    if(replyMode==='cards') {
+      await route.fulfill({json:{action:'agent',reply:'A publication-backed card for save-action testing.',result_update:'replace',
+        shortlist_kind:'researchers',shortlist_title:'Saved-person journey',shortlist:[{author_id:'5106027423',name:'Moni C. Muñoz Torres',
+          why:'Coauthored the supporting publication shown here.',papers:[{...cardPaper,evidence_id:'paper:conference-fixture'}]}]}});
+      return;
+    }
     await route.fulfill({json:{action:'agent',reply:'Conference test response.',result_update:'keep',working_context:{goal:'Find biomedical collaborators',requirements:[]}}});
   });
   page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',e=>errors.push(e.message));
@@ -118,6 +136,48 @@ try {
   assert.equal(late.status,403);
   await page.reload({waitUntil:'networkidle'});
   assert.equal(await rail.getByText('Conference retained conversation',{exact:true}).count(),0);
+  replyMode='busy';
+  await page.locator('.chat-input').fill('Keep this research question for retry');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Server is busy; please retry shortly.',{exact:true}).waitFor();
+  const failedRequest=requests.at(-1);
+  replyMode='normal';
+  await page.locator('.message-user').last().getByRole('button',{name:'Retry',exact:true}).click();
+  await page.getByText('Conference test response.',{exact:true}).waitFor();
+  assert.equal(requests.at(-1).user_input,failedRequest.user_input);
+  assert.deepEqual(requests.at(-1).context_choices,failedRequest.context_choices);
+  replyMode='delayed';
+  await page.locator('.chat-input').fill('Stop this research request');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByRole('button',{name:'Stop current request',exact:true}).click();
+  await page.getByText('Stopped.',{exact:true}).waitFor();
+  assert.equal(typeof releaseReply,'function');releaseReply();
+  replyMode='normal';
+  await page.locator('.chat-input').fill('Continue after stopping');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByRole('button',{name:'Send message',exact:true}).waitFor();
+  assert.equal(await page.getByText('Late response must stay hidden.',{exact:true}).count(),0);
+  console.log('SSE busy failure preserves the question/context for Retry; Stop hides late results and the next request works');
+  assert.equal((await context.request.delete(graphBase+'/api/saved-people/5106027423',
+    {headers:{Origin:graphBase},data:{deletedAt:new Date().toISOString()}})).status(),200);
+  await page.reload({waitUntil:'networkidle'});
+  replyMode='cards';
+  await page.locator('.chat-input').fill('Show a card to test saving');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const savedCard=page.getByRole('article',{name:'Moni C. Muñoz Torres',exact:true});
+  await savedCard.waitFor();
+  const saved=page.waitForResponse(r=>r.url().endsWith('/api/saved-people')&&r.request().method()==='PUT');
+  await savedCard.getByRole('button',{name:'Save Moni C. Muñoz Torres',exact:true}).click();
+  assert.equal((await saved).status(),200);
+  await savedCard.getByRole('button',{name:'Remove from saved people Moni C. Muñoz Torres',exact:true}).waitFor();
+  assert((await (await context.request.get(graphBase+'/api/saved-people')).json()).people.some(p=>p.authorId===5106027423));
+  await page.reload({waitUntil:'networkidle'});
+  await savedCard.getByRole('button',{name:'Remove from saved people Moni C. Muñoz Torres',exact:true}).waitFor();
+  const unsaved=page.waitForResponse(r=>r.url().endsWith('/api/saved-people/5106027423')&&r.request().method()==='DELETE');
+  await savedCard.getByRole('button',{name:'Remove from saved people Moni C. Muñoz Torres',exact:true}).click();
+  assert.equal((await unsaved).status(),200);
+  assert(!(await (await context.request.get(graphBase+'/api/saved-people')).json()).people.some(p=>p.authorId===5106027423));
+  console.log('Chat result Save/Remove use the real account API, agree with Graph and survive reload');
   await page.setViewportSize({width:390,height:844});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   assert.deepEqual(errors,[]);
