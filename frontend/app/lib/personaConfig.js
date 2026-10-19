@@ -40,20 +40,20 @@ export const GENERAL_STARTERS = [
     intent: "collaborator",
     icon: "team",
     label: "Build a team",
-    prompt: "Build a team to deploy a sepsis early-warning model across hospitals: clinical, ML and implementation expertise",
+    prompt: "I'm planning a study to deploy a sepsis early-warning model across hospitals. Who could help with the clinical, machine learning, and implementation work?",
   },
   {
     intent: "collaborator",
     icon: "sparkle",
     label: "Find a niche",
-    prompt: "I work on federated learning with EHR data. Where is a less crowded niche I could move into?",
+    prompt: "I work on federated learning with EHR data. What promising research directions could I explore?",
   },
 ];
 
 export const SHOWCASE_STARTERS = [
-  { intent: "collaborator", icon: "sparkle", label: "Explore", prompt: "Show my top 10 recorded coauthors, with supporting shared publications. Help me narrow them by publication date or current affiliation." },
-  { intent: "collaborator", icon: "team", label: "Collaborate", prompt: "Find Bridge2AI researchers for a proposed study combining clinical phenotyping and responsible AI, supported by relevant publications." },
-  { intent: "collaborator", icon: "sparkle", label: "Promote", prompt: "I’m proposing a paper combining pathway and gene-set enrichment with gene-expression networks to interpret disease-associated molecular phenotypes. Find up to four researchers whose publications make them a relevant audience. Explain each recommendation using related papers, and include different supporting publications across the recommendations where possible." },
+  { intent: "collaborator", icon: "sparkle", label: "Explore", prompt: "Who are my top 10 recorded coauthors? Which publications do we share?" },
+  { intent: "collaborator", icon: "team", label: "Collaborate", prompt: "I'm planning a study combining clinical phenotyping and responsible AI. Which Bridge2AI researchers could I collaborate with?" },
+  { intent: "collaborator", icon: "sparkle", label: "Promote", prompt: "I'm proposing a paper on pathway enrichment and gene-expression networks for interpreting disease-associated molecular phenotypes. Who would be a relevant research audience? Please suggest up to four researchers." },
 ];
 
 export function showcaseStarters(profileName, linked = Boolean(profileName)) {
@@ -61,7 +61,7 @@ export function showcaseStarters(profileName, linked = Boolean(profileName)) {
     if (starter.label !== 'Explore') return starter;
     if (!linked) return {...starter, prompt: "Help me choose a researcher and explore their recorded coauthors, with shared publications. I’d like to filter by publication date or current affiliation."};
     if (!profileName) return starter;
-    return {...starter, prompt: `Show my top 10 recorded coauthors for ${profileName}, with supporting shared publications. Help me narrow them by publication date or current affiliation.`};
+    return {...starter, prompt: 'Who are my top 10 recorded coauthors? Which publications do we share?'};
   });
 }
 
@@ -81,9 +81,9 @@ export const PERSONA_COPY = {
     emptyBody: "Ask what you want to learn. MATRIX matches that topic to Bridge2AI researchers and their papers.",
     exampleLabel: "Example questions",
     promptsIdle: [
-      "Mentor for privacy-preserving federated analysis",
-      "Mentor in responsible AI and clinical data governance",
-      "Mentor for multimodal clinical AI and imaging",
+      "I want to learn privacy-preserving federated analysis. Who could I learn from?",
+      "I'm interested in responsible AI and clinical data governance. Who could mentor me?",
+      "I want to learn how to combine clinical records and imaging with AI. Who should I look into?",
     ],
     promptMeta: [
       { icon: "packaging", label: "Federated analysis", hint: "Ask for a mentor on privacy-preserving federated analysis" },
@@ -92,9 +92,9 @@ export const PERSONA_COPY = {
     ],
     promptsConfirm: ["Search that", "Make it more specific"],
     promptsResults: [
-      "Which titles are about governance?",
+      "Which of these papers should I read to learn about governance?",
       "Who is at a different institution?",
-      "Summarize the strongest publication match",
+      "Which paper should I start with for my learning goal?",
     ],
   },
   collaborator: {
@@ -106,9 +106,9 @@ export const PERSONA_COPY = {
     emptyBody: "Ask for a method, population, or skill you need. MATRIX finds researchers whose papers cover that need.",
     exampleLabel: "Example questions",
     promptsIdle: [
-      "Single-cell and spatial omics integration",
-      "Prospective clinical validation across health systems",
-      "Clinical NLP and EHR phenotyping",
+      "Who could help me integrate single-cell and spatial omics data?",
+      "I'm planning prospective clinical validation across health systems. Who could I collaborate with?",
+      "I'm working on clinical NLP and EHR phenotyping. Who could help?",
     ],
     promptMeta: [
       { icon: "multimodal", label: "Spatial omics", hint: "Ask for help with single-cell and spatial omics integration" },

@@ -22,8 +22,7 @@ try {
  await context.route('**/api/chat-lite',route=>route.fulfill({json:{action:'agent',reply:'Context history acceptance response.',result_update:'keep',working_context:{goal:'',requirements:[]}}}));
  const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:3100/?aid=5058469124&fresh=1',{waitUntil:'networkidle'});
- await page.locator('.showcase-examples summary').click();
- await page.getByRole('button',{name:/Explore Show my top 10 recorded coauthors for Jake/}).waitFor();
+ await page.getByRole('button',{name:/Explore Who are my top 10 recorded coauthors/}).waitFor();
  const rail=page.getByRole('complementary',{name:'Chat history'});
  assert.equal(await page.getByRole('complementary',{name:'Conversation context'}).count(),0);
  assert.equal(await rail.getByText('Context',{exact:true}).count(),0);

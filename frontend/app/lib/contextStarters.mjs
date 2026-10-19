@@ -1,29 +1,37 @@
-// Keep all six workflows available, personalizing only from enabled chat context.
+// Editable researcher questions. Evidence and selection rules travel in context_choices,
+// context_person_ids and the linked viewer ID, never as appended prompt instructions.
 export function contextStarters({ choices = {}, people = [], personIds = [], linked = false, profileName = '' } = {}) {
-  const quote = value => JSON.stringify(String(value || '').trim().slice(0, 120));
   const personal = choices.personalContext || {};
-  const interests = personal.useInterests !== false ? String(personal.interests || '').trim() : '';
+  const interests = personal.useInterests !== false ? String(personal.interests || '').trim().slice(0, 600) : '';
   const selectedPeople = people.filter(p => personIds.some(id => String(id) === String(p.authorId))).slice(0, 8);
   const papers = choices.publicationScope === 'selected' ? (choices.selectedPapers || []).filter(p => p.title).slice(0, 8) : [];
-  const contacts = (personal.contacts || []).filter(p => p.included && p.name).slice(0, 20);
-  const sources = [];
-  const context = [];
-  if (interests) { sources.push('enabled interests'); context.push(`My research interests are ${quote(interests)}.`); }
-  if (papers.length) { sources.push('selected papers'); context.push(`Use these selected papers as context: ${papers.slice(0, 2).map(p => quote(p.title)).join('; ')}. Do not assume I authored them.`); }
-  if (selectedPeople.length) { sources.push('selected people'); context.push(`The researchers selected for this chat include ${selectedPeople.slice(0, 2).map(p => quote(p.name)).join(', ')}.`); }
-  if (contacts.length) { sources.push('personal connections'); context.push(`My self-reported connections include ${contacts.slice(0, 2).map(p => quote(p.name)).join(', ')}. Do not assume collaboration, availability, or a verified graph identity.`); }
-  if (linked && profileName && choices.publicationScope !== 'selected') { sources.push('linked profile'); context.push(`Use the eligible publications of ${quote(profileName)} as research context, if available.`); }
-  if (choices.publicationScope === 'selected' && !papers.length) context.push('No publications are selected as my personal context. Do not infer my background from publications.');
-  const basis = sources.length ? `Based on ${sources.join(', ')}` : 'Start with your goals';
-  const contextNote = context.length ? `\n\n${context.join(' ')}` : '';
-  const targeted = interests || papers.length || (linked && profileName && choices.publicationScope !== 'selected');
+  const hasProfile = linked && choices.publicationScope !== 'selected';
+  const basis = interests ? 'Based on your interests' : papers.length ? 'With your selected papers'
+    : hasProfile ? 'With your research profile' : 'Example question';
+  const selectedName = selectedPeople.length === 1 ? String(selectedPeople[0].name || '').slice(0, 120) : '';
+  const explore = linked ? 'Who are my top 10 recorded coauthors? Which publications do we share?'
+    : selectedPeople.length
+    ? `Show up to 10 recorded coauthors ${selectedName ? `of ${selectedName}` : 'of the researchers selected for this chat'}. Which publications do they share?`
+    : "I'd like to explore a researcher's recorded coauthors. Can you help me choose a researcher?";
   const workflows = [
-    ['Find a mentor', 'mentor', 'mentor', `Help me find a potential mentor.${targeted ? ' Use my enabled research context to identify a learning direction, and ask what I want to learn if unclear.' : ' First ask what I want to learn and what relevant experience I have.'} Support recommendations with publications; do not assume availability.`],
-    ['Build a team', 'collaborator', 'team', `Help me build a research team.${targeted ? ' Use my enabled context to suggest complementary roles, then clarify the project and expertise needed.' : ' First ask about my proposed project and the expertise needed.'} Recommend people for distinct roles with supporting evidence.`],
-    ['Find a niche', 'collaborator', 'sparkle', `Help me identify a promising research niche.${targeted ? ' Start from the themes in my enabled context.' : ' First ask which topics I want to explore.'} Explain possible gaps and adjacent directions, and distinguish supported evidence from speculation about how crowded a field is.`],
-    ['Explore', 'collaborator', 'sparkle', selectedPeople.length || (linked && profileName) ? `Explore the recorded coauthor network of ${selectedPeople.length ? (selectedPeople.length > 2 ? 'the researchers selected for this chat' : selectedPeople.map(p => quote(p.name)).join(', ')) : quote(profileName)}. Show up to 10 coauthors with supporting shared publications, and help me filter by date or affiliation. Respect my publication-context selection.` : 'Help me choose a researcher, then explore their recorded coauthors with supporting shared publications. Let me narrow the results by date or affiliation. Do not assume I have a graph profile.'],
-    ['Collaborate', 'collaborator', 'team', `Find potential collaborators for a proposed study.${targeted ? ' Ground the search in my enabled research context and clarify the study aim if needed.' : ' First ask me for the study topic and goal.'} Explain each person’s relevance using publications rather than assuming an existing relationship.`],
-    ['Promote', 'collaborator', 'sparkle', `Help me identify a relevant research audience for a paper or project.${papers.length ? ' Start with the selected papers, then ask which work I want to share.' : ' First ask what paper or project I want to share.'} Find up to four researchers and explain their relevance with different supporting publications where possible. Do not assume I authored any selected paper or contact anyone.`],
+    ['Find a mentor', 'mentor', 'mentor', interests
+      ? `I want to learn more about ${interests}. Which researchers and papers could I learn from?`
+      : "I'm a wet-lab biologist moving into AI-ready data standards. Who could I learn from?"],
+    ['Build a team', 'collaborator', 'team', interests
+      ? `I'm planning a study on ${interests}. What complementary expertise would a team need, and who could contribute?`
+      : "I'm planning a study to deploy a sepsis early-warning model across hospitals. Who could help with the clinical, machine learning, and implementation work?"],
+    ['Find a niche', 'collaborator', 'sparkle', interests
+      ? `What promising research directions could I explore at the intersection of ${interests}?`
+      : 'I work on federated learning with EHR data. What promising research directions could I explore?'],
+    ['Explore', 'collaborator', 'sparkle', explore],
+    ['Collaborate', 'collaborator', 'team', interests
+      ? `I'm planning a study on ${interests}. Which Bridge2AI researchers have relevant work I could build on?`
+      : "I'm planning a study combining clinical phenotyping and responsible AI. Which Bridge2AI researchers could I collaborate with?"],
+    ['Promote', 'collaborator', 'sparkle', papers.length
+      ? "Who would be a relevant research audience for the first paper I've selected? Please suggest up to four researchers."
+      : `I'm proposing a paper on ${interests || 'pathway enrichment and gene-expression networks for interpreting disease-associated molecular phenotypes'}. Who would be a relevant research audience? Please suggest up to four researchers.`],
   ];
-  return workflows.map(([label,intent,icon,prompt])=>({label,intent,icon,basis,prompt:prompt+contextNote}));
+  return workflows.map(([label,intent,icon,prompt]) => ({label,intent,icon,basis:label === 'Explore'
+    ? linked ? `For ${String(profileName || 'your linked profile').slice(0, 120)}` : selectedPeople.length ? 'With your selected researchers' : 'Choose a researcher'
+    : label === 'Promote' && papers.length ? 'With your selected paper' : basis,prompt}));
 }
