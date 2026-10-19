@@ -93,6 +93,20 @@ def main():
     team_answer.shortlist = [e for e in team_answer.shortlist if e.author_id in {"1", "2"}]
     team_cards = render_answer(team_answer, team_tools)["shortlist"]
     assert [(c["author_id"], c["role"]) for c in team_cards] == [("1", "alpha"), ("2", "beta")]
+    # Reproduce the live failure: refine a team, then issue a generic search for
+    # more evidence. The final cards must still be the assembled, role-ordered team.
+    team_tools.assemble_team("refined project", ["beta", "alpha"], "all", [])
+    preserved = team_tools.search_people("more evidence", ["alpha"], "all", [])
+    assert preserved["status"] == "team_preserved"
+    preserved_cards = render_answer(answer_for(team_tools), team_tools)["shortlist"]
+    assert [(c["author_id"], c["role"]) for c in preserved_cards] == [("2", "beta"), ("1", "alpha")]
+    team_tools.read_person_evidence("2", "beta")
+    assert [p["author_id"] for p in team_tools.result_people] == ["2", "1"]
+    # New user turns get a fresh tool context, so changing the task still replaces results.
+    next_turn = ResearchTools(lambda *_: [], details, search)
+    changed = next_turn.search_people("just alpha researchers", ["alpha"], "all", [])
+    assert changed["status"] == "ok"
+    assert [p["author_id"] for p in next_turn.result_people] == ["1", "2"]
 
     own = ResearchTools(lambda *_: [], details, search, self_id="2")
     assert "2" not in [p["author_id"] for p in own.search_people("q", ["alpha", "beta"], "all", [])["people"]]

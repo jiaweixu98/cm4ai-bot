@@ -1,7 +1,7 @@
 # Natural chat release candidate
 
-October 19, 2026. Branch: `fix/conference-natural-questions`, based on deployed
-MATRIX main `483864f`. The user selected **natural question + focused explanation**
+October 19, 2026. The initial candidate `fix/conference-natural-questions`, based on
+MATRIX main `483864f`, merged in PR #22 and deployed at `d143083`. The user selected **natural question + focused explanation**
 in `/home/shaked/work/conference-review-20261016/index.html`.
 
 ## Included behavior
@@ -56,8 +56,19 @@ and review state; this is scientific-catalog parity, not full runtime/data parit
   identities do not establish every production account mutation.
 - Several real accounts should rehearse together on shared Wi-Fi. No attendee-capacity
   benchmark or fairness guarantee has been established.
-- Candidate is locally validated. Main and production remain at `483864f`; public
-  mounted-route smoke belongs to the eventual controlled release.
+- The first public rerun passed Mentor but exposed an intermittent team failure:
+  `assemble_team`, `assemble_team`, then `search_people` replaced the assembled
+  team with one role-less result. Preserve that failed evidence in
+  `public-live-browser.json`; it is not an all-six public pass.
+- The follow-up `fix/preserve-assembled-team` adds a per-turn tool guard: once a team
+  is assembled, general search returns its existing role-ordered team and directs
+  evidence reading/refinement to the dedicated tools. A new user turn can still
+  change the task. The regression reproduces the failed sequence, including role
+  rendering, and tests the new-turn transition. Contract smoke and 13 focused tests
+  passed; two live team samples and a live switch to ordinary collaboration passed.
+- The final public six-example result and deployed SHA are recorded in
+  `/home/shaked/work/natural-chat-release-20261019/release.json` after the follow-up
+  release. This document records the pre-release checks and observed failure too.
 
 See [CHAT_EXAMPLES_AND_REVIEW_RULES.md](CHAT_EXAMPLES_AND_REVIEW_RULES.md) for the
 full scenario inventory and `/home/shaked/docs/CONFERENCE_REVIEW_ITEMS_2026-10-19.md`
