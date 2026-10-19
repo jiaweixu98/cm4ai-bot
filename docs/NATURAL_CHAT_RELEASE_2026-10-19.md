@@ -50,8 +50,10 @@ and review state; this is scientific-catalog parity, not full runtime/data parit
 - The six starters and five context cases are fresh single-run acceptance, not an
   exhaustive review of every follow-up, attachment format or model outcome. Niche
   counts cite external OpenAlex searches and were not independently recounted here.
-- Real Google/ORCID callbacks and real-account saved/history behavior need a human
-  acceptance pass. Browser test identities do not establish provider acceptance.
+- The user confirmed Google/ORCID account access works on production on October 19.
+  Record that as user-confirmed provider acceptance. Saved/history persistence and
+  the remaining buttons still belong to the broader user-flow pass; local test
+  identities do not establish every production account mutation.
 - Several real accounts should rehearse together on shared Wi-Fi. No attendee-capacity
   benchmark or fairness guarantee has been established.
 - Candidate is locally validated. Main and production remain at `483864f`; public
