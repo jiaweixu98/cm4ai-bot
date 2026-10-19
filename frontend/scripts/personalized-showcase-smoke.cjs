@@ -13,10 +13,10 @@ const evidencePath = process.env.CHAT_SMOKE_EVIDENCE || '/tmp/personalized-showc
     page.on('pageerror', error => errors.push(error.message));
     async function open(params) {
       await page.goto(`${base}?fresh=1&${params}`, {waitUntil: 'domcontentloaded'});
-      await page.locator('.showcase-examples summary').click();
+      await page.locator('.starter-card').first().waitFor();
     }
     async function starter(label) {
-      await page.locator('.showcase-examples .starter-card').filter({has: page.getByText(label, {exact: true})}).click();
+      await page.locator('.starter-card').filter({has: page.getByText(label, {exact: true})}).click();
       return page.getByLabel('Describe the research help you need').inputValue();
     }
     async function send(question, label) {
@@ -61,8 +61,8 @@ const evidencePath = process.env.CHAT_SMOKE_EVIDENCE || '/tmp/personalized-showc
     // This one identity-display fixture leaves catalog retrieval and the model live.
     await page.route('**/api/author/5058469124', route => route.fulfill({status: 503, json: {error: 'Profile fixture unavailable'}}));
     await open('aid=5058469124&handoff=person&context_person_id=5010789029');
-    await page.getByRole('button', {name: /^Explore Show my top 10/}).waitFor();
-    assert.match(await starter('Explore'), /^Show my top 10 recorded coauthors, with/);
+    await page.getByRole('button', {name: /^Explore Who are my top 10/}).waitFor();
+    assert.match(await starter('Explore'), /^Who are my top 10 recorded coauthors/);
     await page.unroute('**/api/author/5058469124');
     await page.getByRole('button', {name: 'Remove Gary D. Bader from this chat', exact: true}).waitFor();
     const explored = await send(await starter('Explore'), 'Viewer Explore with another selected graph person');
@@ -89,7 +89,7 @@ const evidencePath = process.env.CHAT_SMOKE_EVIDENCE || '/tmp/personalized-showc
     await page.screenshot({path: '/tmp/personalized-explore.png'});
 
     await open('aid=5010789029&handoff=person&context_person_id=5058469124');
-    await page.getByRole('button', {name: /Explore Show my top 10 recorded coauthors for Gary/}).waitFor();
+    await page.getByRole('button', {name: /Explore Who are my top 10 recorded coauthors/}).waitFor();
     const second = await send(await starter('Explore'), 'Second viewer identity');
     assert.equal(second.explore_filters.author_id, '5010789029');
 

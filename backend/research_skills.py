@@ -14,14 +14,16 @@ SKILLS = {
    current field or profile_context). The gap between the two is the requirement set.
    Ask one question only if the target skill itself is unclear.
 2. Call search_people with the original question and up to 3 requirements: the target
-   skill first, then any bridging need (e.g. "machine learning applied to wet-lab data").
-3. For the top 3 results, call get_author_info in parallel to add publication record
-   facts (works count, h-index, recent output, topics). Report only returned numbers.
+   skill first, then distinct requirements within that skill. The learner's starting
+   field is background, not an extra broad search that replaces the learning goal.
+3. Read relevant paper evidence or abstracts for the leading results to check what
+   the reader could learn. Use get_author_info only for an explicit career-record
+   question; do not add bibliometrics to an ordinary mentor recommendation.
 4. shortlist_kind = mentors. Each why-line: what this person's papers show about the
    target skill, citing their papers. Order is the search order.
 5. Blocks: one framing sentence, then a concrete learning path: which 1-2 cited papers
    to read first and what to ask each person about. Do not claim anyone teaches,
-   supervises, is available, or is senior beyond what the returned numbers show.
+   supervises, is available, or is senior based on publications.
 """,
     },
     "build_team": {
@@ -39,6 +41,9 @@ SKILLS = {
 3. Put every returned member in shortlist, in members_in_role_order order; the why-line
    names the role they fill and what their cited papers show. shortlist_kind =
    collaborators.
+   If you need better evidence for a member, use read_person_evidence, not a new
+   search_people lookup that replaces the assembled team. Refine roles with another
+   assemble_team call when the original roles do not address the project.
 4. Blocks: the cards already show each member and role, so do not list members again.
    Write one framing sentence naming the roles covered, name any role with no
    candidate, mention a member who also matches another role (also_matches_roles),
