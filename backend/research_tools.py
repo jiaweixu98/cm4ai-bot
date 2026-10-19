@@ -152,6 +152,7 @@ class ResearchTools:
     from_year: int | None = None
     _niche_reviewed: set = field(default_factory=set)
     _search_candidates: dict = field(default_factory=dict)
+    _assembled_team: dict | None = None
 
     def topic_coverage(self, author_id: str, topics: list[str]) -> dict:
         """Count a person's listed papers whose titles contain a topic's key words,
@@ -396,6 +397,13 @@ class ResearchTools:
         self._charge("search_people")
         if scope not in {"all", "bridge2ai"}:
             raise ValueError("Scope must be all or bridge2ai")
+        if self._assembled_team is not None:
+            # A later generic lookup cannot replace a role-ordered team in the same
+            # turn. Reading evidence and refining the team have dedicated tools.
+            return {**self._assembled_team, "status": "team_preserved",
+                    "next_step": "Use read_person_evidence to inspect these members, or "
+                                 "assemble_team to refine the required roles. A general "
+                                 "search does not replace the assembled team."}
         question = question.strip()[:1000]
         facets = []
         for value in requirements[:3]:
@@ -997,6 +1005,7 @@ class ResearchTools:
         scope_applied = _recommendation_scope(self.place, self.from_year)
         if scope_applied:
             payload["recommendation_scope"] = scope_applied
+        self._assembled_team = payload
         return payload
 
     # ---------- Niche analysis ----------
