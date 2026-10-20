@@ -6,9 +6,13 @@ sourced ROR locations.
 """
 import geography as geo
 import json
+from concurrent.futures import Future
 from paper_library import title_key
 from tkg_publications import normalise_institution
 
+_EXPLORE_CACHE_ENTRIES = 64
+# Bound serialized size as well as count; Python object overhead is additional.
+_EXPLORE_CACHE_BYTES = 32 * 1024 * 1024
 _MARK_CHUNK = 400
 _FETCH_ROWS = 2000
 _AUDIENCE_POOL = 40
@@ -162,13 +166,57 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
     if topic_match not in {'any', 'all'}:
         raise ValueError('Invalid topic match mode')
     revision = library.correction_revision()
-    cache_key = (revision,str(author_id),tuple(topics),specialty,institution,geography,from_year,to_year,coauthors_only,locations,affiliation_lookup,
+    generation = library.explore_cache_revision()
+    cache_key = (generation,str(author_id),tuple(topics),specialty,institution,geography,from_year,to_year,coauthors_only,locations,affiliation_lookup,
                  None if work_ids is None else tuple(sorted(set(work_ids))),publication_affiliation,topic_match)
+    def page(result):
+        if library.explore_cache_revision() != generation:
+            raise ValueError('The review state changed; try the filters again')
+        return {**result, 'people':result['people'][offset:offset+limit], 'offset':offset,
+                'limit':limit, 'has_more':offset+limit<result['total']}
     with library._explore_lock:
         cached = library._explore_cache.get(cache_key)
         if cached is not None:
             library._explore_cache.move_to_end(cache_key)
-            return {**cached, 'people':cached['people'][offset:offset+limit], 'offset':offset, 'limit':limit, 'has_more':offset+limit<cached['total']}
+        flight = library._explore_pending.get(cache_key)
+        owner = cached is None and flight is None
+        if owner:
+            flight = Future()
+            library._explore_pending[cache_key] = flight
+    if cached is not None:
+        return page(cached)
+    if not owner:
+        return page(flight.result())
+    try:
+        result = _compute_explore_people(library, author_id, topics, specialty, institution, geography,
+            from_year, to_year, coauthors_only, offset, limit, locations, affiliation_lookup,
+            work_ids, publication_affiliation, topic_match, revision)
+        page(result)  # reject edits that committed during computation
+        size = len(json.dumps(result, ensure_ascii=False).encode('utf-8'))
+        with library._explore_lock:
+            # Trusted/current affiliations may change in the separate Graph
+            # account store without a publication revision. Do not retain these
+            # results; concurrent identical calls may still share this flight.
+            if not (institution or geography) and size <= _EXPLORE_CACHE_BYTES:
+                library._explore_cache[cache_key] = result
+                library._explore_sizes[cache_key] = size
+                library._explore_bytes += size
+                while len(library._explore_cache) > _EXPLORE_CACHE_ENTRIES or library._explore_bytes > _EXPLORE_CACHE_BYTES:
+                    removed, _ = library._explore_cache.popitem(last=False)
+                    library._explore_bytes -= library._explore_sizes.pop(removed)
+            flight.set_result(result)
+        return page(result)
+    except BaseException as exc:
+        if not flight.done(): flight.set_exception(exc)
+        raise
+    finally:
+        with library._explore_lock:
+            library._explore_pending.pop(cache_key, None)
+
+
+def _compute_explore_people(library, author_id, topics, specialty, institution, geography,
+                            from_year, to_year, coauthors_only, offset, limit, locations,
+                            affiliation_lookup, work_ids, publication_affiliation, topic_match, revision):
     conditions, args = [], []
     if coauthors_only:
         if not str(author_id).isdigit(): raise ValueError('Choose a focal researcher for recorded coauthors')
@@ -197,8 +245,13 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
     clauses = ' AND '.join(conditions) or '1'
     columns = 'p.*' if terms else 'p.work_id,p.title,p.year,p.venue,p.doi,p.pmid,p.cited_by,p.primary_topic,NULL AS abstract'
     people, coauthor_eligible, covered_topics = {}, {}, {}
-    rows = library._db().execute(f"""SELECT DISTINCT b.author_id,{columns} FROM visible_paper_authors b
-        JOIN papers p USING(work_id) WHERE {clauses} ORDER BY p.year DESC,p.work_id,b.author_id""", args)
+    # For global topic filtering, reduce papers before visiting author links.
+    # Keep the planner free for focal coauthor and full-text searches.
+    join = ('papers p CROSS JOIN visible_paper_authors b ON b.work_id=p.work_id'
+            if wanted_topics and not coauthors_only and not terms
+            else 'visible_paper_authors b JOIN papers p USING(work_id)')
+    rows = library._db().execute(f"""SELECT DISTINCT b.author_id,{columns} FROM {join}
+        WHERE {clauses} ORDER BY p.year DESC,p.work_id,b.author_id""", args)
     for record in rows:
         paper = dict(record); aid = int(paper.pop('author_id'))
         if coauthors_only:
@@ -255,10 +308,7 @@ def explore_people(library, author_id='', topics=(), specialty='', institution='
     if coauthors_only:
         result['filters'].update(publication_affiliation=publication_affiliation,work_ids=work_ids)
     if library.correction_revision() != revision: raise ValueError('The review state changed; try the filters again')
-    with library._explore_lock:
-        library._explore_cache[cache_key] = result
-        while len(library._explore_cache)>3: library._explore_cache.popitem(last=False)
-    return {**result,'people':ordered[offset:offset+limit]}
+    return result
 
 
 def explore(library, author_id, specialty='', institution='', geography='', from_year=None, to_year=None,
