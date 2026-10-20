@@ -75,6 +75,7 @@ def ensure_session_store() -> None:
                     """
                 )
                 cur.execute("ALTER TABLE matrix_chat_sessions ADD COLUMN IF NOT EXISTS hidden_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE matrix_chat_sessions ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1")
             conn.commit()
 
         _SESSION_STORE_READY = True
@@ -176,6 +177,7 @@ def _serialize_session_row(row: dict[str, Any], include_full: bool = False) -> d
     state_intent = str(state_value.get("intent") or "") if isinstance(state_value, dict) else ""
     session = {
         "id": str(row["id"]),
+        "revision": int(row.get("revision", 1)),
         "owner_orcid": row["owner_orcid"],
         "owner_name": row["owner_name"],
         "focal_author_id": row["focal_author_id"],
@@ -226,7 +228,8 @@ def list_chat_sessions(
                     last_message_preview,
                     created_at,
                     updated_at,
-                    last_message_at
+                    last_message_at,
+                    revision
                 FROM matrix_chat_sessions
                 WHERE {' AND '.join(conditions)}
                 ORDER BY last_message_at DESC, created_at DESC
@@ -256,7 +259,8 @@ def get_chat_session(session_id: str, owner_orcid: str) -> dict[str, Any] | None
                     state,
                     created_at,
                     updated_at,
-                    last_message_at
+                    last_message_at,
+                    revision
                 FROM matrix_chat_sessions
                 WHERE id = %s AND owner_orcid = %s AND hidden_at IS NULL
                 """,
@@ -310,7 +314,8 @@ def create_chat_session(
                     state,
                     created_at,
                     updated_at,
-                    last_message_at
+                    last_message_at,
+                    revision
                 """,
                 (
                     session_id,
@@ -329,6 +334,10 @@ def create_chat_session(
     return _serialize_session_row(row, include_full=True)
 
 
+class SessionConflictError(Exception):
+    """The caller must preserve its draft and explicitly resolve a newer revision."""
+
+
 def save_chat_session(
     session_id: str,
     owner_orcid: str,
@@ -337,84 +346,41 @@ def save_chat_session(
     focal_author_name: str,
     messages: list[dict[str, Any]],
     state: dict[str, Any],
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     ensure_session_store()
     normalized_messages = list(messages or [])
     normalized_state = dict(state or {})
-    title = _derive_session_title(normalized_messages, normalized_state, focal_author_name)
-    preview = _last_message_preview(normalized_messages)
-
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO matrix_chat_sessions (
-                    id,
-                    owner_orcid,
-                    owner_name,
-                    focal_author_id,
-                    focal_author_name,
-                    title,
-                    last_message_preview,
-                    messages,
-                    state
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE
-                SET
-                    owner_name = EXCLUDED.owner_name,
-                    focal_author_id = EXCLUDED.focal_author_id,
-                    focal_author_name = EXCLUDED.focal_author_name,
-                    title = EXCLUDED.title,
-                    last_message_preview = EXCLUDED.last_message_preview,
-                    messages = EXCLUDED.messages,
-                    state = EXCLUDED.state,
-                    updated_at = CASE
-                        WHEN matrix_chat_sessions.messages IS DISTINCT FROM EXCLUDED.messages THEN NOW()
-                        ELSE matrix_chat_sessions.updated_at
-                    END,
-                    last_message_at = CASE
-                        WHEN matrix_chat_sessions.messages IS DISTINCT FROM EXCLUDED.messages THEN NOW()
-                        ELSE matrix_chat_sessions.last_message_at
-                    END
-                WHERE matrix_chat_sessions.owner_orcid = EXCLUDED.owner_orcid
-                  AND matrix_chat_sessions.hidden_at IS NULL
-                  AND jsonb_array_length(EXCLUDED.messages) >= jsonb_array_length(matrix_chat_sessions.messages)
-                RETURNING
-                    id,
-                    owner_orcid,
-                    owner_name,
-                    focal_author_id,
-                    focal_author_name,
-                    title,
-                    last_message_preview,
-                    messages,
-                    state,
-                    created_at,
-                    updated_at,
-                    last_message_at
-                """,
-                (
-                    session_id,
-                    owner_orcid,
-                    owner_name,
-                    str(focal_author_id),
-                    str(focal_author_name or ""),
-                    title,
-                    preview,
-                    Jsonb(normalized_messages),
-                    Jsonb(normalized_state),
-                ),
+                "SELECT * FROM matrix_chat_sessions WHERE id=%s AND owner_orcid=%s AND hidden_at IS NULL FOR UPDATE",
+                (session_id, owner_orcid),
+            )
+            current = cur.fetchone()
+            if not current:
+                raise PermissionError("Session does not belong to the authenticated user")
+            identical = (current["messages"] == normalized_messages and current["state"] == normalized_state
+                         and str(current["focal_author_id"]) == str(focal_author_id)
+                         and current["focal_author_name"] == str(focal_author_name or ""))
+            # A response may be lost after commit. Retrying the exact snapshot is safe.
+            if identical:
+                return _serialize_session_row(current, include_full=True)
+            if expected_revision is None or expected_revision != current["revision"]:
+                raise SessionConflictError("This chat changed in another tab or device. Your local conversation is still open; save a separate copy to keep both versions.")
+            cur.execute(
+                """UPDATE matrix_chat_sessions SET owner_name=%s, focal_author_id=%s,
+                    focal_author_name=%s, title=%s, last_message_preview=%s, messages=%s, state=%s,
+                    revision=revision+1, updated_at=NOW(),
+                    last_message_at=CASE WHEN messages IS DISTINCT FROM %s THEN NOW() ELSE last_message_at END
+                    WHERE id=%s AND owner_orcid=%s RETURNING *""",
+                (owner_name, str(focal_author_id), str(focal_author_name or ""),
+                 _derive_session_title(normalized_messages, normalized_state, focal_author_name),
+                 _last_message_preview(normalized_messages), Jsonb(normalized_messages), Jsonb(normalized_state),
+                 Jsonb(normalized_messages), session_id, owner_orcid),
             )
             row = cur.fetchone()
         conn.commit()
-
-    if not row:
-        # An unload flush may overtake an earlier autosave. Histories only append;
-        # an older browser must never erase a question or reply already committed.
-        current = get_chat_session(session_id, owner_orcid)
-        if current:
-            return current
-        raise PermissionError("Session does not belong to the authenticated user")
     return _serialize_session_row(row, include_full=True)
 
 
