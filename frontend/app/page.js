@@ -133,6 +133,8 @@ export default function Home() {
   const sessionSaveTimerRef = useRef(null);
   const sessionCreateRef = useRef(null);
   const sessionWriteQueueRef = useRef(Promise.resolve());
+  const sessionRevisionsRef = useRef(new Map());
+  const sessionConflictsRef = useRef(new Set());
   const sessionSnapshotRef = useRef(null);
   const lastSaveMessagesRef = useRef(null);
   const currentSessionIdRef = useRef(null);
@@ -271,6 +273,7 @@ export default function Home() {
   sessionSnapshotRef.current = { aid, focalName, matrixUserToken, messages, state: buildSessionStateSnapshot() };
 
   const applySessionSnapshot = useCallback((session) => {
+    if (session?.id) sessionRevisionsRef.current.set(session.id, session.revision);
     setFollowUps([]); // Suggestions belong to the last live response, not another chat.
     const snapshot = session?.state || {};
     const restoredMessages = (Array.isArray(session?.messages) ? session.messages : []).map(normalizeMessage);
@@ -632,6 +635,7 @@ export default function Home() {
         state: snapshot.state,
         authToken: snapshot.matrixUserToken,
       }).then(({ session }) => {
+        sessionRevisionsRef.current.set(session.id, session.revision);
         savedFingerprintRef.current = sessionFingerprint(initial, snapshot.state);
         currentSessionIdRef.current = session.id;
         setCurrentSessionId(session.id);
@@ -642,34 +646,46 @@ export default function Home() {
     return sessionCreateRef.current;
   }, [upsertSessionSummary]);
 
-  const persistSessionNow = useCallback(({ flush = false } = {}) => {
+  const persistSessionNow = useCallback(() => {
     const snapshot = sessionSnapshotRef.current;
     if (!snapshot.matrixUserToken || !hasUserMessage(snapshot.messages)) return Promise.resolve(currentSessionIdRef.current);
     const targetId = currentSessionIdRef.current;
     const fingerprint = sessionFingerprint(snapshot.messages, snapshot.state);
     const write = async () => {
       if (hiddenSessionIdsRef.current.has(targetId)) return targetId;
+      if (sessionConflictsRef.current.has(targetId)) {
+        const error = new Error("This chat changed in another tab or device. Save a separate copy to keep your conversation.");
+        error.status = 409;
+        throw error;
+      }
       if (targetId === currentSessionIdRef.current && targetId && fingerprint === savedFingerprintRef.current) return targetId;
       setSessionStatus((prev) => ({ ...prev, saving: true, error: "" }));
       const sessionId = targetId || await ensureCurrentSession(snapshot.messages);
       if (hiddenSessionIdsRef.current.has(sessionId)) return sessionId;
       const { session } = await saveChatSession({
         sessionId,
+        expectedRevision: sessionRevisionsRef.current.get(sessionId),
         aid: snapshot.aid,
         focalAuthorName: snapshot.focalName || "",
         messages: snapshot.messages,
         state: snapshot.state,
         authToken: snapshot.matrixUserToken,
       });
+      sessionRevisionsRef.current.set(sessionId, session.revision);
       if (currentSessionIdRef.current === sessionId) savedFingerprintRef.current = fingerprint;
       upsertSessionSummary(session);
       setSessionStatus((prev) => ({ ...prev, saving: false, error: "" }));
       return sessionId;
     };
-    // Save requests stay in order; an older reply cannot overwrite a newer one.
-    const pending = (flush ? write() : sessionWriteQueueRef.current.catch(() => {}).then(write)).catch((error) => {
+    // Lifecycle flushes also join the queue: two writes must not use the same revision.
+    const pending = sessionWriteQueueRef.current.catch(() => {}).then(write).catch((error) => {
       console.error("Failed to persist chat session:", error);
-      setSessionStatus((prev) => ({ ...prev, saving: false, error: "Could not save this chat." }));
+      if (error.status === 409) {
+        sessionConflictsRef.current.add(targetId || currentSessionIdRef.current);
+        setRailOpen(true);
+      }
+      setSessionStatus((prev) => ({ ...prev, saving: false, conflict: error.status === 409,
+        error: error.status === 409 ? error.message : "Could not save this chat." }));
       throw error;
     });
     sessionWriteQueueRef.current = pending;
@@ -679,14 +695,27 @@ export default function Home() {
   const retrySession = useCallback(async () => {
     try {
       setSessionStatus((prev) => ({ ...prev, loading: true, error: "" }));
-      await persistSessionNow();
+      if (sessionConflictsRef.current.has(currentSessionIdRef.current)) {
+        // Explicit user action keeps both versions; never retry a conflicting write.
+        await sessionWriteQueueRef.current.catch(() => {});
+        const snapshot = sessionSnapshotRef.current;
+        const {session} = await createChatSession({aid:snapshot.aid, focalAuthorName:snapshot.focalName,
+          messages:snapshot.messages, state:snapshot.state, authToken:snapshot.matrixUserToken});
+        sessionRevisionsRef.current.set(session.id, session.revision);
+        savedFingerprintRef.current = sessionFingerprint(snapshot.messages, snapshot.state);
+        currentSessionIdRef.current = session.id;
+        setCurrentSessionId(session.id);
+        upsertSessionSummary(session);
+      } else {
+        await persistSessionNow();
+      }
       const payload = await listChatSessions({ authToken: matrixUserToken });
       setSessions(Array.isArray(payload.sessions) ? payload.sessions : []);
       setSessionStatus({ loading: false, saving: false, error: "" });
     } catch {
       setSessionStatus({ loading: false, saving: false, error: "Could not save or load chats. Try again." });
     }
-  }, [matrixUserToken, persistSessionNow]);
+  }, [matrixUserToken, persistSessionNow, upsertSessionSummary]);
 
   const handleStop = useCallback(() => {
     chatAbortRef.current?.abort();
@@ -790,7 +819,7 @@ export default function Home() {
       await sessionWriteQueueRef.current.catch(() => {});
       if (active && hasUserMessage(snapshot.messages)) {
         await saveChatSession({sessionId,aid:snapshot.aid,focalAuthorName:snapshot.focalName || "",
-          messages:snapshot.messages,state:snapshot.state,authToken:matrixUserToken});
+          messages:snapshot.messages,state:snapshot.state,authToken:matrixUserToken,expectedRevision:sessionRevisionsRef.current.get(sessionId)});
       }
       await removeChatSession({ sessionId, authToken: matrixUserToken });
       setSessions(prev => prev.filter(session => session.id !== sessionId));
@@ -870,8 +899,8 @@ export default function Home() {
   useEffect(() => {
     const flush = () => {
       if (!matrixUserToken || !currentSessionIdRef.current) return;
-      // Start the keepalive fetch synchronously while the frame is still alive.
-      void persistSessionNow({ flush: true }).catch(() => {});
+      // Queue a keepalive save without overtaking an in-flight revision.
+      void persistSessionNow().catch(() => {});
     };
     const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
     window.addEventListener("pagehide", flush);
@@ -880,7 +909,7 @@ export default function Home() {
       window.removeEventListener("pagehide", flush);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [matrixUserToken, persistSessionNow]);
+  }, [matrixUserToken, persistSessionNow, upsertSessionSummary]);
 
   const shortlistForChat = useCallback((activeIntent = intent) => {
     return candidates.slice(0, AGENT_RESULT_LIMIT).map((candidate) => {

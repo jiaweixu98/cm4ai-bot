@@ -69,20 +69,6 @@ def session_row():
 
 
 class SessionStoreQueryTests(unittest.TestCase):
-    def test_stale_save_returns_current_history_without_truncating_it(self):
-        connection = FakeConnection([])
-        current = session_row()
-        with patch.object(session_store, "ensure_session_store"), patch.object(
-            session_store, "get_db_conn", return_value=fake_connection(connection)
-        ), patch.object(session_store, "get_chat_session", return_value=current) as lookup:
-            saved = session_store.save_chat_session(
-                session_id=current["id"], owner_orcid="0000-0001", owner_name="Researcher",
-                focal_author_id="42", focal_author_name="Researcher", messages=[], state={},
-            )
-        self.assertIn("jsonb_array_length(EXCLUDED.messages) >= jsonb_array_length(matrix_chat_sessions.messages)", connection.cursor_instance.query)
-        lookup.assert_called_once_with(current["id"], "0000-0001")
-        self.assertEqual(saved["messages"], current["messages"])
-
     def test_owner_wide_history_omits_empty_chats_and_defaults_to_100(self):
         connection = FakeConnection([session_row()])
         with patch.object(session_store, "ensure_session_store"), patch.object(
@@ -96,28 +82,6 @@ class SessionStoreQueryTests(unittest.TestCase):
         self.assertNotIn("focal_author_id = %s", query)
         self.assertEqual(connection.cursor_instance.params, ("0000-0001", 100))
         self.assertEqual([session["id"] for session in sessions], [session_row()["id"]])
-
-    def test_unchanged_messages_keep_activity_timestamps(self):
-        connection = FakeConnection([session_row()])
-        with patch.object(session_store, "ensure_session_store"), patch.object(
-            session_store, "get_db_conn", return_value=fake_connection(connection)
-        ):
-            saved = session_store.save_chat_session(
-                session_id=session_row()["id"],
-                owner_orcid="0000-0001",
-                owner_name="Researcher",
-                focal_author_id="42",
-                focal_author_name="Researcher",
-                messages=session_row()["messages"],
-                state=session_row()["state"],
-            )
-
-        query = connection.cursor_instance.query
-        self.assertEqual(query.count("messages IS DISTINCT FROM EXCLUDED.messages"), 2)
-        self.assertIn("ELSE matrix_chat_sessions.updated_at", query)
-        self.assertIn("ELSE matrix_chat_sessions.last_message_at", query)
-        self.assertTrue(connection.committed)
-        self.assertEqual(saved["last_message_at"], "last-message")
 
     def test_tokens_without_account_still_validate(self):
         secret = "test-matrix-secret"

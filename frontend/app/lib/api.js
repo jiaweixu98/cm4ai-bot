@@ -314,9 +314,10 @@ export async function createChatSession({ aid, focalAuthorName, messages, state,
   return res.json();
 }
 
-export async function saveChatSession({ sessionId, aid, focalAuthorName, messages, state, authToken }) {
+export async function saveChatSession({ sessionId, aid, focalAuthorName, messages, state, authToken, expectedRevision }) {
   const body = JSON.stringify({
     aid,
+    expected_revision: expectedRevision,
     focal_author_name: focalAuthorName || "",
     messages: messages || [],
     state: state || {},
@@ -330,7 +331,12 @@ export async function saveChatSession({ sessionId, aid, focalAuthorName, message
     headers: withMatrixAuth({ "Content-Type": "application/json" }, authToken),
     body,
   });
-  if (!res.ok) throw new Error("Session save failed");
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({}));
+    const error = new Error(payload.detail || "Session save failed");
+    error.status = res.status;
+    throw error;
+  }
   return res.json();
 }
 

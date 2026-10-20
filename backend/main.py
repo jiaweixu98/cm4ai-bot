@@ -49,6 +49,7 @@ from paper_library import title_key, PublicationDecisionsUnavailable
 from research_tools import library_paper, ResearchTools
 from retriever import Retriever
 from session_store import (
+    SessionConflictError,
     create_chat_session,
     get_chat_session,
     hide_chat_session,
@@ -2004,6 +2005,7 @@ class SavedChatMessageItem(ChatMessageItem):
 
 
 class ChatSessionUpsertRequest(BaseModel):
+    expected_revision: int | None = Field(default=None, ge=1)
     aid: str
     focal_author_name: str | None = None
     messages: list[SavedChatMessageItem] = Field(default_factory=list)
@@ -2341,6 +2343,7 @@ def save_session(session_id: str, req: ChatSessionUpsertRequest, request: Reques
     try:
         session = save_chat_session(
             session_id=session_id,
+            expected_revision=req.expected_revision,
             owner_orcid=identity["orcid"],
             owner_name=identity["name"],
             focal_author_id=req.aid,
@@ -2348,6 +2351,8 @@ def save_session(session_id: str, req: ChatSessionUpsertRequest, request: Reques
             messages=[message.model_dump() for message in req.messages],
             state=revalidate_session({"aid":req.aid,"state":req.state},load_paper_library())["state"],
         )
+    except SessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except PermissionError:
         raise HTTPException(status_code=403, detail="Forbidden")
     return {"session": revalidate_session(session,load_paper_library())}

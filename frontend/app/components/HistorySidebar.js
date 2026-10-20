@@ -74,7 +74,7 @@ export default function HistorySidebar({
           {sessionStatus.error && (
             <div className="session-status session-status-error">
               {sessionStatus.error}
-              <button type="button" className="you-more" disabled={sessionStatus.saving || sessionStatus.loading} onClick={onRetry}>Try again</button>
+              <button type="button" className="you-more" disabled={sessionStatus.saving || sessionStatus.loading || isLoading} onClick={onRetry}>{sessionStatus.conflict ? "Save a separate copy" : "Try again"}</button>
             </div>
           )}
           {!signedIn ? (
