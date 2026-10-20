@@ -198,6 +198,11 @@ class PaperLibrary:
                 reviews = [{'group_id': r['group_id'], 'state': 'rejected' if r['rejected'] else 'pending'}
                            for r in db.execute('SELECT * FROM corrections.decisions WHERE author_id=?', (int(author_id),))]
         rows = list(self.source_affiliations(author_id) if source is None else source)
+        if int(author_id) < 0:
+            reviewed = {r['group_id'] for r in reviews}
+            reviews += [{'group_id':institution_key(a.get('institution'),a.get('ror_id')),'state':'approved'}
+                        for a in rows if a.get('source')=='owner_approved' and
+                        institution_key(a.get('institution'),a.get('ror_id')) not in reviewed]
         try:
             groups = [dict(g) for g in db.execute("SELECT * FROM publication_groups WHERE author_id=? AND status!='unknown'", (int(author_id),))]
             rows = [{**a, 'ror_id': next(iter(rors))} if not a.get('ror_id') and len(rors := {
@@ -261,6 +266,13 @@ class PaperLibrary:
         return {r[0] for r in self._db().execute('SELECT pa.work_id FROM visible_paper_authors pa WHERE pa.author_id=?'+sql,[int(author_id),*args])}
 
     def topics(self, author_id, limit=6):
+        db = self._db()
+        if getattr(self._local, 'attached_decisions', False) and db.execute(
+                "SELECT 1 FROM corrections.sqlite_master WHERE name='profile_topics'").fetchone():
+            row = db.execute('SELECT topics_json FROM corrections.profile_topics WHERE author_id=?',
+                             (int(author_id),)).fetchone()
+            if row is not None:
+                return json.loads(row[0])
         sql, args, _ = self.publication_condition(author_id)
         return [r[0] for r in self._db().execute('''SELECT p.primary_topic,COUNT(*) n FROM visible_paper_authors pa
             JOIN papers p USING(work_id) WHERE pa.author_id=? AND COALESCE(p.primary_topic,'')!=''
