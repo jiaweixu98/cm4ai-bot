@@ -67,6 +67,10 @@ class PaperLibrary:
         self.path = path
         self._local = threading.local()
         self._explore_cache = OrderedDict()
+        self._explore_pending = {}
+        self._explore_sizes = {}
+        self._explore_bytes = 0
+        self._explore_stamp_db = None
         self._explore_lock = threading.RLock()
         self._metadata_lock = threading.Lock()
         self._source_affiliations = None
@@ -163,6 +167,23 @@ class PaperLibrary:
         return [dict(r) for r in self._db().execute('''SELECT p.*
             FROM visible_paper_authors pa JOIN papers p USING(work_id) WHERE pa.author_id=?
             ORDER BY p.year DESC,p.cited_by DESC,p.work_id''', (int(author_id),))]
+
+    def explore_cache_revision(self):
+        # data_version is connection-relative: use ONE dedicated connection for
+        # the shared cache, not each worker thread's connection. This also catches
+        # external corrections that did not append a decision_events row.
+        self._db()  # fail closed if the required correction store was replaced
+        with self._explore_lock:
+            if self._explore_stamp_db is None:
+                db = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+                if getattr(self._local, 'attached_decisions', False):
+                    db.execute('ATTACH DATABASE ? AS corrections', (decisions_path(),))
+                self._explore_stamp_db = db
+            db = self._explore_stamp_db
+            versions = [db.execute('PRAGMA main.data_version').fetchone()[0]]
+            if any(row[1] == 'corrections' for row in db.execute('PRAGMA database_list')):
+                versions.append(db.execute('PRAGMA corrections.data_version').fetchone()[0])
+            return tuple(versions), self.correction_revision()
 
     def correction_revision(self):
         db = self._db()
