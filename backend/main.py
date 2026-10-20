@@ -921,7 +921,7 @@ def _get_author_details(author_id: str) -> dict:
             details = _build_catalog_author_details(catalog_author)
             if library is not None:
                 from research_tools import library_paper
-                affiliations = library.affiliations(author_id,catalog_author.get('affiliations') or [])
+                affiliations = library.affiliations(author_id,catalog_author.get('source_affiliations',[]))
                 details.update(affiliations=affiliations,affiliation=primary_affiliation(affiliations),
                                topics=library.topics(author_id),papers=[library_paper(p) for p in library.publication_page(author_id,limit=24)['papers']])
             return details

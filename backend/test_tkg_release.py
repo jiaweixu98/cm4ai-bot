@@ -63,6 +63,18 @@ class ReleaseTests(unittest.TestCase):
         reviews[1]['state']='approved'
         self.assertEqual([a['institution'] for a in displayable_affiliations(row,reviews)],['ORCID Institute','Added Institute'])
 
+    def test_edited_roles_preserve_distinct_periods(self):
+        row={'affiliations':[{'institution':'Institute','source':'orcid','role_title':'Old title'},
+                             {'institution':'Institute','source':'orcid','role_title':'Another old title'}]}
+        records=[{'role_title':'Assistant Professor','start_year':2010,'end_year':2018,'is_current':False},
+                 {'role_title':'Professor','start_year':2018,'end_year':None,'is_current':True}]
+        review={'group_id':'institute','state':'approved','override':{'institution':'Institute','records':records}}
+        displayed=displayable_affiliations(row,[review])
+        self.assertEqual([{key:a[key] for key in records[0]} for a in displayed],records)
+        self.assertTrue(all(a['trusted'] and a['source']=='owner_approved' and 'records' not in a for a in displayed))
+        self.assertEqual(len(displayable_affiliations({'affiliations':[]},[review])),2)
+        self.assertEqual(row['affiliations'][0]['role_title'],'Old title')
+
     def test_refresh_uses_the_display_filter(self):
         import inspect
         from scripts import tkg_release
