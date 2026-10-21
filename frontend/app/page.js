@@ -33,6 +33,7 @@ import {
   normalizeMessage,
 } from "./lib/matrixUi";
 import { MAX_ATTACHED_FILES, readAttachedFiles } from "./lib/attachedPapers";
+import ChatStartup from "./components/ChatStartup";
 import FocalAuthorBar from "./components/FocalAuthorBar";
 import HistorySidebar from "./components/HistorySidebar";
 import YouCard from "./components/YouCard";
@@ -74,6 +75,8 @@ export default function Home() {
   const [searchIntent, setSearchIntent] = useState("collaborator");
   const [embedded, setEmbedded] = useState(false);
   const [uiReady, setUiReady] = useState(false);
+  const [startupError, setStartupError] = useState("");
+  const [startupAttempt, setStartupAttempt] = useState(0);
   const [authorInfo, setAuthorInfo] = useState(null);
   const [seekerName, setSeekerName] = useState("");
   const [matrixUserToken, setMatrixUserToken] = useState("");
@@ -353,6 +356,9 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
 
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 12000);
+    setStartupError("");
     const initialize = async () => {
       // React can replay this effect after URL cleanup. Keep the original entry
       // parameters for this mount so the replay still receives the graph person.
@@ -404,13 +410,13 @@ export default function Home() {
       setMatrixUserToken(resolvedToken);
 
       // Independent reads start together; preserve each request's failure behavior.
-      const personalContextPromise = loadResearchContext().then(profile => ({profile}), () => ({error:true}));
+      const personalContextPromise = loadResearchContext(controller.signal).then(profile => ({profile}), () => ({error:true}));
       const historyPromise = resolvedToken
-        ? listChatSessions({authToken:resolvedToken}).then(payload=>({payload}), error=>({error}))
+        ? listChatSessions({authToken:resolvedToken, signal:controller.signal}).then(payload=>({payload}), error=>({error}))
         : Promise.resolve(null);
       const [fetchedAuthor, fetchedGraphPerson] = await Promise.all([
-        aidParam !== UNLINKED_AID ? fetchAuthor(aidParam).catch(()=>null) : null,
-        graphHandoff && Number.isInteger(graphContextNumber) ? fetchAuthor(graphContextId).catch(()=>null) : null,
+        aidParam !== UNLINKED_AID ? fetchAuthor(aidParam, controller.signal).catch(error => { if (error.status === 404) return null; throw error; }) : null,
+        graphHandoff && Number.isInteger(graphContextNumber) ? fetchAuthor(graphContextId, controller.signal).catch(error => { if (error.status === 404) return null; throw error; }) : null,
       ]);
       if (cancelled) return;
       setAuthorInfo(fetchedAuthor);
@@ -440,7 +446,7 @@ export default function Home() {
 
       let initialPersonalContext = structuredClone(EMPTY_RESEARCH_CONTEXT);
       const personalResult = await personalContextPromise;
-      if (personalResult.error) { if (!cancelled) setProfileNotice('Your saved research context could not be loaded. Use Manage context to retry.'); }
+      if (personalResult.error) throw new Error('Your research context could not be loaded.');
       else initialPersonalContext = personalResult.profile;
       if (cancelled) return;
       if (!resolvedToken) {
@@ -482,6 +488,7 @@ export default function Home() {
           const latestPayload = await getChatSession({
             sessionId: restoreTarget.id,
             authToken: resolvedToken,
+            signal: controller.signal,
           });
           if (cancelled) return;
           applySessionSnapshot(latestPayload.session);
@@ -491,32 +498,25 @@ export default function Home() {
         applyGraphHandoff();
         setSessionStatus({ loading: false, saving: false, error: "" });
       } catch (error) {
-        if (cancelled) return;
-        console.error("Failed to restore chat sessions:", error);
-        resetWorkflowState(initialPersonalContext);
-        applyGraphHandoff();
-        setSessionStatus({
-          loading: false,
-          saving: false,
-          error: "Could not load chat history.",
-        });
-      } finally {
-        if (!cancelled) {
-          sessionBootstrappedRef.current = true;
-          setUiReady(true);
-        }
+        throw error;
+      }
+      if (!cancelled) {
+        sessionBootstrappedRef.current = true;
+        setUiReady(true);
       }
     };
 
-    initialize();
+    initialize().catch(() => {
+      if (!cancelled) setStartupError("We couldn't load your chat and research context. Please retry.");
+    }).finally(() => { window.clearTimeout(timeout); controller.abort(); });
 
     return () => {
       cancelled = true;
-      if (sessionSaveTimerRef.current) {
-        window.clearTimeout(sessionSaveTimerRef.current);
-      }
+      controller.abort();
+      window.clearTimeout(timeout);
+      if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
     };
-  }, [applySessionSnapshot, resetWorkflowState]);
+  }, [applySessionSnapshot, resetWorkflowState, startupAttempt]);
 
   useEffect(() => {
     if (!inIframe) return undefined;
@@ -1484,11 +1484,7 @@ export default function Home() {
   }, [narrowLayout, reportSubmitting]);
 
   if (!uiReady) {
-    return (
-      <main className="chat-loading" role="status" aria-live="polite">
-        <p>Loading Ask TalentKG…</p>
-      </main>
-    );
+    return <ChatStartup error={startupError} onRetry={() => setStartupAttempt(attempt => attempt + 1)} />;
   }
 
   const hasActiveConversation = messages.length > 0 || candidates.length > 0 || phase !== PHASE.IDLE;
