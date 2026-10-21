@@ -8,9 +8,9 @@ function withMatrixAuth(headers = {}, authToken) {
   return { ...headers, "x-matrix-user-token": authToken };
 }
 
-export async function fetchAuthor(aid) {
-  const res = await fetch(matrixApiPath(`/api/author/${encodeURIComponent(aid)}`));
-  if (!res.ok) throw new Error("Author not found");
+export async function fetchAuthor(aid, signal) {
+  const res = await fetch(matrixApiPath(`/api/author/${encodeURIComponent(aid)}`), { signal });
+  if (!res.ok) { const error = new Error("Author unavailable"); error.status = res.status; throw error; }
   return res.json();
 }
 
@@ -279,20 +279,22 @@ async function readChatStream(body, onStatus) {
   throw new Error("Chat ended before an answer arrived. Try again.");
 }
 
-export async function listChatSessions({ aid, intent, authToken }) {
+export async function listChatSessions({ aid, intent, authToken, signal }) {
   const params = new URLSearchParams();
   if (aid !== undefined && aid !== null && String(aid).trim()) params.set("aid", String(aid));
   if (intent) params.set("intent", String(intent));
   const res = await fetch(matrixApiPath(`/api/chat-sessions?${params.toString()}`), {
     headers: withMatrixAuth({}, authToken),
+    signal,
   });
   if (!res.ok) throw new Error("Session list request failed");
   return res.json();
 }
 
-export async function getChatSession({ sessionId, authToken }) {
+export async function getChatSession({ sessionId, authToken, signal }) {
   const res = await fetch(matrixApiPath(`/api/chat-sessions/${encodeURIComponent(sessionId)}`), {
     headers: withMatrixAuth({}, authToken),
+    signal,
   });
   if (!res.ok) throw new Error("Session fetch failed");
   return res.json();

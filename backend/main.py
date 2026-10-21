@@ -1664,21 +1664,41 @@ async def find_people(name: str = "", limit: int = 8):
     return {"people": _find_people_by_name(name, limit)}
 
 
-@app.get("/api/author/{aid}")
-async def get_author(aid: str):
+def _get_author_summary(aid: str) -> dict:
+    """Keep the small startup response independent of publication retrieval.
+
+    Affiliation review and alias resolution are identical to full details.
+    Full research context continues to use _get_author_details.
+    """
+    from tkg_publications import primary_affiliation
     library = load_paper_library()
-    if library is not None: aid = library.canonical_author(aid)
+    if library is not None:
+        aid = library.canonical_author(aid)
     nodes = load_author_nodes()
-    if aid not in nodes and not _get_catalog_author(aid):
+    info = nodes.get(aid, {})
+    features = info.get("features", {})
+    catalog = _get_catalog_author(aid) if not features else None
+    if aid not in nodes and not catalog:
         raise HTTPException(status_code=404, detail="Author not found")
     name = _get_user_name(aid)
-    details = _get_author_details(aid)
-    return AuthorResponse(
-        id=aid,
-        name=name,
-        affiliation=details.get("affiliation", "Unknown"),
-        greeting=f"Hi {name}! What kind of collaborators are you looking for?",
-    )
+    if not features and catalog:
+        affiliation = str(catalog.get("primaryAffiliation") or "Unknown")
+        if library is not None:
+            affiliation = primary_affiliation(library.affiliations(aid, catalog.get("source_affiliations", [])))
+    elif library is not None:
+        rows = library.affiliations(aid, features.get("affiliations") or []) if aid.isdigit() else []
+        affiliation = primary_affiliation(rows)
+    else:
+        affiliation = features.get("Affiliation", "")
+    return dict(id=aid, name=name, affiliation=affiliation,
+                greeting=f"Hi {name}! What kind of collaborators are you looking for?")
+
+
+@app.get("/api/author/{aid}")
+def get_author(aid: str):
+    # FastAPI executes synchronous routes in its thread pool, so SQLite/catalog
+    # reads cannot block the event loop serving chat streams and health checks.
+    return AuthorResponse(**_get_author_summary(aid))
 
 
 class GenerateQueryRequest(BaseModel):
