@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source=fs.readFileSync('app/lib/api.js','utf8');
+const start=source.indexOf('async function readChatStream(');
+const end=source.indexOf('\nexport async function listChatSessions',start);
+const parse=vm.runInNewContext(`(${source.slice(start,end).trim()})`,{TextDecoder,Uint8Array});
+const encode=s=>new TextEncoder().encode(s);
+for(const event of ['result','error']) {
+ let cancelled=0;
+ const body=new ReadableStream({start(c){c.enqueue(encode(`event: ${event}\ndata: ${JSON.stringify(event==='result'?{reply:'Kept'}:{error:'Original error'})}\n\n`));},cancel(){cancelled++;}});
+ if(event==='result') assert.equal((await parse(body)).reply,'Kept');
+ else await assert.rejects(parse(body),/Original error/);
+ assert.equal(cancelled,1,`${event} must stop the still-open response`);
+ assert.equal(body.locked,false);
+}
+const bytes=encode('event: status\r\ndata: {"label":"检索"}\r\n\r\nevent: result\r\ndata: {"reply":"保留答案"}\r\n\r\n');
+const statuses=[];
+const chunked=new ReadableStream({start(c){for(const byte of bytes)c.enqueue(new Uint8Array([byte]));c.close();}});
+assert.equal((await parse(chunked,s=>statuses.push(s))).reply,'保留答案');
+assert.deepEqual(statuses,['检索']);assert.equal(chunked.locked,false);
+const truncated=new ReadableStream({start(c){c.enqueue(encode('event: status\ndata: {"label":"Working"}\n\n'));c.close();}});
+await assert.rejects(parse(truncated),/ended before an answer/);assert.equal(truncated.locked,false);
+const broken=new ReadableStream({start(c){c.error(new Error('Transport failed'));}});
+await assert.rejects(parse(broken),/Transport failed/);assert.equal(broken.locked,false);
+const failedCleanup=new ReadableStream({start(c){c.enqueue(encode('event: result\ndata: {"reply":"Valid"}\n\n'));},cancel(){throw new Error('Cleanup failed');}});
+assert.equal((await parse(failedCleanup)).reply,'Valid');assert.equal(failedCleanup.locked,false);
+let callbackCancelled=false;
+const callbackError=new ReadableStream({start(c){c.enqueue(encode('event: status\ndata: {"label":"Working"}\n\n'));},cancel(){callbackCancelled=true;}});
+await assert.rejects(parse(callbackError,()=>{throw new Error('Callback failed');}),/Callback failed/);
+assert.equal(callbackCancelled,true);assert.equal(callbackError.locked,false);
+console.log('PASS stream result/error cleanup, chunked UTF-8/CRLF, EOF, transport/callback errors and cleanup failure');
