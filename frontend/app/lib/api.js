@@ -249,34 +249,41 @@ export async function chatMessage({
 
 async function readChatStream(body, onStatus) {
   const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const frames = buffer.split(/\r?\n\r?\n/);
-    buffer = done ? "" : frames.pop() || "";
-    for (const frame of frames) {
-      let event = "message";
-      const data = [];
-      for (const line of frame.split(/\r?\n/)) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  try {
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = done ? "" : frames.pop() || "";
+      for (const frame of frames) {
+        let event = "message";
+        const data = [];
+        for (const line of frame.split(/\r?\n/)) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+        }
+        if (!data.length) continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(data.join("\n"));
+        } catch {
+          continue;
+        }
+        if (event === "status") onStatus?.(String(parsed.label || ""));
+        else if (event === "result") return parsed;
+        else if (event === "error") throw new Error(parsed.error || "Chat is unavailable. Try again.");
       }
-      if (!data.length) continue;
-      let parsed;
-      try {
-        parsed = JSON.parse(data.join("\n"));
-      } catch {
-        continue;
-      }
-      if (event === "status") onStatus?.(String(parsed.label || ""));
-      else if (event === "result") return parsed;
-      else if (event === "error") throw new Error(parsed.error || "Chat is unavailable. Try again.");
+      if (done) break;
     }
-    if (done) break;
+    throw new Error("Chat ended before an answer arrived. Try again.");
+  } finally {
+    // A result/error frame can arrive before the response body closes.
+    // Cleanup must not replace the answer or the original failure.
+    try { await reader.cancel(); } catch {}
+    reader.releaseLock();
   }
-  throw new Error("Chat ended before an answer arrived. Try again.");
 }
 
 export async function listChatSessions({ aid, intent, authToken, signal }) {
