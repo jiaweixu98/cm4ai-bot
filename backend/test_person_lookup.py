@@ -15,7 +15,7 @@ class PersonLookupTests(unittest.TestCase):
           'load_author_nodes':lambda:{'42':{'features':{'FullName':'Moni C. Muñoz Torres',
           'name_aliases':['Mónica Muñoz-Torres','Moni C. Muñoz Torres'], 'Bridge2AISeedAuthor':True}},
           '43':{'features':{'FullName':'Monica Muñoz Torres'}}},
-          '_get_author_details':lambda aid:{'affiliation':'Example University'}}
+          '_get_author_summary':lambda aid:{'affiliation':'Example University'}}
         exec(compile(ast.Module(body=functions,type_ignores=[]),'<lookup>','exec'),self.context)
     def test_aliases_keep_display_name_and_one_result_per_identity(self):
         for query in ['Monica Munoz Torres','Mónica Muñoz-Torres','Moni Munoz Torres']:

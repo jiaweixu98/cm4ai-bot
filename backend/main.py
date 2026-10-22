@@ -1000,7 +1000,7 @@ def _find_people_by_name(name: str, limit: int = 8) -> list[dict]:
         {
             "author_id": author_id,
             "name": full_name,
-            "affiliation": _get_author_details(author_id).get("affiliation", ""),
+            "affiliation": _get_author_summary(author_id).get("affiliation", ""),
             "is_bridge2ai_member": is_bridge2ai_member,
         }
         for _, _, full_name, author_id, affiliation, is_bridge2ai_member in list(unique.values())[:max(1, min(limit, 8))]
@@ -1660,7 +1660,7 @@ async def author_preview(req: AuthorPreviewRequest, request: Request):
 
 
 @app.get("/api/people")
-async def find_people(name: str = "", limit: int = 8):
+def find_people(name: str = "", limit: int = 8):
     return {"people": _find_people_by_name(name, limit)}
 
 
@@ -2573,7 +2573,7 @@ async def rerank(req: RerankRequest):
 
 
 @app.get("/api/graph-path/{aid}/{collaborator_id}")
-async def graph_path(aid: str, collaborator_id: str):
+def graph_path(aid: str, collaborator_id: str):
     path = _get_shortest_path(aid, collaborator_id)
     return {"path": path, "hops": len(path) - 1 if path else -1}
 
@@ -2727,7 +2727,7 @@ async def graph_explore(req: ExploreRequest):
 
 
 @app.get("/api/author/{aid}/details")
-async def author_details(aid: str):
+def author_details(aid: str):
     details = _get_author_details(aid)
     if details["name"] == "Unknown":
         raise HTTPException(status_code=404, detail="Author not found")
