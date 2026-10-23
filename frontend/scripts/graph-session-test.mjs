@@ -18,9 +18,10 @@ await assert.rejects(()=>bootstrapGraphSession({fetchImpl:async()=>{throw new Ty
 const controller=new AbortController();controller.abort();f=fixture({[auth]:[200,{token:'unused'}]});await assert.rejects(()=>bootstrapGraphSession({...f,signal:controller.signal}),{name:'AbortError'});
 f=fixture({[auth]:[200,{}]});await assert.rejects(()=>bootstrapGraphSession(f));
 const source=fs.readFileSync(new URL('../app/page.js',import.meta.url),'utf8');
-const standalone=source.slice(source.indexOf('if (!isEmbedded) {'),source.indexOf('      setIntent(nextIntent);',source.indexOf('if (!isEmbedded) {')));
+const standalone=source.slice(source.indexOf('if (!isEmbedded &&'),source.indexOf('      setIntent(nextIntent);',source.indexOf('if (!isEmbedded &&')));
 assert(standalone.indexOf('removeItem')<standalone.indexOf('await bootstrapGraphSession'));
 assert(standalone.includes('aidParam = parseAidParam(identity.authorId)'));
 assert(standalone.includes('resolvedToken = identity.token'));
 assert(standalone.includes('seekerNameParam = identity.name'));
 console.log('PASS current-cookie standalone bootstrap: ORCID, Google-only, catalog-only, unlinked, guest, malformed/session/upstream failures and abort; stale storage cleared and embedded handoff preserved');
+assert(source.includes('/^\\/matrix(?:\\/|$)/.test(window.location.pathname)'), 'root-hosted previews keep their existing entry contract');

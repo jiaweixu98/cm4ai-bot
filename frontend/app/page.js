@@ -417,9 +417,9 @@ export default function Home() {
         window.history.replaceState({}, "", nextUrl);
       }
 
-      // Standalone tabs must use the current graph cookie, not stale tab storage
+      // Graph-mounted standalone tabs use the current cookie, not stale tab storage
       // or a bookmark's author/name parameters. Embedded handoffs are unchanged.
-      if (!isEmbedded) {
+      if (!isEmbedded && /^\/matrix(?:\/|$)/.test(window.location.pathname)) {
         window.sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
         const identity = await bootstrapGraphSession({ signal: controller.signal });
         if (cancelled) return;
