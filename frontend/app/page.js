@@ -16,6 +16,7 @@ import {
 } from "./lib/api";
 import { loadResearchContext, EMPTY_RESEARCH_CONTEXT, topicContext } from "./lib/researchContext.mjs";
 import { conversationFollowUps } from "./lib/conversationFollowUps.mjs";
+import { bootstrapGraphSession } from "./lib/graphSession.mjs";
 import { contextStarters } from "./lib/contextStarters.mjs";
 import { contextChoicesForRequest, ownPublicationChoices } from "./lib/contextChoices.mjs";
 import { accountSavedPeople } from "./lib/savedPeople.mjs";
@@ -148,6 +149,20 @@ export default function Home() {
   const rerankAbortRef = useRef(null);
   const handleSendRef = useRef(null);
   const entryParamsRef = useRef(null);
+  const composerGenerationRef = useRef(0);
+  const attachmentReadsRef = useRef(new Set());
+  const resetComposer = useCallback(() => {
+    composerGenerationRef.current += 1;
+    for (const controller of attachmentReadsRef.current) controller.abort();
+    attachmentReadsRef.current.clear();
+    setAttachedPapers([]);
+    setInputValue("");
+  }, []);
+  useEffect(() => () => {
+    composerGenerationRef.current += 1;
+    for (const controller of attachmentReadsRef.current) controller.abort();
+    attachmentReadsRef.current.clear();
+  }, []);
 
   const copy = PERSONA_COPY[intent] || PERSONA_COPY.collaborator;
   const resultsCopy = PERSONA_COPY[searchIntent] || copy;
@@ -219,7 +234,7 @@ export default function Home() {
     setContextOpen(false);
     setExploreFilters(null);
     setContextChoices({ personalContext, version: 3, samePlace: false, recentYears: 0, paperScope: "chosen", paperTitles: [], selectedPapers: [], publicationScope: "eligible", publicationFilters: [] });
-    setAttachedPapers([]);
+    resetComposer();
     setGraphHandoffPersonId(null);
     setMessages([]);
     setPhase(PHASE.IDLE);
@@ -236,7 +251,7 @@ export default function Home() {
     setProfileNotice("");
     setQueuedFollowUp("");
     setFollowUps([]);
-  }, []);
+  }, [resetComposer]);
 
   const upsertSessionSummary = useCallback((session) => {
     if (!session || hiddenSessionIdsRef.current.has(session.id)) return;
@@ -276,6 +291,7 @@ export default function Home() {
   sessionSnapshotRef.current = { aid, focalName, matrixUserToken, messages, state: buildSessionStateSnapshot() };
 
   const applySessionSnapshot = useCallback((session) => {
+    resetComposer();
     if (session?.id) sessionRevisionsRef.current.set(session.id, session.revision);
     setFollowUps([]); // Suggestions belong to the last live response, not another chat.
     const snapshot = session?.state || {};
@@ -351,7 +367,7 @@ export default function Home() {
     setTimeout(() => {
       sessionHydratingRef.current = false;
     }, 0);
-  }, []);
+  }, [resetComposer]);
 
   useEffect(() => {
     let cancelled = false;
@@ -378,14 +394,14 @@ export default function Home() {
         params.delete("handoff");
         params.delete("context_person_id");
       }
-      const aidParam = parseAidParam(params.get("aid"));
+      let aidParam = parseAidParam(params.get("aid"));
       const tokenFromUrl = params.get("mx_user_token") || "";
-      const seekerNameParam = String(params.get("seeker_name") || "").trim();
+      let seekerNameParam = String(params.get("seeker_name") || "").trim();
       const storedToken =
         typeof window !== "undefined" ? window.sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || "" : "";
       const authHandoff = params.get("auth_handoff") === "1";
       params.delete("auth_handoff");
-      const resolvedToken = tokenFromUrl || (authHandoff ? "" : storedToken);
+      let resolvedToken = tokenFromUrl || (authHandoff ? "" : storedToken);
       if (authHandoff && !tokenFromUrl) window.sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
       const isEmbedded = params.get("embedded") === "1" || inBridgeIframe();
 
@@ -399,6 +415,18 @@ export default function Home() {
         const nextSearch = params.toString();
         const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
         window.history.replaceState({}, "", nextUrl);
+      }
+
+      // Graph-mounted standalone tabs use the current cookie, not stale tab storage
+      // or a bookmark's author/name parameters. Embedded handoffs are unchanged.
+      if (!isEmbedded && /^\/matrix(?:\/|$)/.test(window.location.pathname)) {
+        window.sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+        const identity = await bootstrapGraphSession({ signal: controller.signal });
+        if (cancelled) return;
+        resolvedToken = identity.token;
+        aidParam = parseAidParam(identity.authorId);
+        seekerNameParam = identity.name;
+        if (resolvedToken) window.sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, resolvedToken);
       }
 
       setIntent(nextIntent);
@@ -1331,7 +1359,22 @@ export default function Home() {
     : [];
 
   const handleAttachFiles = useCallback(async (fileList) => {
-    const { attached, skippedType, skippedSize, failedRead } = await readAttachedFiles(fileList, attachedPapers.length);
+    const generation = composerGenerationRef.current;
+    const controller = new AbortController();
+    attachmentReadsRef.current.add(controller);
+    let result;
+    try {
+      result = await readAttachedFiles(fileList, attachedPapers.length, controller.signal);
+    } catch (error) {
+      if (error?.name !== "AbortError" && generation === composerGenerationRef.current) {
+        setProfileNotice("Could not read the attachment. Please retry.");
+      }
+      return;
+    } finally {
+      attachmentReadsRef.current.delete(controller);
+    }
+    if (controller.signal.aborted || generation !== composerGenerationRef.current) return;
+    const { attached, skippedType, skippedSize, failedRead } = result;
     if (attached.length) {
       setAttachedPapers((prev) => [...prev, ...attached].slice(0, MAX_ATTACHED_FILES));
     }

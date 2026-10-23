@@ -12,7 +12,7 @@ const nextConfig = {
     // Account handlers (including dynamic researcher IDs) must run before the
     // generic backend proxy. Array rewrites run before dynamic filesystem routes.
     return {fallback:[
-      ...["research-interests", "research-topics"].map(path => ({source:`/api/${path}`,destination:`${graphUrl}/api/${path}`})),
+      ...["research-interests", "research-topics", "matrix/session-auth", "account", "node-mapping"].map(path => ({source:`/api/${path}`,destination:`${graphUrl}/api/${path}`})),
       {
         source: "/api/:path*",
         destination: `${backendUrl}/api/:path*`,

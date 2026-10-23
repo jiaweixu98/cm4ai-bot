@@ -52,8 +52,9 @@ function toBase64(file) {
   });
 }
 
-async function documentText(file) {
+async function documentText(file, signal) {
   const response = await fetch(matrixApiPath("/api/attachment-text"), {
+    signal,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ filename: file.name, data_base64: await toBase64(file) }),
@@ -63,13 +64,14 @@ async function documentText(file) {
   return String(payload.text || "");
 }
 
-export async function readAttachedFiles(fileList, existingCount = 0) {
+export async function readAttachedFiles(fileList, existingCount = 0, signal) {
   const files = Array.from(fileList || []);
   const attached = [];
   let skippedType = 0;
   let skippedSize = 0;
   let failedRead = 0;
   for (const file of files) {
+    signal?.throwIfAborted();
     if (existingCount + attached.length >= MAX_ATTACHED_FILES) break;
     const extension = extensionOf(file.name);
     const isDocument = DOCUMENT_EXTENSIONS.includes(extension);
@@ -82,7 +84,8 @@ export async function readAttachedFiles(fileList, existingCount = 0) {
       continue;
     }
     try {
-      const text = isDocument ? await documentText(file) : await file.text();
+      const text = isDocument ? await documentText(file, signal) : await file.text();
+      signal?.throwIfAborted();
       if (!text.trim()) {
         failedRead += 1;
         continue;
@@ -96,7 +99,8 @@ export async function readAttachedFiles(fileList, existingCount = 0) {
         filename: file.name,
         context: contextFromText(text),
       });
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       failedRead += 1;
     }
   }

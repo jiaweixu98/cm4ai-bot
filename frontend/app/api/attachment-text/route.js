@@ -11,6 +11,7 @@ export async function POST(request) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename: String(body.filename || ""), data_base64: String(body.data_base64 || "") }),
       cache: "no-store",
+      signal: request.signal,
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -18,6 +19,7 @@ export async function POST(request) {
     }
     return Response.json({ text: String(payload.text || "") });
   } catch (error) {
+    if (error?.name === "AbortError") return Response.json({ error: "Document reading was cancelled" }, {status: 499});
     console.error("attachment-text proxy failed:", error);
     return Response.json({ error: "Could not read this document." }, { status: 502 });
   }
